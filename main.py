@@ -156,7 +156,7 @@ def restore_defaults():
 # 1. 定义 UI 管理端 App (监听 5256)
 # ==========================================
 
-DEFAULT_PROJECT_VERSION = "v4.8.5.7"
+DEFAULT_PROJECT_VERSION = "v1.0.0.1"
 
 
 def get_project_version() -> str:
