@@ -223,6 +223,57 @@ def _build_redirect_response(direct_url: str):
     return resp
 
 
+def _format_proxy_error(error: Exception) -> str:
+    error_type = type(error).__name__
+    error_text = str(error).strip() or repr(error)
+    return f"type={error_type} error={error_text}"
+
+
+def _parse_emby_authorization(header: str) -> dict:
+    parsed = {}
+    for part in str(header or "").replace(",", " ").split():
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        parsed[key.strip().lower()] = value.strip('"').strip("'")
+    return parsed
+
+
+def _get_session_user_name(session: dict) -> str:
+    user_name = str(session.get("UserName", "") or "").strip()
+    if user_name:
+        return user_name
+    user = session.get("User")
+    if isinstance(user, dict):
+        return str(user.get("Name", "") or user.get("UserName", "") or "").strip()
+    return ""
+
+
+def _session_matches_token(session: dict, auth_token: str) -> bool:
+    if not auth_token:
+        return False
+    candidates = [
+        session.get("AccessToken"),
+        session.get("Token"),
+        session.get("ApiKey"),
+    ]
+    return any(str(candidate or "") == auth_token for candidate in candidates)
+
+
+def _session_matches_client(session: dict, auth_client: str, auth_device: str, user_agent: str) -> bool:
+    session_client = str(session.get("Client", "") or "").strip().lower()
+    session_device = str(session.get("DeviceName", "") or "").strip().lower()
+    auth_client_l = str(auth_client or "").strip().lower()
+    auth_device_l = str(auth_device or "").strip().lower()
+    if auth_client_l and session_client and auth_client_l == session_client:
+        if not auth_device_l or auth_device_l == session_device:
+            return True
+    if auth_device_l and session_device and auth_device_l == session_device:
+        return True
+    ua = str(user_agent or "").lower()
+    return bool(ua and session_client and session_client in ua)
+
+
 def _extract_pickcode_from_direct_path(path: str) -> tuple[str, str]:
     normalized = str(path or "").strip().lstrip("/")
     if not normalized.lower().startswith("d/"):
@@ -403,23 +454,12 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                 media_source_id = request.query_params.get("mediaSourceId") or request.query_params.get("MediaSourceId")
                 user_agent = request.headers.get("user-agent", "")
 
-                # 解析 Emby 授权头（获取客户端和设备信息）
+                # 解析 Emby 授权头（获取客户端、设备和 token 信息）
                 emby_auth = request.headers.get("x-emby-authorization", "")
-                auth_client = ""
-                auth_device = ""
-                auth_token = ""
-                if emby_auth:
-                    for part in emby_auth.replace(",", " ").split():
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            v = v.strip('"').strip("'")
-                            k = k.strip().lower()
-                            if k == "client":
-                                auth_client = v
-                            elif k == "device":
-                                auth_device = v
-                            elif k == "token":
-                                auth_token = v
+                parsed_auth = _parse_emby_authorization(emby_auth)
+                auth_client = parsed_auth.get("client", "")
+                auth_device = parsed_auth.get("device", "")
+                auth_token = parsed_auth.get("token", "")
 
                 if item_id:
                     # 尝试从缓存获取媒体信息
@@ -499,15 +539,34 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                                     timeout=5
                                 )
                                 if sessions_resp.status_code == 200:
-                                    for sess in sessions_resp.json():
-                                        if sess.get("NowPlayingItem", {}).get("Id") == item_id:
-                                            play_user = sess.get("UserName", "")
-                                            if not auth_client:
-                                                auth_client = sess.get("Client", "")
-                                                auth_device = sess.get("DeviceName", "")
+                                    sessions = sessions_resp.json() or []
+                                    matched_session = None
+                                    for sess in sessions:
+                                        if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                                            matched_session = sess
                                             break
-                            except Exception:
-                                pass
+                                    if matched_session is None:
+                                        for sess in sessions:
+                                            if _session_matches_token(sess, auth_token):
+                                                matched_session = sess
+                                                logger.debug(f"[Gateway-{emby_name}] 通过会话 token 匹配播放用户: {display_name}")
+                                                break
+                                    if matched_session is None:
+                                        for sess in sessions:
+                                            if _session_matches_client(sess, auth_client, auth_device, user_agent):
+                                                matched_session = sess
+                                                logger.debug(f"[Gateway-{emby_name}] 通过客户端信息匹配播放用户: {display_name}")
+                                                break
+                                    if matched_session is not None:
+                                        play_user = _get_session_user_name(matched_session)
+                                        if not auth_client:
+                                            auth_client = str(matched_session.get("Client", "") or "")
+                                        if not auth_device:
+                                            auth_device = str(matched_session.get("DeviceName", "") or "")
+                                    else:
+                                        logger.debug(f"[Gateway-{emby_name}] 未匹配到播放用户: item={item_id} sessions={len(sessions)} client={auth_client or '-'} device={auth_device or '-'}")
+                            except Exception as e:
+                                logger.debug(f"[Gateway-{emby_name}] 获取播放用户失败: {type(e).__name__} {repr(e)}")
 
                             client_info = ""
                             if auth_client:
@@ -701,6 +760,12 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
             status_code=r.status_code,
             headers=response_headers
         )
+    except asyncio.CancelledError:
+        logger.debug(f"[Gateway-{emby_name}] 转发已取消: {request.method} /{clean_path} -> {target_url}")
+        raise
+    except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.StreamClosed) as e:
+        logger.warning(f"[Gateway-{emby_name}] 转发连接中断: {request.method} /{clean_path} -> {target_url} | {_format_proxy_error(e)}")
+        return Response(f"Gateway Error: {_format_proxy_error(e)}", status_code=502)
     except Exception as e:
-        logger.error(f"[Gateway] 转发失败: {e}")
-        return Response(f"Gateway Error: {e}", status_code=502)
+        logger.error(f"[Gateway-{emby_name}] 转发失败: {request.method} /{clean_path} -> {target_url} | {_format_proxy_error(e)}")
+        return Response(f"Gateway Error: {_format_proxy_error(e)}", status_code=502)

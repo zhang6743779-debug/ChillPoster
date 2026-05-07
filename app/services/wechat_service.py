@@ -583,6 +583,7 @@ class WechatNotifyService:
             "file_size": file_size or "",
             "release_group": release_group or "",
             "elapsed": elapsed or "",
+            "now": kwargs.get("now") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         title = render_template(title_tpl, context)

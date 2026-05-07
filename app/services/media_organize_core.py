@@ -16,6 +16,7 @@ import asyncio
 import time as _time
 import threading
 import hashlib
+from datetime import datetime
 from typing import Optional, List, Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1939,6 +1940,7 @@ async def _run_organize_async(run_id: str, req):
             # === 本组 STRM + 媒体库刷新 ===
             # 直接生成 STRM（组内完成，不提交到外部线程池）
             if pending_strm_payloads and config_data.get("auto_sync_strm", False):
+                _flush_pending_library_cache_updates()
                 strm_count = await loop.run_in_executor(
                     None, _generate_strm_batch_on_organize, list(pending_strm_payloads), config_data
                 )
@@ -2172,15 +2174,21 @@ async def _run_organize_async(run_id: str, req):
             if r.get("status") == "skipped" and "SHA1 匹配" in str(r.get("message", ""))
         )
         other_skipped_count = max(0, skipped_count - sha1_duplicate_skipped_count)
-        failed_files = [r.get("file", "") for r in results if r.get("status") == "error"]
+        failed_results = [r for r in results if r.get("status") == "error"]
         elapsed = _time.time() - _org_start
         logger.info(
             f"[MediaOrganize] 整理完成: 成功 {success_count}/{total_files} | 失败 {failed_count} | "
             f"跳过 {skipped_count} (SHA1重复 {sha1_duplicate_skipped_count}, 其他 {other_skipped_count}) | "
             f"新生成STRM {strm_generated_count} | 耗时 {elapsed:.1f}s"
         )
-        if failed_files:
-            logger.warning(f"[MediaOrganize] 本次失败文件: {' | '.join(failed_files[:20])}")
+        if failed_results:
+            logger.warning(f"[MediaOrganize] 本次失败文件明细: {len(failed_results)} 个")
+            for idx, failed in enumerate(failed_results[:20], 1):
+                failed_file = str(failed.get("file", "") or "未知文件")
+                failed_reason = str(failed.get("message", "") or "未知原因")
+                logger.warning(f"[MediaOrganize] 失败 {idx}/{len(failed_results)}: {failed_file} | 原因: {failed_reason}")
+            if len(failed_results) > 20:
+                logger.warning(f"[MediaOrganize] 失败文件还有 {len(failed_results) - 20} 个未在摘要中展开")
 
         try:
             await _cleanup_empty_source_dirs(client, str(source_cid))
@@ -2278,6 +2286,7 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         "file_size": file_size,
         "release_group": variables.get("release_group", ""),
         "elapsed": f"{elapsed_seconds:.1f}秒",
+        "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "original_name": source.get("original_name" if media_type == "tv" else "original_title", ""),
     }
 
