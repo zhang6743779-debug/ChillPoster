@@ -109,6 +109,7 @@ createApp({
 
         const toolboxItems = [
             { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
+            { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
             { id: 'config_yingchao', icon: 'fa-film', label: '影巢配置', group: '工具箱' },
             { id: 'webhook', icon: 'fa-bolt-lightning', label: 'Webhook', group: '工具箱' },
         ];
@@ -141,6 +142,7 @@ createApp({
             'templates',
             'translations',
             'rss',
+            'drive115_cleanup',
             'webhook',
             'media_subscribe',
             'resource_transfer',
@@ -388,6 +390,27 @@ createApp({
         // ==========================================
         const projectVersion = ref('vdev');
         const currentUsername = ref(localStorage.getItem('username') || 'Administrator');
+        const upgradeStatus = reactive({
+            loading: false,
+            checking: false,
+            upgrading: false,
+            waitingRestart: false,
+            enabled: false,
+            available: false,
+            mode: 'auto',
+            selected_mode: '',
+            current_version: '',
+            latest_version: '',
+            update_available: false,
+            image: '',
+            compose_available: false,
+            docker_available: false,
+            compose_service: '',
+            compose_file_configured: false,
+            container_id: '',
+            message: ''
+        });
+        const upgradeForm = reactive({ password: '', confirm: '', mode: 'auto' });
 
         const loadProjectVersion = async () => {
             try {
@@ -395,6 +418,110 @@ createApp({
                 if (res.data?.version) projectVersion.value = res.data.version;
             } catch (e) { }
         };
+
+        const fetchUpgradeStatus = async (force = false) => {
+            upgradeStatus.loading = true;
+            try {
+                const res = force
+                    ? await axios.post('/api/upgrade/check', { force: true })
+                    : await axios.get('/api/upgrade/status');
+                Object.assign(upgradeStatus, res.data || {});
+                if (upgradeStatus.mode && ['auto', 'compose', 'docker'].includes(upgradeStatus.mode)) {
+                    upgradeForm.mode = upgradeStatus.mode;
+                }
+            } catch (e) {
+                upgradeStatus.available = false;
+                upgradeStatus.message = e.response?.data?.detail || e.message || '升级状态获取失败';
+            } finally {
+                upgradeStatus.loading = false;
+            }
+        };
+
+        const checkUpgrade = async () => {
+            upgradeStatus.checking = true;
+            try {
+                await fetchUpgradeStatus(true);
+                showToast(upgradeStatus.latest_version ? '版本检查完成' : '无法获取最新版本', upgradeStatus.latest_version ? 'success' : 'info');
+            } finally {
+                upgradeStatus.checking = false;
+            }
+        };
+
+        const waitForUpgradeRestart = async (previousVersion, runId) => {
+            upgradeStatus.waitingRestart = true;
+            const startedAt = Date.now();
+            let sawDisconnect = false;
+            let taskFinished = false;
+            let restartPhase = false;
+            while (Date.now() - startedAt < 10 * 60 * 1000) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                try {
+                    const progress = await axios.get('/api/progress', { timeout: 5000 });
+                    const task = runId ? progress.data?.[runId] : null;
+                    if (task?.status === 'error') {
+                        upgradeStatus.waitingRestart = false;
+                        upgradeStatus.upgrading = false;
+                        showToast(task.detail?.message || '升级任务失败', 'error');
+                        return;
+                    }
+                    if (task?.status === 'finished') taskFinished = true;
+                    if ((task?.percent || 0) >= 85 || ['recreate', 'restarting', 'done'].includes(task?.detail?.step)) {
+                        restartPhase = true;
+                    }
+                } catch (e) { }
+
+                try {
+                    const res = await axios.get('/api/version', { timeout: 5000 });
+                    const nextVersion = res.data?.version || '';
+                    if (!nextVersion) continue;
+                    if (nextVersion !== previousVersion || sawDisconnect || taskFinished) {
+                        projectVersion.value = nextVersion;
+                        upgradeStatus.waitingRestart = false;
+                        upgradeStatus.upgrading = false;
+                        upgradeForm.password = '';
+                        upgradeForm.confirm = '';
+                        await fetchUpgradeStatus(true);
+                        showToast(nextVersion !== previousVersion ? `升级完成: ${nextVersion}` : '服务已恢复，版本未变化', nextVersion !== previousVersion ? 'success' : 'info');
+                        return;
+                    }
+                    if (!restartPhase) continue;
+                } catch (e) {
+                    sawDisconnect = true;
+                    restartPhase = true;
+                }
+            }
+            upgradeStatus.waitingRestart = false;
+            upgradeStatus.upgrading = false;
+            showToast('升级命令已发出，但等待服务恢复超时，请检查容器日志', 'error');
+        };
+
+        const startUpgrade = async () => {
+            if (!upgradeForm.password) return showToast('请输入当前管理员密码', 'error');
+            if (upgradeForm.confirm !== 'UPGRADE' && upgradeForm.confirm !== '确认升级') return showToast('请输入 UPGRADE 确认升级', 'error');
+            const ok = await showConfirm('系统升级', '升级会拉取新镜像并重建容器，页面会短暂断开。确定继续吗？', 'warning');
+            if (!ok) return;
+            upgradeStatus.upgrading = true;
+            const previousVersion = projectVersion.value;
+            try {
+                const res = await axios.post('/api/upgrade/start', {
+                    password: upgradeForm.password,
+                    confirm: upgradeForm.confirm,
+                    mode: upgradeForm.mode || 'auto'
+                });
+                showToast(res.data?.message || '升级任务已启动', 'info');
+                waitForUpgradeRestart(previousVersion, res.data?.run_id || '');
+            } catch (e) {
+                upgradeStatus.upgrading = false;
+                showToast('升级启动失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const upgradeModeLabel = computed(() => {
+            const mode = upgradeStatus.selected_mode || upgradeStatus.mode || 'auto';
+            if (mode === 'compose') return 'Docker Compose';
+            if (mode === 'docker') return 'Docker 直接';
+            return '自动选择';
+        });
 
         // ==========================================
         // 1. Toast 通知系统
@@ -3546,6 +3673,25 @@ createApp({
         const layoutSchemas = ref({});
         const accountForm = reactive({ old_password: '', new_username: '', new_password: '' });
         const updatingAccount = ref(false);
+        const cleanup115Tasks = ref([]);
+        const cleanup115EditingId = ref('');
+        const showCreate115Cleanup = ref(false);
+        const cleanup115Form = reactive({
+            name: '',
+            cron: '30 3 * * *',
+            enabled: true,
+            drive_index: 0,
+            clear_recycle_bin: true,
+            folders: []
+        });
+        const cleanup115Browser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: []
+        });
 
         const directUploadImg = ref('');
 
@@ -3941,6 +4087,7 @@ createApp({
                 'library_preview':'封面备份', 'translations':'翻译配置', 'account':'账户管理',
                 'media_subscribe': '发现推荐', 'resource_transfer': '资源转存',
                 'media_organize': '媒体整理', 'media_organize_rules': '二级分类规则', 'strm_generate': 'STRM 生成',
+                'drive115_cleanup': '115 定时清空',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
                 'config_telegram': '电报配置', 'config_yingchao': '影巢配置',
                 'config_moviepilot': 'MoviePilot 配置', 'config_proxy': '代理配置',
@@ -4038,6 +4185,7 @@ createApp({
             startDashboardDeviceMetricsPolling();
             startDashboard115Polling();
             loadProjectVersion();
+            fetchUpgradeStatus();
             fetchCurrentUserInfo();
             fetchFonts(); fetchLayouts(); fetchLayoutAndPresets(); fetchSuites(); fetchTranslations(); fetchTasks(); fetchDashboardStats();
             fetchWebhookConfig();
@@ -4208,6 +4356,9 @@ createApp({
         };
 
         watch(tab, (newVal) => {
+            if (newVal === 'drive115_cleanup') {
+                fetch115CleanupTasks();
+            }
             if (newVal === 'dashboard') {
                 startDashboardDeviceMetricsPolling();
                 startDashboard115Polling();
@@ -5466,18 +5617,162 @@ createApp({
 
         const wrapVar = (v) => '{{ ' + v + ' }}';
 
-        const updateAccount = async () => { 
-            if(!accountForm.old_password || !accountForm.new_password) return showToast("请填写密码", 'error'); 
-            updatingAccount.value = true; 
-            try { 
-                await axios.post('/api/change_auth', accountForm); 
-                showToast("修改成功，请重新登录", 'success'); 
-                localStorage.setItem('username', accountForm.new_username); 
-                currentUsername.value = accountForm.new_username; 
-                setTimeout(logout, 1500); 
-            } catch (e) { showToast("修改失败", 'error'); } finally { updatingAccount.value = false; } 
+        const updateAccount = async () => {
+            if(!accountForm.old_password || !accountForm.new_password) return showToast("请填写密码", 'error');
+            updatingAccount.value = true;
+            try {
+                await axios.post('/api/change_auth', accountForm);
+                showToast("修改成功，请重新登录", 'success');
+                localStorage.setItem('username', accountForm.new_username);
+                currentUsername.value = accountForm.new_username;
+                setTimeout(logout, 1500);
+            } catch (e) { showToast("修改失败", 'error'); } finally { updatingAccount.value = false; }
         };
-        
+
+        const fetch115CleanupTasks = async () => {
+            try {
+                const res = await axios.get('/api/drive115_cleanup/tasks');
+                cleanup115Tasks.value = res.data?.tasks || [];
+            } catch (e) {
+                showToast('获取 115 定时清空任务失败', 'error');
+            }
+        };
+
+        const reset115CleanupForm = () => {
+            cleanup115EditingId.value = '';
+            cleanup115Form.name = '';
+            cleanup115Form.cron = '30 3 * * *';
+            cleanup115Form.enabled = true;
+            cleanup115Form.drive_index = 0;
+            cleanup115Form.clear_recycle_bin = true;
+            cleanup115Form.folders.splice(0);
+            cleanup115Browser.visible = false;
+        };
+
+        const openCreate115Cleanup = () => {
+            reset115CleanupForm();
+            showCreate115Cleanup.value = true;
+        };
+
+        const edit115CleanupTask = (task) => {
+            cleanup115EditingId.value = task.id || '';
+            cleanup115Form.name = task.name || '';
+            cleanup115Form.cron = task.cron || '30 3 * * *';
+            cleanup115Form.enabled = task.enabled !== false;
+            cleanup115Form.drive_index = Number(task.drive_index || 0);
+            cleanup115Form.clear_recycle_bin = task.clear_recycle_bin !== false;
+            cleanup115Form.folders.splice(0, cleanup115Form.folders.length, ...((task.folders || []).map(f => ({ ...f }))));
+            showCreate115Cleanup.value = true;
+        };
+
+        const save115CleanupTask = async () => {
+            if (!cleanup115Form.name.trim()) return showToast('请填写任务名称', 'error');
+            if (!cleanup115Form.cron.trim()) return showToast('请填写 Cron 表达式', 'error');
+            if (!cleanup115Form.folders.length) return showToast('请选择至少一个 115 文件夹', 'error');
+            try {
+                const payload = JSON.parse(JSON.stringify(cleanup115Form));
+                if (cleanup115EditingId.value) {
+                    await axios.post(`/api/drive115_cleanup/tasks/${cleanup115EditingId.value}`, payload);
+                } else {
+                    await axios.post('/api/drive115_cleanup/tasks', payload);
+                }
+                showToast('定时清空任务已保存', 'success');
+                showCreate115Cleanup.value = false;
+                reset115CleanupForm();
+                fetch115CleanupTasks();
+            } catch (e) {
+                showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const delete115CleanupTask = async (task) => {
+            const ok = await showConfirm('删除任务', `确定删除定时清空任务「${task.name}」吗？`, 'danger');
+            if (!ok) return;
+            try {
+                await axios.delete(`/api/drive115_cleanup/tasks/${task.id}`);
+                showToast('任务已删除', 'success');
+                fetch115CleanupTasks();
+            } catch (e) {
+                showToast('删除失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const toggle115CleanupTask = async (task) => {
+            try {
+                await axios.post(`/api/drive115_cleanup/tasks/${task.id}/toggle`, { enabled: task.enabled === false });
+                fetch115CleanupTasks();
+            } catch (e) {
+                showToast('切换状态失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const run115CleanupTask = async (task) => {
+            const folderText = (task.folders || []).map(f => f.path || f.name || f.cid).join('、');
+            const recycleText = task.clear_recycle_bin !== false ? '，并清空回收站，删除不可恢复' : '';
+            const ok = await showConfirm('立即清空 115 文件夹', `将清空以下目录内部内容：${folderText}${recycleText}。确定继续吗？`, 'danger');
+            if (!ok) return;
+            try {
+                const res = await axios.post(`/api/drive115_cleanup/tasks/${task.id}/run`);
+                const result = res.data?.result || {};
+                showToast(result.message || '清理完成', result.status === 'error' ? 'error' : 'success');
+                fetch115CleanupTasks();
+            } catch (e) {
+                showToast('执行失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const load115CleanupDir = async (cid = '0', path = '/') => {
+            cleanup115Browser.loading = true;
+            try {
+                const res = await axios.post('/api/drive115_cleanup/browse115', { cid, drive_index: cleanup115Form.drive_index || 0 });
+                if (res.data?.status !== 'ok') throw new Error(res.data?.message || '读取目录失败');
+                cleanup115Browser.currentCid = String(cid || '0');
+                cleanup115Browser.currentPath = path || '/';
+                cleanup115Browser.dirs = res.data.dirs || [];
+            } catch (e) {
+                showToast('浏览失败: ' + (e.message || e), 'error');
+            } finally {
+                cleanup115Browser.loading = false;
+            }
+        };
+
+        const open115CleanupBrowser = () => {
+            if (cleanup115Browser.visible) {
+                cleanup115Browser.visible = false;
+                return;
+            }
+            cleanup115Browser.visible = true;
+            cleanup115Browser.history.splice(0);
+            load115CleanupDir('0', '/');
+        };
+
+        const select115CleanupDir = (dir) => {
+            cleanup115Browser.history.push({ cid: cleanup115Browser.currentCid, path: cleanup115Browser.currentPath });
+            const nextPath = cleanup115Browser.currentPath === '/' ? `/${dir.name}` : `${cleanup115Browser.currentPath}/${dir.name}`;
+            load115CleanupDir(dir.cid, nextPath);
+        };
+
+        const cleanup115Up = () => {
+            const prev = cleanup115Browser.history.pop();
+            if (!prev) return;
+            load115CleanupDir(prev.cid, prev.path);
+        };
+
+        const addCurrent115CleanupFolder = () => {
+            if (!cleanup115Browser.currentCid || cleanup115Browser.currentCid === '0') return showToast('不能选择根目录', 'error');
+            if (cleanup115Form.folders.some(f => String(f.cid) === String(cleanup115Browser.currentCid))) return showToast('该目录已添加', 'info');
+            const path = cleanup115Browser.currentPath || cleanup115Browser.currentCid;
+            const name = path.split('/').filter(Boolean).pop() || path;
+            cleanup115Form.folders.push({ cid: cleanup115Browser.currentCid, name, path });
+            cleanup115Browser.visible = false;
+            showToast('已添加清空目录', 'success');
+        };
+
+        const remove115CleanupFolder = (cid) => {
+            const idx = cleanup115Form.folders.findIndex(f => String(f.cid) === String(cid));
+            if (idx >= 0) cleanup115Form.folders.splice(idx, 1);
+        };
+
         watch(fontList, (newList) => { const old = document.getElementById('dynamic-font-styles'); if (old) old.remove(); let css = ''; newList.forEach(f => { css += `@font-face { font-family: '${f}'; src: url('/fonts/${f}'); font-display: swap; }`; }); const s = document.createElement('style'); s.id = 'dynamic-font-styles'; s.textContent = css; document.head.appendChild(s); }, { immediate: true, deep: true });
 
         // ==========================================
@@ -6381,7 +6676,12 @@ createApp({
             selectState, handleSelect, closeSelectDialog,
             numberDialogState, handleNumberDialog, closeNumberDialog,
             projectVersion, currentUsername, stopTask,
-            
+            upgradeStatus, upgradeForm, fetchUpgradeStatus, checkUpgrade, startUpgrade, upgradeModeLabel,
+            cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,
+            fetch115CleanupTasks, openCreate115Cleanup, reset115CleanupForm, save115CleanupTask, edit115CleanupTask,
+            delete115CleanupTask, toggle115CleanupTask, run115CleanupTask, open115CleanupBrowser, select115CleanupDir,
+            cleanup115Up, addCurrent115CleanupFolder, remove115CleanupFolder,
+
             // [新增] 真实后台日志
             consoleLogState, filteredLogs, logVirtualState, logContainerRef, onLogScroll, copyLogLine,
             openConsoleLog, closeConsoleLog, reconnectConsoleLogStream, changeConsoleLogLevel, changeConsoleLogCategory, toggleConsoleAutoScroll, clearSystemLogs,

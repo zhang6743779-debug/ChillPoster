@@ -6,6 +6,7 @@ import traceback
 import inspect
 import re
 import time
+import random
 import threading
 from cachetools import TTLCache
 from p115client import P115Client
@@ -51,8 +52,10 @@ class Drive115Service:
         self._item_locks = {}
         self._locks_cleanup_lock = asyncio.Lock()
         self._direct_url_batch_lock = threading.Lock()
+        self._gateway_playback_direct_url_lock = asyncio.Lock()
 
         self._last_direct_url_batch_at = 0.0
+        self._last_gateway_playback_direct_url_at = 0.0
 
         # 全局 HTTP 客户端
         self._http_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False)
@@ -106,6 +109,18 @@ class Drive115Service:
             logger.info("[115] 已请求清理客户端缓存，但未命中现有缓存")
 
         return len(removed)
+
+    async def _run_gateway_playback_direct_url_request(self, request_name: str, request_factory):
+        async with self._gateway_playback_direct_url_lock:
+            now = time.monotonic()
+            pacing_seconds = random.uniform(1.0, 1.5)
+            wait_seconds = pacing_seconds - (now - self._last_gateway_playback_direct_url_at)
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            try:
+                return await _run_115_serial_request(request_name, request_factory)
+            finally:
+                self._last_gateway_playback_direct_url_at = time.monotonic()
 
     async def get_secondary_client(self):
         """获取或初始化小号 P115Client（用于秒传）- 支持多账号池
@@ -163,7 +178,7 @@ class Drive115Service:
     # ==========================================================
     # [修改] 增加 item_name 参数，用于优化日志显示
     # ==========================================================
-    async def get_direct_url(self, item_id: str, media_source_id: str = None, user_agent: str = "", item_name: str = None, emby_index: int = 0):
+    async def get_direct_url(self, item_id: str, media_source_id: str = None, user_agent: str = "", item_name: str = None, emby_index: int = 0, direct_link_context: str = "default"):
         """[核心入口] 获取播放直链
 
         Args:
@@ -202,13 +217,14 @@ class Drive115Service:
                     log_name=item_name if item_name else f"ID: {item_id}",
                     emby_index=emby_index,
                     filename_resolver=lambda: self._resolve_filename_for_item(item_id, media_source_id, emby_index),
+                    direct_link_context=direct_link_context,
                 )
             except Exception as e:
                 logger.error(f"[115] 获取直链异常: {e}")
                 traceback.print_exc()
                 return None
 
-    async def get_direct_url_by_pickcode(self, pickcode: str, user_agent: str = "", emby_index: int = 0, filename: str | None = None):
+    async def get_direct_url_by_pickcode(self, pickcode: str, user_agent: str = "", emby_index: int = 0, filename: str | None = None, direct_link_context: str = "default"):
         normalized_pickcode = str(pickcode or "").strip()
         if not normalized_pickcode:
             return None
@@ -232,13 +248,14 @@ class Drive115Service:
                     log_name=filename or normalized_pickcode,
                     emby_index=emby_index,
                     filename_resolver=lambda: filename or f"{normalized_pickcode}.mkv",
+                    direct_link_context=direct_link_context,
                 )
             except Exception as e:
                 logger.error(f"[115] 按 Pickcode 获取直链异常: {e}")
                 traceback.print_exc()
                 return None
 
-    async def _get_direct_url_core(self, client, drive_cfg: dict, pickcode: str, user_agent: str = "", log_name: str | None = None, emby_index: int = 0, filename_resolver=None):
+    async def _get_direct_url_core(self, client, drive_cfg: dict, pickcode: str, user_agent: str = "", log_name: str | None = None, emby_index: int = 0, filename_resolver=None, direct_link_context: str = "default"):
         drive_name = drive_cfg.get("name", f"drives[{emby_index}]")
         display_name = log_name if log_name else pickcode
 
@@ -279,7 +296,7 @@ class Drive115Service:
             if not secondary_client:
                 logger.warning("[Rapid] 小号客户端未就绪，已跳过秒传")
             else:
-                sha1_info = await self._get_file_sha1_and_preupload_info(client, pickcode, user_agent, emby_index)
+                sha1_info = await self._get_file_sha1_and_preupload_info(client, pickcode, user_agent, emby_index, direct_link_context=direct_link_context)
                 if not sha1_info:
                     logger.warning("[Rapid] 无法获取文件 SHA1 信息")
                 else:
@@ -294,7 +311,8 @@ class Drive115Service:
                         rapid_pickcode = rapid_result['pickcode']
                         rapid_url = await self._fetch_download_url(
                             rapid_pickcode, user_agent,
-                            cookie=rapid_cookie
+                            cookie=rapid_cookie,
+                            direct_link_context=direct_link_context,
                         )
 
                         if rapid_url:
@@ -321,7 +339,7 @@ class Drive115Service:
 
         if enable_sync and is_busy:
             logger.debug(f"[Sync-{drive_name}] 检测到并发播放，触发写时复制: {display_name}")
-            new_url_data = await self._sync_copy_and_get_link(client, drive_cfg, pickcode, user_agent, emby_index)
+            new_url_data = await self._sync_copy_and_get_link(client, drive_cfg, pickcode, user_agent, emby_index, direct_link_context=direct_link_context)
 
             if new_url_data:
                 new_url = new_url_data['url']
@@ -334,7 +352,7 @@ class Drive115Service:
                 logger.warning(f"[Sync-{drive_name}] 复制失败，降级使用原文件")
 
         logger.debug(f"[115-{drive_name}] 开始获取直链: {display_name}")
-        final_url = await self._fetch_download_url(pickcode, user_agent, emby_index=emby_index)
+        final_url = await self._fetch_download_url(pickcode, user_agent, emby_index=emby_index, direct_link_context=direct_link_context)
 
         if final_url:
             self._url_cache[cache_key] = final_url
@@ -396,7 +414,7 @@ class Drive115Service:
         logger.debug(f"[115-{emby_name}] Pickcode未命中")
         return None
 
-    async def _sync_copy_and_get_link(self, client, config, src_pickcode, user_agent, emby_index=None):
+    async def _sync_copy_and_get_link(self, client, config, src_pickcode, user_agent, emby_index=None, direct_link_context: str = "default"):
         """[同步] 复制文件 -> 通过文件列表获取新 Pickcode -> 获取直链
 
         Args:
@@ -483,7 +501,7 @@ class Drive115Service:
             # 6. 获取直链
             logger.debug(f"[Sync-{drive_name}] 副本就绪: {file_name}")
             logger.debug(f"[Sync-{drive_name}] 开始获取副本直链")
-            direct_url = await self._fetch_download_url(new_pickcode, user_agent, emby_index=emby_index)
+            direct_url = await self._fetch_download_url(new_pickcode, user_agent, emby_index=emby_index, direct_link_context=direct_link_context)
 
             if direct_url:
                 url_preview = direct_url[:50] + "..." if len(direct_url) > 50 else direct_url
@@ -519,7 +537,7 @@ class Drive115Service:
     # 🚀 115 秒传功能
     # ==========================================================
 
-    async def _get_file_sha1_and_preupload_info(self, client, pickcode: str, user_agent: str = "", emby_index=None):
+    async def _get_file_sha1_and_preupload_info(self, client, pickcode: str, user_agent: str = "", emby_index=None, direct_link_context: str = "default"):
         """
         获取文件的 SHA1 信息和预上传所需的验证数据（并行优化）
 
@@ -553,7 +571,7 @@ class Drive115Service:
             size = attr.get('size', 0)
 
             # 3. 获取大号直链
-            direct_url = await self._fetch_download_url(pickcode, user_agent, emby_index=emby_index)
+            direct_url = await self._fetch_download_url(pickcode, user_agent, emby_index=emby_index, direct_link_context=direct_link_context)
             if not direct_url:
                 logger.error(f"[Rapid] 无法获取大号直链: {pickcode}")
                 return None
@@ -763,7 +781,7 @@ class Drive115Service:
         client, _ = await self.get_client(resolved_emby_index)
         return client
 
-    async def _download_urls_via_client(self, pickcodes, user_agent: str = "", emby_index=None, cookie=None) -> dict[str, str]:
+    async def _download_urls_via_client(self, pickcodes, user_agent: str = "", emby_index=None, cookie=None, direct_link_context: str = "default") -> dict[str, str]:
         normalized = []
         seen = set()
         for pickcode in (pickcodes or []):
@@ -783,16 +801,17 @@ class Drive115Service:
             urls: dict[str, str] = {}
             batch_pickcodes = ",".join(normalized)
             try:
-                result = await _run_115_serial_request(
-                    "获取直链",
-                    lambda: asyncio.to_thread(
-                        client.download_url_app,
-                        {"pickcode": batch_pickcodes},
-                        user_agent=user_agent or "Mozilla/5.0",
-                        app="chrome",
-                        async_=False,
-                    ),
+                request_factory = lambda: asyncio.to_thread(
+                    client.download_url_app,
+                    {"pickcode": batch_pickcodes},
+                    user_agent=user_agent or "Mozilla/5.0",
+                    app="chrome",
+                    async_=False,
                 )
+                if direct_link_context == "gateway_playback":
+                    result = await self._run_gateway_playback_direct_url_request("获取直链", request_factory)
+                else:
+                    result = await _run_115_serial_request("获取直链", request_factory)
             except Exception as e:
                 logger.debug(f"[115] 批量获取直链失败: count={len(normalized)}, err={e}")
                 return {}
@@ -825,7 +844,7 @@ class Drive115Service:
             logger.error(f"[115] 批量获取直链异常: {e}")
             return {}
 
-    async def _fetch_download_url(self, pickcode, user_agent, cookie=None, emby_index=None):
+    async def _fetch_download_url(self, pickcode, user_agent, cookie=None, emby_index=None, direct_link_context: str = "default"):
         """通过 p115client download_url(s) 获取直链。"""
         normalized_pickcode = str(pickcode or "").strip()
         if not normalized_pickcode:
@@ -835,6 +854,7 @@ class Drive115Service:
             user_agent=user_agent,
             emby_index=emby_index,
             cookie=cookie,
+            direct_link_context=direct_link_context,
         )
         return urls.get(normalized_pickcode)
 
@@ -1225,6 +1245,150 @@ class Drive115Service:
 
         except Exception as e:
             logger.error(f"[CleanUp] 任务执行异常: {e}")
+
+    async def _clear_recycle_bin(self, cookie: str, recycle_code: str = "") -> bool:
+        try:
+            headers = {
+                "Cookie": cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin": "https://115.com",
+                "Referer": "https://115.com/",
+            }
+            data = {"password": recycle_code} if recycle_code else {}
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+                resp = await http_client.post("https://webapi.115.com/rb/clean", data=data, headers=headers)
+                payload = resp.json()
+            if payload.get("state"):
+                logger.info("[CleanUp] 回收站已清空")
+                return True
+            logger.warning(f"[CleanUp] 回收站清空失败: {payload.get('error')}")
+            return False
+        except Exception as ex_raw:
+            logger.warning(f"[CleanUp] 回收站清空异常: {ex_raw}")
+            return False
+
+    def _extract_cleanup_item_id(self, item: dict) -> int | None:
+        for key in ("fid", "cid", "id"):
+            value = item.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                item_id = int(value)
+                return item_id if item_id > 0 else None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def collect_115_folder_child_ids(self, client, folder_cid: str, folder_label: str) -> dict:
+        normalized_cid = str(folder_cid or "").strip()
+        if not normalized_cid.isdigit() or normalized_cid == "0":
+            return {"status": "error", "cid": normalized_cid, "label": folder_label, "ids": [], "message": "禁止清空根目录或无效目录"}
+
+        ids: list[int] = []
+        try:
+            from p115client.tool.iterdir import traverse_tree_with_path
+            items = await asyncio.to_thread(
+                lambda: list(traverse_tree_with_path(
+                    client,
+                    cid=int(normalized_cid),
+                    with_ancestors=True,
+                    app="android",
+                    max_workers=0,
+                ))
+            )
+            for item in items:
+                item_id = self._extract_cleanup_item_id(item)
+                if item_id and str(item_id) != normalized_cid:
+                    ids.append(item_id)
+        except Exception as e:
+            logger.warning(f"[CleanUp] 全量遍历目录失败，回退直接子项列表: {folder_label} | {e}")
+            resp = await asyncio.to_thread(client.fs_files, {"cid": int(normalized_cid), "limit": 10000})
+            file_list = resp.get("data") if isinstance(resp, dict) else []
+            for item in file_list:
+                item_id = self._extract_cleanup_item_id(item)
+                if item_id:
+                    ids.append(item_id)
+
+        unique_ids = list(dict.fromkeys(ids))
+        logger.info(f"[CleanUp] 已收集清空目标: {folder_label} | 待删 {len(unique_ids)} 项")
+        return {"status": "ok", "cid": normalized_cid, "label": folder_label, "ids": unique_ids, "message": ""}
+
+    async def _delete_115_ids_once_with_retry(self, client, ids: list[int], log_label: str):
+        if not ids:
+            return True, None
+        last_error = None
+        for attempt in range(2):
+            if attempt > 0:
+                logger.warning(f"[CleanUp] 批量删除失败，1秒后重试: {log_label}")
+                await asyncio.sleep(1)
+            try:
+                resp = await asyncio.to_thread(client.fs_delete, ids, async_=False)
+                if isinstance(resp, dict) and resp.get("state") is False:
+                    raise RuntimeError(resp)
+                return True, None
+            except Exception as e:
+                last_error = e
+        return False, last_error
+
+    async def execute_selected_folder_cleanup_task(self, task: dict, manual: bool = False) -> dict:
+        task_name = str(task.get("name") or "115定时清空").strip() or "115定时清空"
+        drive_index = int(task.get("drive_index") or 0)
+        folders = task.get("folders") if isinstance(task.get("folders"), list) else []
+        if not folders:
+            return {"status": "error", "deleted_count": 0, "message": "未选择清空目录"}
+
+        cfg = await get_config_302()
+        drives = cfg.get("drives", [])
+        if isinstance(drives, list) and drives:
+            drive_cfg = drives[drive_index] if 0 <= drive_index < len(drives) else drives[0]
+        else:
+            drive_cfg = cfg.get("drive", {})
+        cookie = str((drive_cfg or {}).get("cookie", "") or "").strip()
+        recycle_code = str((drive_cfg or {}).get("recycle_code", "") or "")
+        if not cookie:
+            return {"status": "error", "deleted_count": 0, "message": "115 Cookie 未配置"}
+
+        client = P115Client(cookie)
+        logger.info(f"[CleanUp] 开始执行定时清空: {task_name} | 目录 {len(folders)} 个 | 触发={'手动' if manual else '定时'}")
+
+        all_ids: list[int] = []
+        folder_results = []
+        for folder in folders:
+            cid = str((folder or {}).get("cid", "") or "").strip()
+            label = str((folder or {}).get("path") or (folder or {}).get("name") or cid).strip()
+            if not cid.isdigit() or cid == "0" or label in {"", "/", "根目录"}:
+                message = f"跳过无效目录: {label or cid}"
+                folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": 0, "message": message})
+                logger.warning(f"[CleanUp] {message}")
+                continue
+            result = await self.collect_115_folder_child_ids(client, cid, label)
+            folder_results.append({
+                "cid": cid,
+                "label": label,
+                "status": result.get("status"),
+                "deleted_count": len(result.get("ids") or []),
+                "message": result.get("message", ""),
+            })
+            all_ids.extend(result.get("ids") or [])
+
+        all_ids = list(dict.fromkeys(all_ids))
+        if not all_ids:
+            logger.info(f"[CleanUp] 定时清空完成: {task_name} | 没有待删除项")
+            return {"status": "ok", "deleted_count": 0, "folders": folder_results, "message": "没有待删除项"}
+
+        logger.info(f"[CleanUp] 准备批量删除: {task_name} | 总计 {len(all_ids)} 项")
+        ok, error = await self._delete_115_ids_once_with_retry(client, all_ids, f"{task_name} size={len(all_ids)}")
+        if not ok:
+            message = f"批量删除失败: {error}"
+            logger.error(f"[CleanUp] {message}")
+            return {"status": "error", "deleted_count": 0, "folders": folder_results, "message": message}
+
+        deleted_count = len(all_ids)
+        logger.info(f"[CleanUp] 定时清空完成: {task_name} | 已删除 {deleted_count} 项")
+        if task.get("clear_recycle_bin", True):
+            await self._clear_recycle_bin(cookie, recycle_code)
+        return {"status": "ok", "deleted_count": deleted_count, "folders": folder_results, "message": f"清理完成，共删除 {deleted_count} 项"}
 
     async def close(self):
         if self._http_client:

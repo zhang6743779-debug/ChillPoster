@@ -8,6 +8,7 @@ import asyncio
 import traceback
 import random
 from datetime import datetime, timedelta
+import time
 from concurrent.futures import as_completed
 from io import BytesIO
 
@@ -242,6 +243,8 @@ class TaskService:
 
         # 专门用于存储 115 清理任务的 ID，防止刷新配置时重复添加
         self.cleanup_job_ids = []
+        self.selected_cleanup_job_ids = []
+        self.selected_cleanup_running = set()
         self.daily_signin_job_id = "daily_115_signin_random"
 
     def get_tasks(self):
@@ -428,6 +431,108 @@ class TaskService:
             self.cleanup_job_ids.append(job_id)
         except Exception as e:
             logger.error(f"[启动] 清理任务添加失败: {e}")
+
+    def refresh_selected_cleanup_jobs(self):
+        for job_id in self.selected_cleanup_job_ids:
+            try:
+                self.scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        self.selected_cleanup_job_ids = []
+
+        config_path = "config/drive115_cleanup_tasks.json"
+        if not os.path.exists(config_path):
+            return
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                tasks = json.load(f)
+            if not isinstance(tasks, list):
+                tasks = []
+
+            loaded = 0
+            for task in tasks:
+                if not task.get("enabled", True):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                cron_exp = str(task.get("cron") or "").strip()
+                if not task_id or not cron_exp:
+                    continue
+                self._add_selected_cleanup_job(f"selected_cleanup_{task_id}", task)
+                loaded += 1
+            logger.info(f"[启动] 115 定时清空任务已加载: {loaded} 个")
+        except Exception as e:
+            logger.error(f"[启动] 读取 115 定时清空任务失败: {e}")
+
+    def _update_selected_cleanup_task_result(self, task_id: str, result: dict):
+        config_path = "config/drive115_cleanup_tasks.json"
+        if not os.path.exists(config_path):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                tasks = json.load(f)
+            if not isinstance(tasks, list):
+                return
+            for task in tasks:
+                if str(task.get("id") or "") == str(task_id):
+                    task["last_run_at"] = int(time.time())
+                    task["last_status"] = result.get("status")
+                    task["last_message"] = result.get("message")
+                    task["last_deleted_count"] = int(result.get("deleted_count") or 0)
+                    break
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(tasks, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[CleanUp] 更新定时清空任务结果失败: {e}")
+
+    def run_selected_cleanup_task(self, task: dict, manual: bool = False):
+        task_id = str(task.get("id") or "").strip()
+        if not task_id:
+            return {"status": "error", "message": "任务 ID 为空", "deleted_count": 0}
+        if task_id in self.selected_cleanup_running:
+            logger.warning(f"[CleanUp] 定时清空任务正在运行，跳过: {task.get('name') or task_id}")
+            return {"status": "skipped", "message": "任务正在运行", "deleted_count": 0}
+
+        self.selected_cleanup_running.add(task_id)
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            if loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    drive115_service.execute_selected_folder_cleanup_task(task, manual=manual),
+                    loop,
+                )
+                result = future.result()
+            else:
+                result = loop.run_until_complete(drive115_service.execute_selected_folder_cleanup_task(task, manual=manual))
+            self._update_selected_cleanup_task_result(task_id, result)
+            return result
+        except Exception as e:
+            logger.error(f"[CleanUp] 定时清空任务执行异常: {e}")
+            result = {"status": "error", "message": str(e), "deleted_count": 0}
+            self._update_selected_cleanup_task_result(task_id, result)
+            return result
+        finally:
+            self.selected_cleanup_running.discard(task_id)
+
+    def _add_selected_cleanup_job(self, job_id: str, task: dict):
+        def cleanup_wrapper():
+            self.run_selected_cleanup_task(task, manual=False)
+
+        try:
+            self.scheduler.add_job(
+                cleanup_wrapper,
+                CronTrigger.from_crontab(str(task.get("cron") or "")),
+                id=job_id,
+                replace_existing=True,
+            )
+            self.selected_cleanup_job_ids.append(job_id)
+        except Exception as e:
+            logger.error(f"[启动] 115 定时清空任务添加失败: {e}")
 
     def schedule_daily_signin_job(self):
         next_run_time = self._compute_next_signin_datetime()

@@ -519,7 +519,8 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                         media_source_id,
                         user_agent,
                         item_name=display_name,
-                        emby_index=emby_index
+                        emby_index=emby_index,
+                        direct_link_context="gateway_playback"
                     )
 
                     if direct_url:
@@ -644,6 +645,7 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                     user_agent=user_agent,
                     emby_index=emby_index,
                     filename=display_name,
+                    direct_link_context="gateway_playback",
                 )
                 if direct_url:
                     if redirect_cache_key not in strm_redirect_cache:

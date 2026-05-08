@@ -58,11 +58,11 @@ class LifeEventMonitor:
                 logger.warning("[115Life] 监控已在运行中")
                 return True
 
-            logger.info("[115Life] 生活事件状态检查中...")
+            logger.debug("[115Life] 生活事件状态检查中...")
             if not self._life_client.check_status():
                 logger.error("[115Life] 生活事件状态检查失败，无法启动监控")
                 return False
-            logger.info("[115Life] 生活事件状态检查通过")
+            logger.debug("[115Life] 生活事件状态检查通过")
 
             self._from_id = 0
             self._from_time = 0.0
@@ -71,7 +71,12 @@ class LifeEventMonitor:
             elif self._start_mode == "latest":
                 self._from_time = time()
 
-            logger.info(f"[115Life] 起始模式={self._start_mode}, from_id={self._from_id}, from_time={self._from_time}")
+            if self._start_mode == "latest":
+                logger.info("[115Life] 监控起始点: 从当前时间开始，只处理新事件")
+            elif self._start_mode == "last":
+                logger.info("[115Life] 监控起始点: 从上次保存的位置继续")
+            else:
+                logger.debug(f"[115Life] 监控起始点: mode={self._start_mode}, from_id={self._from_id}, from_time={self._from_time}")
 
             self._running = True
             self._stop_event.clear()
@@ -104,7 +109,7 @@ class LifeEventMonitor:
             logger.info("[115Life] 监控已停止")
 
     def _worker_loop(self) -> None:
-        logger.info("[115Life] 轮询线程已启动")
+        logger.debug("[115Life] 轮询线程已启动")
         try:
             while not self._stop_event.is_set():
                 try:
@@ -333,7 +338,7 @@ class LifeEventMonitor:
                 logger.error(f"[115Life] 回调执行异常: {e}")
 
     def _guard_loop(self) -> None:
-        logger.info("[115Life] 守护线程已启动")
+        logger.debug("[115Life] 守护线程已启动")
         save_counter = 0
         while not self._stop_event.is_set():
             if self._stop_event.wait(timeout=60):
@@ -381,7 +386,7 @@ class LifeEventMonitor:
                 if saved_from_id or saved_from_time:
                     self._from_id = int(saved_from_id)
                     self._from_time = float(saved_from_time)
-                    logger.info(f"[115Life] 已恢复上次状态: from_id={self._from_id}, from_time={self._from_time}")
+                    logger.debug(f"[115Life] 已恢复上次状态: from_id={self._from_id}, from_time={self._from_time}")
         except Exception as e:
             logger.warning(f"[115Life] 状态加载失败: {e}")
 

@@ -3784,10 +3784,6 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
 
         deleted_files = 0
         deleted_dirs = 0
-        batch_size = 100
-        current_depth = None
-        batch: list[tuple[str, str, bool]] = []
-
         def _is_delete_pending_error(err) -> bool:
             err_str = str(err)
             return "操作尚未执行完成" in err_str or "990009" in err_str
@@ -3820,12 +3816,8 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
             batch_ids = [int(did) for did, _, _ in items]
             ok, error = await _delete_ids_with_retry(batch_ids, f"batch size={len(items)}")
             if ok:
-                for did, path, is_dir in items:
-                    if is_dir:
-                        deleted_dirs += 1
-                    else:
-                        deleted_files += 1
-                    logger.debug(f"[MediaOrganize] 批量删除{'目录' if is_dir else '文件'}: {path}")
+                deleted_dirs += sum(1 for _, _, is_dir in items if is_dir)
+                deleted_files += sum(1 for _, _, is_dir in items if not is_dir)
                 logger.info(f"[MediaOrganize] 批量删除成功: {len(items)} 项")
             else:
                 logger.warning(f"[MediaOrganize] 批量删除失败，回退逐条处理: {error}")
@@ -3851,17 +3843,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                         logger.warning(f"[MediaOrganize] 删除{label}失败 {path}: {inner_error}")
             await asyncio.sleep(1)
 
-        for did, path, is_dir in to_delete:
-            depth = path.count("/")
-            if current_depth is None:
-                current_depth = depth
-            if depth != current_depth or len(batch) >= batch_size:
-                await _flush_batch(batch)
-                batch = []
-                current_depth = depth
-            batch.append((did, path, is_dir))
-
-        await _flush_batch(batch)
+        await _flush_batch(to_delete)
 
         parts = []
         if deleted_files:

@@ -661,6 +661,128 @@
                         </div>
                     </div>
                     
+                    <div v-else-if="tab === 'drive115_cleanup'" key="drive115_cleanup" class="scroll-view">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <h2>115 定时清空</h2>
+                                <button class="btn btn-primary" @click="showCreate115Cleanup ? (showCreate115Cleanup = false) : openCreate115Cleanup()">
+                                    <i class="fa-solid" :class="showCreate115Cleanup ? 'fa-minus' : 'fa-plus'"></i>
+                                    {{ showCreate115Cleanup ? '收起配置' : '新建清空任务' }}
+                                </button>
+                            </div>
+
+                            <div class="info-alert-box mb-20">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <div class="info-content">
+                                    <div class="info-alert-box-title">危险操作说明</div>
+                                    本工具只会清空所选 115 文件夹内部的文件和子目录，不删除所选文件夹本身；禁止选择根目录。若开启清空回收站，删除后将不可恢复。
+                                </div>
+                            </div>
+
+                            <transition name="slide">
+                                <div v-if="showCreate115Cleanup" class="card card-accent mb-20">
+                                    <div class="card-header">
+                                        <div class="card-title-l"><i class="fa-solid fa-broom"></i> {{ cleanup115EditingId ? '编辑清空任务' : '配置清空任务' }}</div>
+                                        <button class="btn btn-ghost btn-sm" @click="showCreate115Cleanup=false; reset115CleanupForm()">取消</button>
+                                    </div>
+
+                                    <div class="form-grid-2-tight">
+                                        <div>
+                                            <label>任务名称</label>
+                                            <input v-model="cleanup115Form.name" placeholder="例如：清空临时转存目录">
+                                        </div>
+                                        <div>
+                                            <label>Cron 表达式</label>
+                                            <input v-model="cleanup115Form.cron" placeholder="30 3 * * *">
+                                        </div>
+                                    </div>
+
+                                    <div class="module-card-actions-split mt-15">
+                                        <label class="ios-switch" title="启停任务">
+                                            <input type="checkbox" v-model="cleanup115Form.enabled">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">启用定时任务</span>
+                                        <div class="module-card-divider"></div>
+                                        <label class="ios-switch" title="清空回收站">
+                                            <input type="checkbox" v-model="cleanup115Form.clear_recycle_bin">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">删除后清空回收站</span>
+                                    </div>
+
+                                    <div class="cleanup-folder-section mt-20">
+                                        <div class="inline-label-row">
+                                            <label>清空目录</label>
+                                            <button class="btn btn-ghost btn-sm" @click="open115CleanupBrowser">
+                                                <i class="fa-solid" :class="cleanup115Browser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                {{ cleanup115Browser.visible ? '关闭浏览' : '浏览 115 文件夹' }}
+                                            </button>
+                                        </div>
+                                        <div v-if="cleanup115Form.folders.length === 0" class="empty-state-card cleanup-empty">尚未选择目录</div>
+                                        <div v-else class="cleanup-folder-list">
+                                            <div v-for="folder in cleanup115Form.folders" :key="folder.cid" class="cleanup-folder-chip">
+                                                <div>
+                                                    <strong>{{ folder.path || folder.name }}</strong>
+                                                    <span>CID: {{ folder.cid }}</span>
+                                                </div>
+                                                <button class="icon-btn danger" @click="remove115CleanupFolder(folder.cid)"><i class="fa-solid fa-xmark"></i></button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="cleanup115Browser.visible" class="cleanup-browser mt-15">
+                                        <div class="cleanup-browser-header">
+                                            <button class="btn btn-ghost btn-sm" @click="cleanup115Up" :disabled="cleanup115Browser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ cleanup115Browser.currentPath }}</span>
+                                            <button class="btn btn-primary btn-sm" @click="addCurrent115CleanupFolder" :disabled="cleanup115Browser.currentCid === '0'">选择当前目录</button>
+                                            <button class="btn btn-ghost btn-sm" @click="cleanup115Browser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="cleanup115Browser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="cleanup115Browser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                            <div v-else v-for="dir in cleanup115Browser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="select115CleanupDir(dir)">
+                                                <i class="fa-solid fa-folder"></i>
+                                                <span>{{ dir.name }}</span>
+                                                <i class="fa-solid fa-chevron-right"></i>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-actions-end">
+                                        <button class="btn btn-primary" @click="save115CleanupTask"><i class="fa-solid fa-save"></i> 保存任务</button>
+                                    </div>
+                                </div>
+                            </transition>
+
+                            <div class="server-grid-layout server-grid-layout-single">
+                                <div v-for="task in cleanup115Tasks" :key="task.id" class="module-card">
+                                    <div class="mc-header">
+                                        <div class="mc-title"><i class="fa-solid fa-broom"></i> {{ task.name }}</div>
+                                        <div class="module-card-actions-split">
+                                            <label class="ios-switch" title="启停任务">
+                                                <input type="checkbox" :checked="task.enabled !== false" @change="toggle115CleanupTask(task)">
+                                                <span class="ios-slider"></span>
+                                            </label>
+                                            <button class="icon-btn icon-btn-success" @click="run115CleanupTask(task)" title="立即运行"><i class="fa-solid fa-play"></i></button>
+                                            <button class="icon-btn" @click="edit115CleanupTask(task)" title="编辑"><i class="fa-solid fa-pen"></i></button>
+                                            <button class="icon-btn danger" @click="delete115CleanupTask(task)" title="删除"><i class="fa-solid fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                    <div class="mc-body mc-body-compact">
+                                        <div class="meta-row"><strong>Cron:</strong> {{ task.cron }}</div>
+                                        <div class="meta-row"><strong>目录:</strong> {{ (task.folders || []).map(f => f.path || f.name).join('、') }}</div>
+                                        <div class="meta-row"><strong>回收站:</strong> {{ task.clear_recycle_bin !== false ? '删除后清空' : '不清空' }}</div>
+                                        <div class="meta-row" v-if="task.last_status">
+                                            <strong>上次运行:</strong> {{ task.last_status }}，删除 {{ task.last_deleted_count || 0 }} 项 {{ task.last_message ? '｜' + task.last_message : '' }}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div v-if="cleanup115Tasks.length === 0" class="empty-state-card">暂无定时清空任务</div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'webhook'" key="webhook" class="scroll-view">
                         <div class="content-shell shell-md">
 
@@ -2950,6 +3072,72 @@
                                         <div class="info-alert-box-title">安全提示</div>
                                         修改用户名或密码后，当前的登录会话将立即失效，系统会自动跳转至登录页，请使用新账号重新登录。
                                     </div>
+                                </div>
+                            </div>
+
+                            <div class="card mt-20">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-cloud-arrow-up"></i> 系统升级</div>
+                                    <button class="btn btn-ghost btn-sm" @click="checkUpgrade" :disabled="upgradeStatus.checking || upgradeStatus.loading">
+                                        <i class="fa-solid" :class="upgradeStatus.checking ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 检查更新
+                                    </button>
+                                </div>
+
+                                <div class="upgrade-status-grid">
+                                    <div class="upgrade-meta-item"><span>当前版本</span><strong>{{ projectVersion }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>最新版本</span><strong>{{ upgradeStatus.latest_version || '未知' }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>升级模式</span><strong>{{ upgradeModeLabel }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>镜像</span><strong>{{ upgradeStatus.image || 'chillne/chillposter:latest' }}</strong></div>
+                                </div>
+
+                                <div class="upgrade-mode-row">
+                                    <span class="upgrade-badge" :class="upgradeStatus.enabled ? 'ok' : 'warn'">
+                                        {{ upgradeStatus.enabled ? '升级已启用' : '升级未启用' }}
+                                    </span>
+                                    <span class="upgrade-badge" :class="upgradeStatus.docker_available ? 'ok' : 'warn'">
+                                        Docker {{ upgradeStatus.docker_available ? '可用' : '不可用' }}
+                                    </span>
+                                    <span class="upgrade-badge" :class="upgradeStatus.compose_available ? 'ok' : 'muted'">
+                                        Compose {{ upgradeStatus.compose_available ? '可用' : '未配置/不可用' }}
+                                    </span>
+                                    <span v-if="upgradeStatus.update_available" class="upgrade-badge ok">发现新版本</span>
+                                </div>
+
+                                <div v-if="upgradeStatus.message" class="info-alert-box info-alert-box-compact mt-15">
+                                    <i class="fa-solid fa-circle-info"></i>
+                                    <div class="info-content">{{ upgradeStatus.message }}</div>
+                                </div>
+
+                                <div class="info-alert-box info-alert-box-compact mt-15">
+                                    <i class="fa-solid fa-triangle-exclamation"></i>
+                                    <div class="info-content">
+                                        一键升级需要挂载 <span class="highlight">/var/run/docker.sock</span> 并设置 <span class="highlight">CHILLPOSTER_UPGRADE_ENABLED=true</span>。Docker 直接模式会按当前容器配置重建自身；Compose 模式会优先使用配置的 compose 服务。
+                                    </div>
+                                </div>
+
+                                <div class="form-grid-2-tight mt-15">
+                                    <div>
+                                        <label>升级模式</label>
+                                        <select v-model="upgradeForm.mode">
+                                            <option value="auto">自动选择</option>
+                                            <option value="compose">Docker Compose</option>
+                                            <option value="docker">Docker 直接</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label>当前管理员密码</label>
+                                        <input type="password" v-model="upgradeForm.password" placeholder="用于确认管理员操作">
+                                    </div>
+                                </div>
+
+                                <label class="mt-15">确认文字</label>
+                                <input type="text" v-model="upgradeForm.confirm" placeholder="输入 UPGRADE 确认升级">
+
+                                <div class="form-actions-right">
+                                    <button class="btn btn-primary" @click="startUpgrade" :disabled="!upgradeStatus.available || upgradeStatus.upgrading || upgradeStatus.waitingRestart">
+                                        <i class="fa-solid" :class="(upgradeStatus.upgrading || upgradeStatus.waitingRestart) ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-up'"></i>
+                                        {{ upgradeStatus.waitingRestart ? '等待服务恢复...' : (upgradeStatus.upgrading ? '升级中...' : '一键升级') }}
+                                    </button>
                                 </div>
                             </div>
                         </div>

@@ -48,6 +48,8 @@ def _infer_task_type(run_id, name=""):
         return "media_organize"
     if run_id_str.startswith("rss_run_") or task_name.startswith("RSS"):
         return "rss"
+    if run_id_str.startswith("upgrade_") or "升级" in task_name:
+        return "upgrade"
     if task_name.startswith("STRM"):
         return "strm"
     if "备份" in task_name:

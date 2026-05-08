@@ -51,6 +51,8 @@ from app.routers import moviepilot
 from app.routers import transfer
 from app.routers import strm
 from app.routers import media_organize
+from app.routers import upgrade
+from app.routers import drive115_cleanup
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -200,6 +202,7 @@ async def lifespan_ui(app: FastAPI):
 
     task_service_instance.scheduler.start()
     task_service_instance.refresh_cleanup_jobs()
+    task_service_instance.refresh_selected_cleanup_jobs()
     task_service_instance.schedule_daily_signin_job()
     task_service_instance.load_active_jobs()
     rss_service_instance.load_active_jobs()
@@ -305,6 +308,8 @@ app.include_router(moviepilot.router)
 app.include_router(transfer.router)
 app.include_router(strm.router)
 app.include_router(media_organize.router)
+app.include_router(upgrade.router)
+app.include_router(drive115_cleanup.router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")
