@@ -422,6 +422,13 @@ class WechatNotifyService:
                 return raw_url
             return ""
 
+        # TMDb 图片 → 内部代理
+        if raw_url and "image.tmdb.org/t/p/" in raw_url:
+            import re
+            m = re.search(r"/t/p/\w+(/[^?]+)", raw_url)
+            if m:
+                return f"{base}/api/discover/tmdb_img?path={m.group(1)}"
+
         # 有 item_id → 生成 emby_cover 签名代理 URL
         if item_id:
             secret = ""
@@ -436,14 +443,16 @@ class WechatNotifyService:
                 sig = _hmac.new(secret.encode(), msg.encode(), _hashlib.sha256).hexdigest()
                 return f"{base}/api/discover/emby_cover?server_idx={server_idx}&item_id={item_id}&ts={ts}&sig={sig}"
 
-        # TMDb 图片 → 内部代理
-        if raw_url and "image.tmdb.org/t/p/" in raw_url:
-            import re
-            m = re.search(r"/t/p/\w+(/[^?]+)", raw_url)
-            if m:
-                return f"{base}/api/discover/tmdb_img?path={m.group(1)}"
-
         return raw_url or ""
+
+    def _get_notification_image_url(self, *, search_name: str, media_type: str = "movie",
+                                    year: str = "", tmdb_id: str = "", fallback_url: str = "",
+                                    server_idx: int = 0, item_id: str = "") -> str:
+        tmdb_url = self._get_media_backdrop_url(search_name, media_type, year=year, tmdb_id=tmdb_id)
+        image_url = self._to_wechat_image_url(tmdb_url)
+        if image_url:
+            return image_url
+        return self._to_wechat_image_url(fallback_url, server_idx, item_id)
 
     def notify_playback(self, item_name: str, emby_name: str = "Emby",
                         user_agent: str = "", poster_url: str = "",
@@ -485,14 +494,18 @@ class WechatNotifyService:
 
         server_idx = kwargs.get("server_idx", 0)
         item_id = kwargs.get("item_id", "")
-        image_url = self._to_wechat_image_url(poster_url, server_idx, item_id)
-        if not image_url:
-            import re
-            search_name = original_name or item_name.replace("🎬 ", "").replace("📺 ", "").split(" S")[0]
-            search_name = re.sub(r'\s*\(\d{4}\)\s*$', '', search_name).strip()
-            image_url = self._to_wechat_image_url(
-                self._get_media_backdrop_url(search_name, media_type, year=year, tmdb_id=tmdb_id)
-            )
+        import re
+        search_name = original_name or item_name.replace("🎬 ", "").replace("📺 ", "").split(" S")[0]
+        search_name = re.sub(r'\s*\(\d{4}\)\s*$', '', search_name).strip()
+        image_url = self._get_notification_image_url(
+            search_name=search_name,
+            media_type=media_type,
+            year=year,
+            tmdb_id=tmdb_id,
+            fallback_url=poster_url,
+            server_idx=server_idx,
+            item_id=item_id,
+        )
 
         return self.send_news_message(title=title, description=description, image_url=image_url)
 
@@ -540,15 +553,18 @@ class WechatNotifyService:
         title = render_template(title_tpl, context)
         description = render_template(text_tpl, context)
 
-        # 优先用 Emby 实图代理，否则转 TMDb 内部代理
         server_idx = kwargs.get("server_idx", 0)
         item_id = kwargs.get("item_id", "")
-        image_url = self._to_wechat_image_url(poster_url, server_idx, item_id)
-        if not image_url:
-            search_name = original_name or media_name.split(" S")[0]
-            image_url = self._to_wechat_image_url(
-                self._get_media_backdrop_url(search_name, media_type, year, tmdb_id)
-            )
+        search_name = original_name or media_name.split(" S")[0]
+        image_url = self._get_notification_image_url(
+            search_name=search_name,
+            media_type=media_type,
+            year=year,
+            tmdb_id=tmdb_id,
+            fallback_url=poster_url,
+            server_idx=server_idx,
+            item_id=item_id,
+        )
 
         return self.send_news_message(title=title, description=description, image_url=image_url)
 
@@ -590,8 +606,11 @@ class WechatNotifyService:
         description = render_template(text_tpl, context)
 
         search_name = original_name or media_name.split(" S")[0]
-        image_url = self._to_wechat_image_url(
-            self._get_media_backdrop_url(search_name, media_type, year, tmdb_id)
+        image_url = self._get_notification_image_url(
+            search_name=search_name,
+            media_type=media_type,
+            year=year,
+            tmdb_id=tmdb_id,
         )
 
         return self.send_news_message(title=title, description=description, image_url=image_url)
@@ -706,6 +725,7 @@ class WechatNotifyService:
             "trigger": trigger or "",
             "summary": summary or "",
             "accounts_text": accounts_text or "",
+            "poster_url": poster_url or "",
             "now": now,
         }
 

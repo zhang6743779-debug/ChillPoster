@@ -152,6 +152,10 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
                     base = global_config.app_public_base_url
                     server_idx = t.get("server_idx", 0)
                     poster_url = build_emby_cover_url(base, server_idx, t['library_id'], secret) if base and secret else ""
+                    if poster_url:
+                        logger.info(f"[任务] Webhook封面通知图片: {t.get('library_name', '')} -> {poster_url}")
+                    else:
+                        logger.warning(f"[任务] Webhook封面通知图片为空: base={'已配置' if base else '未配置'}, secret={'已配置' if secret else '未配置'}")
                 else:
                     poster_url = ""
                 return {"success": True, "poster_url": poster_url}

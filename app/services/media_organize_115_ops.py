@@ -201,11 +201,27 @@ def _mkdir_115_dir(client, parent_cid: str, name: str, task_key: str = "", dir_p
 def _ensure_115_dir_chain_cached(client, base_cid: str, category_path: str,
                                   dir_chain_cache: dict, task_key: str = "", base_path: str = "") -> str:
     """按 category_path（如 '动漫/动画电影/国产'）逐级创建目录链。"""
+    normalized_base_path = str(base_path or "").strip().rstrip("/")
+    normalized_category_path = "/".join(
+        part.strip().strip("/")
+        for part in str(category_path or "").split("/")
+        if part.strip().strip("/")
+    )
+    cache_key = (str(task_key or ""), str(base_cid), normalized_base_path, normalized_category_path)
+
+    if dir_chain_cache is not None:
+        cached_cid = str(dir_chain_cache.get(cache_key, "") or "")
+        if cached_cid:
+            logger.debug(f"[CategoryDir] 目录链命中任务缓存: {normalized_category_path} (cid={cached_cid})")
+            return cached_cid
+
     current_parent_cid = str(base_cid)
-    current_path = str(base_path or "").strip().rstrip("/")
+    current_path = normalized_base_path
     final_cid = ""
 
-    for segment in [part.strip().strip("/") for part in str(category_path or "").split("/") if part.strip().strip("/")]:
+    for segment in normalized_category_path.split("/"):
+        if not segment:
+            continue
         dir_path = f"{current_path}/{segment}" if current_path else segment
         child_cid, child_pickcode = _mkdir_115_dir(
             client,
@@ -219,7 +235,9 @@ def _ensure_115_dir_chain_cached(client, base_cid: str, category_path: str,
         final_cid = str(child_cid)
 
     if final_cid:
-        logger.debug(f"[CategoryDir] 目录链已确认: {category_path} (cid={final_cid})")
+        if dir_chain_cache is not None:
+            dir_chain_cache[cache_key] = final_cid
+        logger.debug(f"[CategoryDir] 目录链已确认: {normalized_category_path} (cid={final_cid})")
         return final_cid
 
     raise RuntimeError(f"创建分类目录失败: {category_path}")

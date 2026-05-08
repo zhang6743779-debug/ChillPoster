@@ -606,10 +606,53 @@ async def _resolve_wash_media_info(file_item: dict, parsed: dict, drive_index: i
     return info
 
 
+def _build_library_candidate_index(library_items: dict) -> dict:
+    index = {"movie": {}, "tv": {}}
+    for item in (library_items or {}).values():
+        if not _is_video_cache_item(item):
+            continue
+        folder_path = _remote_dirname(item.get("path", ""))
+        if not folder_path:
+            continue
+        index["movie"].setdefault(folder_path, []).append(item)
+        parsed = _parse_filename(str(item.get("name", "") or ""), media_type_hint="tv", file_path=str(item.get("path", "") or "")) or {}
+        season = parsed.get("season")
+        episode = parsed.get("episode")
+        if season is not None and episode is not None:
+            index["tv"].setdefault((folder_path, season, episode), []).append(item)
+    return index
+
+
+def _remove_from_library_candidate_index(candidate_index: dict, item: dict) -> None:
+    if not candidate_index or not item:
+        return
+    folder_path = _remote_dirname(item.get("path", ""))
+    if not folder_path:
+        return
+    movie_items = candidate_index.get("movie", {}).get(folder_path)
+    if movie_items:
+        candidate_index["movie"][folder_path] = [candidate for candidate in movie_items if candidate is not item]
+    parsed = _parse_filename(str(item.get("name", "") or ""), media_type_hint="tv", file_path=str(item.get("path", "") or "")) or {}
+    season = parsed.get("season")
+    episode = parsed.get("episode")
+    if season is None or episode is None:
+        return
+    tv_key = (folder_path, season, episode)
+    tv_items = candidate_index.get("tv", {}).get(tv_key)
+    if tv_items:
+        candidate_index["tv"][tv_key] = [candidate for candidate in tv_items if candidate is not item]
+
+
 def _find_existing_library_candidates(library_items: dict, media_type: str, folder_path: str,
-                                      season_number: Optional[int] = None, episode_number: Optional[int] = None) -> list[dict]:
-    candidates = []
+                                      season_number: Optional[int] = None, episode_number: Optional[int] = None,
+                                      candidate_index: dict | None = None) -> list[dict]:
     normalized_folder_path = _normalize_remote_path(folder_path)
+    if candidate_index is not None:
+        if media_type == "tv":
+            return list(candidate_index.get("tv", {}).get((normalized_folder_path, season_number, episode_number), []))
+        return list(candidate_index.get("movie", {}).get(normalized_folder_path, []))
+
+    candidates = []
     for item in (library_items or {}).values():
         if not _is_video_cache_item(item):
             continue
@@ -706,7 +749,8 @@ def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, 
 async def _evaluate_library_replacement(config_data: dict, library_items: dict, drive_index: int,
                                         media_type: str, season_number: Optional[int],
                                         episode_number: Optional[int], target_base: str,
-                                        file_item: dict, parsed: dict, variables: dict, ext: str) -> dict:
+                                        file_item: dict, parsed: dict, variables: dict, ext: str,
+                                        candidate_index: dict | None = None) -> dict:
     if not (config_data.get("wash_enabled") and config_data.get("wash_by_equivalent_size")):
         return {"decision": "disabled"}
 
@@ -728,7 +772,14 @@ async def _evaluate_library_replacement(config_data: dict, library_items: dict, 
         rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
         expected_name = _render_template(rename_format, variables) + ext
 
-    candidates = _find_existing_library_candidates(library_items, media_type, candidate_dir, season_number, episode_number)
+    candidates = _find_existing_library_candidates(
+        library_items,
+        media_type,
+        candidate_dir,
+        season_number,
+        episode_number,
+        candidate_index=candidate_index,
+    )
     candidate, match_reason = _select_existing_candidate(candidates, expected_name=expected_name)
     if not candidate:
         if match_reason == "no_candidate":
@@ -795,17 +846,14 @@ async def _dedupe_pending_tv_plan_item(config_data: dict, drive_index: int, pend
         return True, None, "wash_disabled"
 
     batch_entry = pending_tv_batches.get(batch_key) or {}
-    plan_items = batch_entry.get("items") or []
     season_num = incoming_plan.get("season_num")
     episode_num = incoming_plan.get("episode_num")
     if season_num is None or episode_num is None:
         return True, None, "missing_season_or_episode"
 
-    existing_plan = None
-    for item in plan_items:
-        if item.get("season_num") == season_num and item.get("episode_num") == episode_num:
-            existing_plan = item
-            break
+    episode_key = (season_num, episode_num)
+    item_index = batch_entry.get("item_index") or {}
+    existing_plan = item_index.get(episode_key)
     if not existing_plan:
         return True, None, "no_duplicate"
 
@@ -1264,6 +1312,8 @@ async def _run_organize_async(run_id: str, req):
         from app.services.category_matcher import CategoryMatcher
         _category_matcher = CategoryMatcher()
         _dir_chain_cache: dict = {}
+        _category_match_cache: dict = {}
+        _library_candidate_index = _build_library_candidate_index(library_items)
         _tv_summary_logged: set[str] = set()
         if target_sha1_set:
             logger.debug(f"[MediaOrganize] 已加载媒体库缓存SHA1: {len(target_sha1_set)} 个 | task={library_task_key}")
@@ -1342,6 +1392,7 @@ async def _run_organize_async(run_id: str, req):
                 logger.debug("[MediaOrganize] FFPROBE智能懒加载取链: 按需获取")
 
             _title_cache = {}
+            _recognition_summary_logged: set[tuple] = set()
             for group_index, (vf, parsed, ext) in enumerate(group, 1):
                 file_name = vf["name"]
                 file_item = vf
@@ -1386,9 +1437,20 @@ async def _run_organize_async(run_id: str, req):
                         recognized_title = source.get("name") or source.get("original_name") or file_name
                         recognized_year = (source.get("first_air_date") or "0000")[:4]
 
-                    logger.info(
-                        f"[MediaOrganize] 识别结果: {file_name} -> {recognized_title} ({recognized_year}) TMDb:{tmdb_id} 类型:{media_type} 季:{season_num} 集:{episode_num}"
-                    )
+                    if media_type == 'tv':
+                        recognition_summary_key = (str(tmdb_id), media_type, season_num)
+                        if recognition_summary_key not in _recognition_summary_logged:
+                            _recognition_summary_logged.add(recognition_summary_key)
+                            logger.info(
+                                f"[MediaOrganize] 识别结果: {recognized_title} ({recognized_year}) TMDb:{tmdb_id} 类型:{media_type} 季:{season_num} 本组:{len(group)} 集"
+                            )
+                        logger.debug(
+                            f"[MediaOrganize] 识别结果: {file_name} -> {recognized_title} ({recognized_year}) TMDb:{tmdb_id} 类型:{media_type} 季:{season_num} 集:{episode_num}"
+                        )
+                    else:
+                        logger.info(
+                            f"[MediaOrganize] 识别结果: {file_name} -> {recognized_title} ({recognized_year}) TMDb:{tmdb_id} 类型:{media_type} 季:{season_num} 集:{episode_num}"
+                        )
 
                     if media_type == 'tv' and episode_num is None:
                         logger.warning(f"[MediaOrganize] 剧集缺少集号，跳过整理: {file_name}")
@@ -1495,7 +1557,12 @@ async def _run_organize_async(run_id: str, req):
                                     ffprobe_stats["reuse"] += 1
 
                     # 二级分类：计算有效目标目录
-                    category_path = _category_matcher.match(tmdb_data, media_type)
+                    category_cache_key = (str(tmdb_id), media_type)
+                    if category_cache_key in _category_match_cache:
+                        category_path = _category_match_cache[category_cache_key]
+                    else:
+                        category_path = _category_matcher.match(tmdb_data, media_type)
+                        _category_match_cache[category_cache_key] = category_path
                     target_name = str(config_data.get("target_name", "") or "").strip()
                     target_base = target_name.rstrip("/") if target_name else ""
                     if category_path and category_path != "其他":
@@ -1527,6 +1594,7 @@ async def _run_organize_async(run_id: str, req):
                         parsed=parsed,
                         variables=variables,
                         ext=ext,
+                        candidate_index=_library_candidate_index,
                     )
                     wash_decision = wash_result.get("decision")
                     if wash_decision in ("keep_existing", "replace_existing"):
@@ -1613,6 +1681,7 @@ async def _run_organize_async(run_id: str, req):
                             )
                             _raise_if_organize_cancelled(run_id)
                             continue
+                        _remove_from_library_candidate_index(_library_candidate_index, candidate)
                         candidate_sha1 = str(candidate.get("sha1", "") or "").upper().strip()
                         candidate_path = str(candidate.get("path", "") or "")
                         candidate_id_str = str(candidate.get("id", "") or "")
@@ -1727,6 +1796,7 @@ async def _run_organize_async(run_id: str, req):
                             pending_tv_batches[batch_key] = {
                                 "batch_context": batch_context,
                                 "items": [],
+                                "item_index": {},
                             }
                             if scrape_tv_root:
                                 tv_root_scraped.add(tv_root_key)
@@ -1774,6 +1844,7 @@ async def _run_organize_async(run_id: str, req):
                                     item for item in pending_tv_batches[batch_key]["items"]
                                     if item is not existing_plan
                                 ]
+                                pending_tv_batches[batch_key]["item_index"].pop((season_num, episode_num), None)
                                 logger.info(
                                     "[Wash] 同批次重复剧集命中，保留新文件: %s -> %s | S%02dE%02d | reason=%s | new_size=%.2fGB | old_size=%.2fGB",
                                     file_name,
@@ -1826,6 +1897,7 @@ async def _run_organize_async(run_id: str, req):
                                 continue
 
                         pending_tv_batches[batch_key]["items"].append(plan)
+                        pending_tv_batches[batch_key]["item_index"][(season_num, episode_num)] = plan
                 except Exception as e:
                     logger.error(f"[MediaOrganize] 整理文件失败 {file_name}: {e}", exc_info=True)
                     results.append({"file": file_name, "status": "error", "message": str(e)})

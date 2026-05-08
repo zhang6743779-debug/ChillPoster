@@ -39,6 +39,7 @@ class Drive115Service:
         # 这既是直链缓存，也是"并发锁"的依据。
         # 如果能在这个缓存里找到某个 pickcode 的记录，说明该文件当前"正在被播放"
         self._url_cache = TTLCache(maxsize=1000, ttl=1200) # 20分钟有效
+        self._url_cache_hit_log_dedupe = TTLCache(maxsize=2000, ttl=10)
 
         # === [第五级缓存] Pickcode -> SHA1信息（用于秒传） ===
         self._sha1_cache = TTLCache(maxsize=1000, ttl=3600)  # SHA1 缓存
@@ -249,7 +250,9 @@ class Drive115Service:
         is_busy = self._is_file_busy(pickcode)
 
         if cache_key in self._url_cache and not (enable_rapid and is_busy):
-            logger.debug(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
+            if cache_key not in self._url_cache_hit_log_dedupe:
+                self._url_cache_hit_log_dedupe[cache_key] = True
+                logger.debug(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
             return self._url_cache[cache_key]
 
         if enable_rapid:
