@@ -19,6 +19,7 @@ from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import Response, RedirectResponse, StreamingResponse
 
 from core.configs import global_config
+from core.media_library_cache import load_cache
 from core import tmdb
 from core.douban import DoubanApi
 
@@ -40,7 +41,91 @@ def _cache_get(key: str):
 def _cache_set(key: str, data, ttl: int = CACHE_TTL):
     _cache[key] = (data, time.time() + ttl)
 
+_LIBRARY_TMDB_MARKER_RE = re.compile(r"(?:tmdb(?:id)?[-=: ]*|tmdb-)(\d+)", re.IGNORECASE)
+_LIBRARY_TMDB_INDEX_TTL = 60
+_library_tmdb_index_cache: tuple[float, dict] | None = None
+
 # ========== 工具函数 ==========
+
+def _normalize_discover_media_type(value: Any) -> str:
+    value = str(value or "").strip().lower()
+    if value in {"tv", "series", "show", "电视剧", "剧集", "番剧", "动漫", "动画", "综艺", "纪录片", "少儿"}:
+        return "tv"
+    return "movie"
+
+
+def _extract_library_tmdb_ids(text: str) -> set[str]:
+    return {match.group(1) for match in _LIBRARY_TMDB_MARKER_RE.finditer(str(text or "")) if match.group(1)}
+
+
+def _infer_library_item_media_type(item: dict, task_key: str, items: dict) -> str:
+    path = str(item.get("path", "") or "")
+    name = str(item.get("name", "") or "")
+    if re.search(r"(?:^|/)(电影|影片|Movie|Movies)(?:/|$)", path, re.IGNORECASE):
+        return "movie"
+    if re.search(r"(?:^|/)(Season\s*\d+|S\d{1,2})(?:/|$)", path, re.IGNORECASE):
+        return "tv"
+    if re.search(r"(?:^|/)(剧集|电视剧|番剧|动漫|动画|综艺|纪录片|电视)(?:/|$)", path):
+        return "tv"
+
+    try:
+        parent_id = int(item.get("parent_id", 0) or 0)
+    except (TypeError, ValueError):
+        parent_id = 0
+    if parent_id:
+        parent = items.get(str(parent_id)) or items.get(parent_id)
+        if isinstance(parent, dict):
+            parent_text = f"{parent.get('path', '')}/{parent.get('name', '')}"
+            if re.search(r"Season\s*\d+|S\d{1,2}", parent_text, re.IGNORECASE):
+                return "tv"
+
+    task_path = str(task_key or "").split(":", 1)[-1]
+    combined = f"{task_path}/{path}/{name}"
+    if re.search(r"(?:^|/)(剧集|电视剧|番剧|动漫|动画|综艺|纪录片|电视)(?:/|$)", combined):
+        return "tv"
+    return "movie"
+
+
+def _get_library_tmdb_index() -> dict:
+    global _library_tmdb_index_cache
+    now = time.time()
+    if _library_tmdb_index_cache and now - _library_tmdb_index_cache[0] < _LIBRARY_TMDB_INDEX_TTL:
+        return _library_tmdb_index_cache[1]
+
+    index = {"movie": set(), "tv": set()}
+    cache = load_cache()
+    for task_key, task in (cache.get("tasks") or {}).items():
+        items = task.get("items") or {}
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            tmdb_ids = _extract_library_tmdb_ids(f"{item.get('path', '')} {item.get('name', '')}")
+            if not tmdb_ids:
+                continue
+            media_type = _infer_library_item_media_type(item, str(task_key), items)
+            index.setdefault(media_type, set()).update(tmdb_ids)
+
+    _library_tmdb_index_cache = (now, index)
+    return index
+
+
+def _mark_library_exists_on_items(items: list[dict]):
+    if not items:
+        return
+    index = _get_library_tmdb_index()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tmdb_id = item.get("_tmdb_id") or item.get("tmdb_id")
+        if not tmdb_id and item.get("source") in {"tmdb", "themoviedb"}:
+            tmdb_id = item.get("id")
+        if not tmdb_id:
+            item["exists_in_library"] = False
+            continue
+        tmdb_id = str(tmdb_id)
+        media_type = _normalize_discover_media_type(item.get("media_type"))
+        item["exists_in_library"] = tmdb_id in index.get(media_type, set())
+
 
 # 内置 TMDB API Key（MoviePilot 同款默认 key，用户可在设置中覆盖）
 _BUILTIN_TMDB_KEY = "db55323b8d3e4154498498a75642b381"
@@ -84,6 +169,7 @@ def _normalize_tmdb_item(item: dict, source_key: str = "tmdb") -> dict:
         "genre_ids": item.get("genre_ids", []),
         "source": source_key,
         "subscribed": False,
+        "exists_in_library": False,
     }
 
 
@@ -162,6 +248,7 @@ def _normalize_douban_item(item: dict) -> dict | None:
         "genre_ids": [],
         "source": "douban",
         "subscribed": False,
+        "exists_in_library": False,
     }
 
 
@@ -489,6 +576,7 @@ def _normalize_provider_item(item: Any, source_key: str) -> dict:
         "genre_ids": [],
         "source": source_key,
         "subscribed": False,
+        "exists_in_library": False,
         "_source_key": source_key,
         "_source_media_id": str(media_id),
         "_source_media_type": media_type,
@@ -703,7 +791,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "中文", "value": "zh"},
                         {"label": "英语", "value": "en"},
                         {"label": "日语", "value": "ja"},
@@ -780,7 +867,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "喜剧", "value": "喜剧"},
                         {"label": "爱情", "value": "爱情"},
                         {"label": "悬疑", "value": "悬疑"},
@@ -812,7 +898,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "华语", "value": "华语"},
                         {"label": "欧美", "value": "欧美"},
                         {"label": "韩国", "value": "韩国"},
@@ -838,7 +923,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "2026", "value": "2026"},
                         {"label": "2025", "value": "2025"},
                         {"label": "2024", "value": "2024"},
@@ -891,7 +975,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "其他", "value": "0"},
                         {"label": "TV", "value": "1"},
                         {"label": "OVA", "value": "2"},
@@ -919,7 +1002,6 @@ def _get_builtin_sources() -> list[dict]:
                     "control": "chips",
                     "default": "",
                     "options": [
-                        {"label": "全部", "value": ""},
                         {"label": "2026", "value": "2026"},
                         {"label": "2025", "value": "2025"},
                         {"label": "2024", "value": "2024"},
@@ -1155,6 +1237,7 @@ def discover_provider(source_key: str, request: Request):
         raise HTTPException(500, f"{source['name']} 请求失败")
 
     items = [_normalize_provider_item(item, source_key) for item in (raw_items or [])]
+    _mark_library_exists_on_items(items)
     page_size = len(items)
     result = {
         "source": source_key,
@@ -1182,6 +1265,7 @@ def tmdb_trending(page: int = Query(1, ge=1)):
     if not data:
         raise HTTPException(500, "TMDB 请求失败")
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1201,6 +1285,7 @@ def tmdb_now_playing(page: int = Query(1, ge=1)):
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
     for i in items:
         i["media_type"] = "movie"
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1220,6 +1305,7 @@ def tmdb_popular_movies(page: int = Query(1, ge=1)):
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
     for i in items:
         i["media_type"] = "movie"
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1239,6 +1325,7 @@ def tmdb_popular_tv(page: int = Query(1, ge=1)):
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
     for i in items:
         i["media_type"] = "tv"
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1286,6 +1373,7 @@ def _tmdb_discover_impl(
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
     for i in items:
         i["media_type"] = media_type
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1333,7 +1421,8 @@ def _fetch_douban_collection(method_name: str, start: int, count: int, cache_suf
     if data.get("error"):
         raise HTTPException(500, f"豆瓣请求失败: {data.get('message', '')}")
     raw_items = data.get("subject_collection_items", data.get("items", []))
-    items = [_normalize_douban_item(i) for i in raw_items]
+    items = [item for item in (_normalize_douban_item(i) for i in raw_items) if item]
+    _mark_library_exists_on_items(items)
     total = data.get("total", len(items))
     total_pages = (total + count - 1) // count if count else 1
     result = {"items": items, "total": total, "total_pages": total_pages, "page": page}
@@ -1426,7 +1515,26 @@ def search_media(query: str = Query(..., min_length=1), type: str = Query("movie
     if not data:
         return {"items": [], "total_pages": 0, "page": page}
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
+    for item in items:
+        item["media_type"] = type
+    _mark_library_exists_on_items(items)
     return {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
+
+
+@router.post("/library/exists")
+def check_library_exists(items: list[dict]):
+    results = {}
+    index = _get_library_tmdb_index()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        tmdb_id = str(item.get("tmdb_id") or item.get("_tmdb_id") or item.get("id") or "").strip()
+        if not tmdb_id:
+            continue
+        media_type = _normalize_discover_media_type(item.get("media_type"))
+        exists = tmdb_id in index.get(media_type, set())
+        results[f"{tmdb_id}:{media_type}"] = exists
+    return {"results": results}
 
 # ========== 豆瓣→TMDB 批量解析 ==========
 
@@ -1539,6 +1647,7 @@ def discover_by_genre(genre_id: int = Query(...), media_type: str = Query("movie
     items = [_normalize_tmdb_item(i) for i in data.get("results", [])]
     for i in items:
         i["media_type"] = media_type
+    _mark_library_exists_on_items(items)
     result = {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
     _cache_set(cache_key, result)
     return result
@@ -1567,6 +1676,7 @@ def today_picks():
         i["media_type"] = "movie"
     rng.shuffle(items)
     items = items[:20]
+    _mark_library_exists_on_items(items)
     # 缓存到当天结束
     now = time.time()
     tomorrow = now + 86400 - (now % 86400)

@@ -5852,6 +5852,19 @@ createApp({
         const searchTotalPages = ref(1);
 
         // ===== 发现页状态 (MP 克隆) =====
+        const LIBRARY_STATUS_FILTER_KEY = '__library_status';
+        const LIBRARY_STATUS_FILTER_ROW = {
+            key: LIBRARY_STATUS_FILTER_KEY,
+            label: '状态',
+            control: 'chips',
+            default: '',
+            options: [
+                { label: '已入库', value: 'exists' },
+                { label: '未入库', value: 'missing' },
+            ],
+            show: '',
+            depends_on: [],
+        };
         const discoverSourceTabs = ref([]);
         const discoverActiveSource = ref('themoviedb');
         const discoverSourceMap = computed(() => Object.fromEntries((discoverSourceTabs.value || []).map(item => [item.key, item])));
@@ -5884,7 +5897,7 @@ createApp({
             const schema = Array.isArray(source.filter_schema) ? source.filter_schema : [];
             const genreRow = schema.find(item => item.key === 'with_genres');
             if (genreRow && (!genreRow.options || !genreRow.options.length)) {
-                genreRow.options = [{ label: '全部', value: '' }, ...(genreList.value || []).map(g => ({ label: g.name, value: String(g.id), media_type: g.media_type }))];
+                genreRow.options = (genreList.value || []).map(g => ({ label: g.name, value: String(g.id), media_type: g.media_type }));
             }
         };
 
@@ -5897,6 +5910,7 @@ createApp({
             (source.filter_schema || []).forEach(row => {
                 if (!(row.key in defaults)) defaults[row.key] = row.default == null ? '' : String(row.default);
             });
+            defaults[LIBRARY_STATUS_FILTER_KEY] = '';
             discoverFiltersBySource[source.key] = { ...(discoverFiltersBySource[source.key] || {}), ...defaults };
         };
 
@@ -5943,7 +5957,8 @@ createApp({
             return '';
         };
 
-        const getActiveSourceSchemaMap = () => Object.fromEntries((activeSourceSchema.value || []).map(row => [row.key, row]));
+        const getActiveSourceSchemaRows = () => [...(activeSourceSchema.value || []), LIBRARY_STATUS_FILTER_ROW];
+        const getActiveSourceSchemaMap = () => Object.fromEntries(getActiveSourceSchemaRows().map(row => [row.key, row]));
 
         const getOptionParentValues = (option) => {
             if (!option) return [];
@@ -6004,7 +6019,7 @@ createApp({
             const visited = new Set(queue);
             while (queue.length) {
                 const current = queue.shift();
-                (activeSourceSchema.value || []).forEach(row => {
+                (getActiveSourceSchemaRows()).forEach(row => {
                     if (!(row.depends_on || []).includes(current)) return;
                     if (visited.has(row.key)) return;
                     activeSourceFilters.value[row.key] = getFilterRowDefaultValue(row);
@@ -6016,7 +6031,7 @@ createApp({
 
         const pruneHiddenOrInvalidFilters = () => {
             const schemaMap = getActiveSourceSchemaMap();
-            (activeSourceSchema.value || []).forEach(row => {
+            (getActiveSourceSchemaRows()).forEach(row => {
                 if (!isFilterRowVisible(row)) {
                     activeSourceFilters.value[row.key] = getFilterRowDefaultValue(row);
                     return;
@@ -6039,7 +6054,7 @@ createApp({
         };
 
         const getVisibleFilterRows = computed(() => {
-            return (activeSourceSchema.value || []).filter(row => isFilterRowVisible(row)).map(row => ({
+            return (getActiveSourceSchemaRows()).filter(row => isFilterRowVisible(row)).map(row => ({
                 ...row,
                 label: getResolvedRowLabel(row),
                 options: row.control === 'chips' ? getFilteredRowOptions(row) : (row.options || []),
@@ -6060,7 +6075,8 @@ createApp({
         const toggleSourceChip = (filterKey, value) => {
             const current = String(activeSourceFilters.value?.[filterKey] ?? '');
             const nextValue = String(value ?? '');
-            const changedValue = filterKey !== 'media_type' && current === nextValue && nextValue !== '' ? '' : nextValue;
+            const canToggleOff = filterKey !== 'media_type' || filterKey === LIBRARY_STATUS_FILTER_KEY;
+            const changedValue = canToggleOff && current === nextValue && nextValue !== '' ? '' : nextValue;
             commitSourceFilterChange(filterKey, changedValue);
         };
 
@@ -6095,15 +6111,62 @@ createApp({
             mainGridPrefetch.pages = {};
         };
 
+        const getProviderFilterParams = () => {
+            const params = { ...(activeSourceFilters.value || {}) };
+            delete params[LIBRARY_STATUS_FILTER_KEY];
+            return params;
+        };
+
         const fetchMainGridPage = async (source, page) => {
-            const params = { ...(activeSourceFilters.value || {}), page };
+            const params = { ...getProviderFilterParams(), page };
             const res = await axios.get(`/api/discover/provider/${source}`, { params });
             return res.data || {};
         };
 
+        const getItemTmdbId = (item = {}) => {
+            if (item._tmdb_id || item.tmdb_id) return item._tmdb_id || item.tmdb_id;
+            return ['tmdb', 'themoviedb'].includes(item.source) ? item.id : '';
+        };
+
+        const getItemExistenceKey = (item = {}) => {
+            const tmdbId = getItemTmdbId(item);
+            if (!tmdbId) return '';
+            const mediaType = item.media_type || 'movie';
+            return `${tmdbId}:${mediaType}`;
+        };
+
+        const markLibraryExists = async (items = []) => {
+            const candidates = (items || []).filter(item => getItemTmdbId(item));
+            if (!candidates.length) return;
+            try {
+                const payload = candidates.map(item => ({
+                    tmdb_id: getItemTmdbId(item),
+                    media_type: item.media_type || 'movie',
+                }));
+                const res = await axios.post('/api/discover/library/exists', payload);
+                const results = res.data?.results || {};
+                candidates.forEach(item => {
+                    item.exists_in_library = !!results[getItemExistenceKey(item)];
+                });
+            } catch (e) {
+                console.error('检查媒体库存在状态失败:', e);
+            }
+        };
+
+        const applyLibraryStatusFilter = (items = []) => {
+            const status = String(activeSourceFilters.value?.[LIBRARY_STATUS_FILTER_KEY] ?? '');
+            if (!status) return items;
+            return items.filter(item => status === 'exists' ? !!item.exists_in_library : !item.exists_in_library);
+        };
+
         const getDisplayableMainGridItems = (items = []) => {
-            if (!isDoubanMainGrid()) return items;
-            return items.filter(item => item?.poster_url);
+            return isDoubanMainGrid() ? items.filter(item => item?.poster_url) : items;
+        };
+
+        const prepareDisplayableMainGridItems = async (items = []) => {
+            const displayable = getDisplayableMainGridItems(items);
+            await markLibraryExists(displayable);
+            return applyLibraryStatusFilter(displayable);
         };
 
         const mainGridPageHasMore = (data, page, rawItems) => {
@@ -6141,10 +6204,11 @@ createApp({
             mainGridPrefetch.pages[page] = entry;
 
             const promise = fetchMainGridPage(source, page)
-                .then(data => {
+                .then(async data => {
                     if (gen !== _mainGridGen || source !== discoverActiveSource.value) return null;
                     const rawItems = data.items || [];
-                    entry.data = { ...data, items: getDisplayableMainGridItems(rawItems), _rawItemCount: rawItems.length };
+                    const items = await prepareDisplayableMainGridItems(rawItems);
+                    entry.data = { ...data, items, _rawItemCount: rawItems.length };
                     entry.ready = true;
                     return entry.data;
                 })
@@ -6206,7 +6270,7 @@ createApp({
                 const data = await fetchMainGridPage(source, page);
                 if (gen !== _mainGridGen) return;
                 const rawItems = data.items || [];
-                const items = getDisplayableMainGridItems(rawItems);
+                const items = await prepareDisplayableMainGridItems(rawItems);
                 mainGridTotalPages.value = data.total_pages || 1;
                 mainGridPage.value = page;
                 mainGridNoMore.value = !mainGridPageHasMore(data, page, rawItems);
@@ -6301,6 +6365,7 @@ createApp({
                 genre_ids: entry.genre_ids || [],
                 source: entry.source || 'tmdb',
                 subscribed: false,
+                exists_in_library: false,
             };
         };
 
@@ -6447,6 +6512,8 @@ createApp({
                 const detail = normalizeMediaDetail(res.data, item);
                 detail.tmdb_id = tmdbId;
                 item._tmdb_id = tmdbId;  // 缓存到 item 上，避免重复搜索
+                await markLibraryExists([item, ...detail.recommendation_items, ...detail.similar_items]);
+                detail.exists_in_library = !!item.exists_in_library;
                 detailModal.detail = detail;
 
                 const detailSeasons = getDetailSeasons(detail);
@@ -6530,7 +6597,9 @@ createApp({
             try {
                 const params = row.source === 'douban' ? { start: 0, count: 30 } : { page: 1 };
                 const res = await axios.get(row.endpoint, { params });
-                gridModal.items = res.data.items || [];
+                const items = res.data.items || [];
+                await markLibraryExists(items);
+                gridModal.items = applyLibraryStatusFilter(items);
                 gridModal.totalPages = res.data.total_pages || 1;
             } catch (e) {
                 showToast('加载失败', 'error');
@@ -6551,8 +6620,9 @@ createApp({
                 const params = row.source === 'douban' ? { start: (gridModal.page - 1) * 30, count: 30 } : { page: gridModal.page };
                 const res = await axios.get(row.endpoint, { params });
                 const newItems = res.data.items || [];
+                await markLibraryExists(newItems);
                 gridModal.totalPages = res.data.total_pages || 1;
-                gridModal.items.push(...newItems);
+                gridModal.items.push(...applyLibraryStatusFilter(newItems));
             } catch (e) {
                 gridModal.page--;
             } finally {
@@ -6625,14 +6695,17 @@ createApp({
                 };
                 movieItems.sort(sortFn);
                 tvItems.sort(sortFn);
+                await markLibraryExists([...movieItems, ...tvItems]);
 
                 searchTotalPages.value = Math.max(movieRes.data.total_pages || 1, tvRes.data.total_pages || 1);
+                const filteredMovieItems = applyLibraryStatusFilter(movieItems);
+                const filteredTvItems = applyLibraryStatusFilter(tvItems);
                 if (append) {
-                    searchMovieResults.value.push(...movieItems);
-                    searchTvResults.value.push(...tvItems);
+                    searchMovieResults.value.push(...filteredMovieItems);
+                    searchTvResults.value.push(...filteredTvItems);
                 } else {
-                    searchMovieResults.value = movieItems;
-                    searchTvResults.value = tvItems;
+                    searchMovieResults.value = filteredMovieItems;
+                    searchTvResults.value = filteredTvItems;
                 }
             } catch (e) {
                 showToast('搜索失败', 'error');

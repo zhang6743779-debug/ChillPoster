@@ -653,7 +653,7 @@ def migu_filter_ui() -> List[dict]:
                 {
                     "component": "div",
                     "props": {"class": "mr-5"},
-                    "content": [{"component": "VLabel", "text": "排序类型"}],
+                    "content": [{"component": "VLabel", "text": "排序"}],
                 },
                 {
                     "component": "VChipGroup",
