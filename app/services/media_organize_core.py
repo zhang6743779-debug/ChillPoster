@@ -1359,6 +1359,7 @@ async def _run_organize_async(run_id: str, req):
         async def _search_and_organize(key, group):
             nonlocal success_count, strm_generated_count
             group_started_at = _time.time()
+            loop = asyncio.get_event_loop()
             try:
                 sr = await _search_group(key, group)
                 _, result = sr
@@ -1578,7 +1579,6 @@ async def _run_organize_async(run_id: str, req):
                     else:
                         effective_target_cid = str(target_cid)
 
-                    loop = asyncio.get_event_loop()
                     if category_path and category_path != "其他":
                         target_base = f"{target_base}/{category_path}" if target_base else category_path
 
