@@ -250,6 +250,8 @@ def _try_remove_empty_dir(client, dir_cid: str):
 
 _WRITE_API_PACING_MIN_SECONDS = 0.4
 _WRITE_API_PACING_MAX_SECONDS = 0.8
+_DIRECT_URL_PACING_MIN_SECONDS = 0.5
+_DIRECT_URL_PACING_MAX_SECONDS = 1.0
 _WRITE_API_LOCK = threading.Lock()
 _LAST_WRITE_API_AT = 0.0
 _DIRECT_URL_LOCK = threading.Lock()
@@ -371,7 +373,7 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
     await asyncio.to_thread(_DIRECT_URL_LOCK.acquire)
     try:
         now = time.monotonic()
-        pacing_seconds = random.uniform(_WRITE_API_PACING_MIN_SECONDS, _WRITE_API_PACING_MAX_SECONDS)
+        pacing_seconds = random.uniform(_DIRECT_URL_PACING_MIN_SECONDS, _DIRECT_URL_PACING_MAX_SECONDS)
         wait_seconds = pacing_seconds - (now - _LAST_DIRECT_URL_AT)
         if wait_seconds > 0:
             await asyncio.sleep(wait_seconds)
