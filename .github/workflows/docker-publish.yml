@@ -54,6 +54,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          no-cache: true
           build-args: |
             CHILLPOSTER_VERSION=${{ steps.version.outputs.version }}
           tags: |
