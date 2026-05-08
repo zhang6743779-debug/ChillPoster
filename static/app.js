@@ -972,7 +972,7 @@ createApp({
         };
 
         const LOG_CATEGORY_KEYWORDS = {
-            PLAYBACK_302: ['收到 STRM 直连请求', 'STRM 302重定向到115直链', '115直链获取失败，已降级反向代理', 'STRM 直链获取失败，已降级反向代理'],
+            PLAYBACK_302: ['播放信息接口触发预加载', '后台预加载成功', '后台预加载失败', 'Pickcode模式检测', '从Path提取Pickcode成功', 'Pickcode提取成功', '开始获取直链', '直链获取成功', '命中直链缓存', '收到播放请求', '302重定向到115直链', '收到 STRM 直连请求', 'STRM 302重定向到115直链', '播放通知去重', '115直链获取失败，已降级反向代理', 'STRM 直链获取失败，已降级反向代理'],
             MEDIA_ORGANIZE: ['[MediaOrganize]', '[媒体库缓存]', '[Wash]', '[CategoryDir]', '[EmbyLib]', '整理:', '洗版'],
             DRIVE_115: ['[115]', '[115-', '[115Life]', '[Rapid]', '[Sync-', '[115风控', '网盘'],
             STRM: ['[STRM]', 'STRM', 'strm'],
