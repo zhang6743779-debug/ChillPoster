@@ -54,9 +54,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          no-cache: true
           build-args: |
             CHILLPOSTER_VERSION=${{ steps.version.outputs.version }}
+            BUILD_DATE=${{ github.run_id }}
           tags: |
             chillne/chillposter:${{ steps.version.outputs.version }}
             chillne/chillposter:${{ steps.version.outputs.version_no_v }}

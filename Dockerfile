@@ -10,8 +10,10 @@ ENV PYTHONUNBUFFERED=1
 # [新增] 设置默认时区为上海，这对 Cron 调度器非常重要！
 ENV TZ=Asia/Shanghai
 ARG CHILLPOSTER_VERSION=vdev
+ARG BUILD_DATE
 ENV CHILLPOSTER_VERSION=$CHILLPOSTER_VERSION
 LABEL org.opencontainers.image.version=$CHILLPOSTER_VERSION
+LABEL org.opencontainers.image.created=$BUILD_DATE
 RUN echo "$CHILLPOSTER_VERSION" > /app/VERSION
 
 # 安装系统依赖
