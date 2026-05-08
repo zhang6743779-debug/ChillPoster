@@ -9,6 +9,7 @@ import traceback
 import random
 from datetime import datetime, timedelta
 from concurrent.futures import as_completed
+from io import BytesIO
 
 # 调度器相关
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,6 +21,7 @@ from core.engine import PosterEngine
 from core.configs import TEMPLATES_DIR, FONTS_DIR, LAYOUTS_DIR, TASKS_FILE
 from core.logger import logger
 from app.routers.config_302 import get_emby_config_by_index_sync
+from PIL import Image, ImageFilter
 
 # 引入 115 服务 (用于清理任务)
 from app.services.drive115_service import drive115_service
@@ -37,6 +39,32 @@ from app.dependencies import (
 # ==========================================
 # 1. 任务执行逻辑 (封面生成)
 # ==========================================
+def _build_wechat_cover_preview(image_data: bytes, width: int = 900, height: int = 383) -> bytes:
+    source = Image.open(BytesIO(image_data)).convert("RGB")
+    bg = source.copy()
+    bg_ratio = width / height
+    src_ratio = bg.width / bg.height
+    if src_ratio > bg_ratio:
+        crop_w = int(bg.height * bg_ratio)
+        left = max((bg.width - crop_w) // 2, 0)
+        bg = bg.crop((left, 0, left + crop_w, bg.height))
+    else:
+        crop_h = int(bg.width / bg_ratio)
+        top = max((bg.height - crop_h) // 2, 0)
+        bg = bg.crop((0, top, bg.width, top + crop_h))
+    bg = bg.resize((width, height), Image.LANCZOS).filter(ImageFilter.GaussianBlur(18))
+
+    fg = source.copy()
+    fg.thumbnail((width, height), Image.LANCZOS)
+    x = (width - fg.width) // 2
+    y = (height - fg.height) // 2
+    bg.paste(fg, (x, y))
+
+    output = BytesIO()
+    bg.save(output, format="JPEG", quality=85, optimize=True)
+    return output.getvalue()
+
+
 def _normalize_task_target(target_obj):
     t = target_obj if isinstance(target_obj, dict) else target_obj.model_dump()
     normalized = dict(t)
@@ -140,22 +168,18 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
 
             if client.upload_cover(t['library_id'], img_data):
                 if is_webhook_task:
-                    from app.routers.discover import build_emby_cover_url
-                    from core.configs import global_config, AUTH_FILE
-                    import json as _json
-                    secret = ""
-                    try:
-                        with open(AUTH_FILE, "r", encoding="utf-8") as f:
-                            secret = _json.load(f).get("secret", "")
-                    except Exception:
-                        pass
+                    from app.routers.discover import put_task_cover_preview
+                    from core.configs import global_config
                     base = global_config.app_public_base_url
-                    server_idx = t.get("server_idx", 0)
-                    poster_url = build_emby_cover_url(base, server_idx, t['library_id'], secret) if base and secret else ""
+                    poster_url = ""
+                    if base:
+                        preview_key = uuid.uuid4().hex
+                        put_task_cover_preview(preview_key, _build_wechat_cover_preview(img_data))
+                        poster_url = f"{base}/api/discover/task_cover?key={preview_key}"
                     if poster_url:
                         logger.info(f"[任务] Webhook封面通知图片: {t.get('library_name', '')} -> {poster_url}")
                     else:
-                        logger.warning(f"[任务] Webhook封面通知图片为空: base={'已配置' if base else '未配置'}, secret={'已配置' if secret else '未配置'}")
+                        logger.warning(f"[任务] Webhook封面通知图片为空: base={'已配置' if base else '未配置'}")
                 else:
                     poster_url = ""
                 return {"success": True, "poster_url": poster_url}

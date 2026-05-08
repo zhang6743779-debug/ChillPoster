@@ -466,18 +466,23 @@ def _build_movie_weak_title_variants(title: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _verify_season_exists(tmdb_id: int, season_number: int, api_key: str) -> bool:
-    """验证剧集是否包含指定季"""
+def _get_tv_season_year(tmdb_id: int, season_number: int, api_key: str) -> str:
     try:
         from core import tmdb as tmdb_mod
         details = tmdb_mod.get_tv_details(int(tmdb_id), api_key, append_to_response="seasons")
         if details and 'seasons' in details:
             for s in details['seasons']:
                 if s.get('season_number') == season_number:
-                    return True
+                    air_date = str(s.get('air_date') or "")
+                    return air_date[:4] if air_date else ""
     except Exception as e:
-        logger.warning(f"[MediaIdentify] 验证季数失败: {e}")
-    return False
+        logger.warning(f"[MediaIdentify] 获取季年份失败: {e}")
+    return ""
+
+
+def _verify_season_exists(tmdb_id: int, season_number: int, api_key: str) -> bool:
+    """验证剧集是否包含指定季"""
+    return bool(_get_tv_season_year(tmdb_id, season_number, api_key))
 
 
 # ---------------------------------------------------------------------------
@@ -840,9 +845,9 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     explicit_season, explicit_episode = _parse_explicit_season_episode_marker(filename, file_path)
 
     if has_explicit_episode_marker:
-        if explicit_season is not None and season is None:
+        if explicit_season is not None:
             season = explicit_season
-        if explicit_episode is not None and episode is None:
+        if explicit_episode is not None:
             episode = explicit_episode
         if episode is not None and season is None:
             season = 1
@@ -947,10 +952,6 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             tmdb_id_direct, tmdb_id_source = _extract_tmdb_id_from_dirs(file_path, media_type)
             if tmdb_id_direct:
                 _set_cached_direct_tmdb_id(direct_tmdb_cache_key, tmdb_id_direct, tmdb_id_source)
-                if media_type == "movie":
-                    logger.debug(f"[MediaIdentify] 从电影上级目录直接获取TMDb ID: {tmdb_id_direct} | dir={parent_dir_name}")
-                elif tmdb_id_source == "parent":
-                    logger.debug(f"[MediaIdentify] 从剧集上级目录直接获取TMDb ID: {tmdb_id_direct} | dir={parent_dir_name}")
 
     meta_info = _enrich_meta_info_from_title({
         "resource_pix": path_meta.resource_pix or "",
@@ -1000,6 +1001,12 @@ def _is_valid_tv_match(media_type: str, season: Optional[int], tmdb_id: int, api
     return True
 
 
+def _tv_season_year_matches(media_type: str, season: Optional[int], year: Optional[int], tmdb_id: int, api_key: str) -> bool:
+    if media_type != 'tv' or not year or season is None or season <= 0:
+        return False
+    return _get_tv_season_year(tmdb_id, season, api_key) == str(year)
+
+
 
 def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type: str, year: Optional[int], season: Optional[int], api_key: str, log_prefix: str = "[MediaIdentify]") -> Optional[dict]:
     from core import tmdb
@@ -1010,31 +1017,69 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
         if not search_title:
             continue
 
-        results = tmdb.search_media(search_title, api_key, item_type, year=year)
-        if not results and year:
-            results = tmdb.search_media(search_title, api_key, item_type, year=None)
+        year_results = tmdb.search_media(search_title, api_key, item_type, year=year) if year else None
+        all_results = tmdb.search_media(search_title, api_key, item_type, year=None)
+        results = list(year_results or [])
+        seen_ids = {result.get('id') for result in results}
+        for result in all_results or []:
+            if result.get('id') not in seen_ids:
+                results.append(result)
+                seen_ids.add(result.get('id'))
         if not results:
             continue
 
         norm_search = _normalize_title_for_match(search_title)
 
+        exact_matches = []
+        contains_matches = []
         for result in results:
             res_title = result.get('title') if item_type == 'movie' else result.get('name')
             res_orig = result.get('original_title') if item_type == 'movie' else result.get('original_name')
-            if _normalize_title_for_match(res_title) == norm_search or _normalize_title_for_match(res_orig) == norm_search:
+            norm_title = _normalize_title_for_match(res_title)
+            norm_orig = _normalize_title_for_match(res_orig)
+            if norm_title == norm_search or norm_orig == norm_search:
+                exact_matches.append(result)
+            elif norm_search and (norm_search in norm_title or norm_search in norm_orig):
+                contains_matches.append(result)
+
+        if year:
+            for result in exact_matches:
                 tmdb_id = result.get('id')
-                logger.debug(f"{log_prefix} 精确匹配: '{filename}' -> {res_title} (ID: {tmdb_id})")
-                if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                date_field = result.get('release_date') if item_type == 'movie' else result.get('first_air_date')
+                res_year = str(date_field)[:4] if date_field else None
+                if res_year == str(year) and _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                    res_title = result.get('title') if item_type == 'movie' else result.get('name')
+                    logger.debug(f"{log_prefix} 标题年份匹配: '{filename}' -> {res_title} ({res_year}) (ID: {tmdb_id})")
                     return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
-        for result in results:
-            res_title = result.get('title') if item_type == 'movie' else result.get('name')
-            res_orig = result.get('original_title') if item_type == 'movie' else result.get('original_name')
-            if norm_search in _normalize_title_for_match(res_title) or norm_search in _normalize_title_for_match(res_orig):
+            for result in exact_matches:
                 tmdb_id = result.get('id')
-                logger.debug(f"{log_prefix} 包含匹配: '{filename}' -> {res_title} (ID: {tmdb_id})")
-                if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                if _tv_season_year_matches(media_type, season, year, tmdb_id, api_key):
+                    res_title = result.get('title') if item_type == 'movie' else result.get('name')
+                    logger.debug(f"{log_prefix} 标题季年份匹配: '{filename}' -> {res_title} S{season} ({year}) (ID: {tmdb_id})")
                     return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
+
+        for result in exact_matches:
+            tmdb_id = result.get('id')
+            logger.debug(f"{log_prefix} 精确匹配: '{filename}' -> {result.get('title') if item_type == 'movie' else result.get('name')} (ID: {tmdb_id})")
+            if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": result.get('title') if item_type == 'movie' else result.get('name')}
+
+        if year:
+            for result in contains_matches:
+                tmdb_id = result.get('id')
+                date_field = result.get('release_date') if item_type == 'movie' else result.get('first_air_date')
+                res_year = str(date_field)[:4] if date_field else None
+                if res_year == str(year) and _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                    res_title = result.get('title') if item_type == 'movie' else result.get('name')
+                    logger.debug(f"{log_prefix} 包含年份匹配: '{filename}' -> {res_title} ({res_year}) (ID: {tmdb_id})")
+                    return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
+
+        for result in contains_matches:
+            tmdb_id = result.get('id')
+            logger.debug(f"{log_prefix} 包含匹配: '{filename}' -> {result.get('title') if item_type == 'movie' else result.get('name')} (ID: {tmdb_id})")
+            if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": result.get('title') if item_type == 'movie' else result.get('name')}
 
         if year and len(results) == 1:
             result = results[0]

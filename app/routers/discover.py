@@ -1576,6 +1576,7 @@ def today_picks():
 # ========== TMDB 图片代理 ==========
 
 _tmdb_img_cache: OrderedDict[str, tuple] = OrderedDict()  # path -> (bytes, content_type, expiry)
+_task_cover_cache: OrderedDict[str, tuple] = OrderedDict()  # key -> (bytes, content_type, expiry)
 _img_client: Optional[httpx.AsyncClient] = None
 _douban_img_client: Optional[httpx.AsyncClient] = None
 
@@ -1601,6 +1602,28 @@ async def close_img_clients():
         await _img_client.aclose()
     if _douban_img_client and not _douban_img_client.is_closed:
         await _douban_img_client.aclose()
+
+
+def put_task_cover_preview(key: str, img_bytes: bytes, content_type: str = "image/jpeg", ttl_seconds: int = 86400):
+    if not key or not img_bytes:
+        return
+    if len(_task_cover_cache) >= 200:
+        _task_cover_cache.popitem(last=False)
+    _task_cover_cache[key] = (img_bytes, content_type, time.time() + ttl_seconds)
+
+
+@router.get("/task_cover")
+async def task_cover_preview(key: str = Query(...)):
+    entry = _task_cover_cache.get(key)
+    if not entry:
+        raise HTTPException(404, "封面预览不存在或已过期")
+    img_bytes, content_type, expires = entry
+    if time.time() >= expires:
+        _task_cover_cache.pop(key, None)
+        raise HTTPException(404, "封面预览已过期")
+    _task_cover_cache.move_to_end(key)
+    return Response(content=img_bytes, media_type=content_type, headers={"Cache-Control": "public, max-age=86400"})
+
 
 @router.get("/tmdb_img")
 async def tmdb_image_proxy(path: str = Query(..., description="TMDB 图片路径，如 /pB8BM7pdSp6B6IhKQgzaRbpPpVs.jpg")):
