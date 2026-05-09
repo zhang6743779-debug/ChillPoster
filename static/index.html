@@ -1261,6 +1261,51 @@
 
                             <div class="module-card mb-20">
                                 <div class="mc-header">
+                                    <div class="mc-title"><i class="fa-solid fa-shield-halved"></i> 风控/性能参数</div>
+                                </div>
+                                <div class="mc-body">
+                                    <div class="form-grid-2-tight">
+                                        <div class="form-item">
+                                            <label>大任务安全模式阈值</label>
+                                            <input type="number" min="1" step="1" v-model.number="mediaOrganizeConfig.safe_mode_threshold">
+                                            <div class="input-tip">超过该视频数量后自动标记安全模式；整理分组并发仍保持默认不变。</div>
+                                        </div>
+                                        <div class="form-item">
+                                            <label>ffprobe 并发数</label>
+                                            <input type="number" min="1" max="10" step="1" v-model.number="mediaOrganizeConfig.ffprobe_concurrency">
+                                            <div class="input-tip">控制 115 直链媒体探测并发，默认 2。</div>
+                                        </div>
+                                        <div class="form-item">
+                                            <label>115 写操作最小间隔（秒）</label>
+                                            <input type="number" min="0.1" step="0.1" v-model.number="mediaOrganizeConfig.write_pacing_min_seconds">
+                                        </div>
+                                        <div class="form-item">
+                                            <label>115 写操作最大间隔（秒）</label>
+                                            <input type="number" min="0.1" step="0.1" v-model.number="mediaOrganizeConfig.write_pacing_max_seconds">
+                                        </div>
+                                        <div class="form-item">
+                                            <label>整理直链最小间隔（秒）</label>
+                                            <input type="number" min="0.1" step="0.1" v-model.number="mediaOrganizeConfig.direct_link_pacing_min_seconds">
+                                        </div>
+                                        <div class="form-item">
+                                            <label>整理直链最大间隔（秒）</label>
+                                            <input type="number" min="0.1" step="0.1" v-model.number="mediaOrganizeConfig.direct_link_pacing_max_seconds">
+                                        </div>
+                                        <div class="form-item">
+                                            <label>WAF 冷却时间（秒）</label>
+                                            <input type="number" min="60" step="60" v-model.number="mediaOrganizeConfig.waf_cooldown_seconds">
+                                            <div class="input-tip">识别到 403/405/429 或阿里阻断页后，115 写操作和整理取链会停止到冷却结束。</div>
+                                        </div>
+                                        <div class="form-item">
+                                            <label>限速说明</label>
+                                            <div class="input-tip">未启用共享总限速；写操作和整理直链仍分别按各自间隔串行执行。</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="module-card mb-20">
+                                <div class="mc-header">
                                     <div class="mc-title"><i class="fa-solid fa-soap"></i> 洗版配置</div>
                                     <div class="organize-scrape-head">
                                         <label class="organize-scrape-label">

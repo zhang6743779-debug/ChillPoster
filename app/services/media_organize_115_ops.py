@@ -274,10 +274,10 @@ def _try_remove_empty_dir(client, dir_cid: str):
 # 文件操作（重命名 / 移动 / 字幕 / 上传）
 # ==========================================
 
-_WRITE_API_PACING_MIN_SECONDS = 0.5
-_WRITE_API_PACING_MAX_SECONDS = 1.0
-_DIRECT_URL_PACING_MIN_SECONDS = 0.5
-_DIRECT_URL_PACING_MAX_SECONDS = 1.0
+_WRITE_API_PACING_MIN_SECONDS = 1.0
+_WRITE_API_PACING_MAX_SECONDS = 2.0
+_DIRECT_URL_PACING_MIN_SECONDS = 1.0
+_DIRECT_URL_PACING_MAX_SECONDS = 2.0
 _WRITE_API_LOCK = threading.Lock()
 _LAST_WRITE_API_AT = 0.0
 _DIRECT_URL_LOCK = threading.Lock()
@@ -288,6 +288,9 @@ _DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
 _WRITE_REQUEST_TIMEOUT_SECONDS = 20
 _WRITE_API_RATE_LIMIT_MAX_RETRIES = 3
 _WRITE_API_RATE_LIMIT_BASE_BACKOFF_SECONDS = 3.0
+_115_WAF_COOLDOWN_SECONDS = 1800
+_115_COOLDOWN_UNTIL = 0.0
+_115_COOLDOWN_LOCK = threading.Lock()
 _TREE_SCAN_MIN_INTERVAL_SECONDS = 5.0
 _TREE_SCAN_LOCK = threading.Lock()
 _LAST_TREE_SCAN_FINISHED_AT = 0.0
@@ -302,23 +305,126 @@ async def _thread_lock_context(lock: threading.Lock):
         lock.release()
 
 
+class OneOneFiveWafBlockedError(RuntimeError):
+    def __init__(self, operation: str, cooldown_seconds: int, detail: str = ""):
+        self.operation = operation
+        self.cooldown_seconds = max(0, int(cooldown_seconds or 0))
+        self.detail = str(detail or "")[:500]
+        message = f"115 风控冷却中: operation={operation}, remaining={self.cooldown_seconds}s"
+        if self.detail:
+            message = f"{message}, detail={self.detail}"
+        super().__init__(message)
+
+
 def _clone_115_client_for_write(client):
     from p115client import P115Client
     return P115Client(str(client.cookies_str), app="android")
 
 
+def _normalize_numeric_setting(value: Any, default: float, minimum: float = 0.1) -> float:
+    try:
+        return max(minimum, float(value))
+    except Exception:
+        return default
+
+
+def _configure_115_op_tuning(config_data: dict | None):
+    global _WRITE_API_PACING_MIN_SECONDS, _WRITE_API_PACING_MAX_SECONDS
+    global _DIRECT_URL_PACING_MIN_SECONDS, _DIRECT_URL_PACING_MAX_SECONDS, _115_WAF_COOLDOWN_SECONDS
+    data = config_data if isinstance(config_data, dict) else {}
+    write_min = _normalize_numeric_setting(data.get("write_pacing_min_seconds"), 1.0)
+    write_max = _normalize_numeric_setting(data.get("write_pacing_max_seconds"), 2.0)
+    direct_min = _normalize_numeric_setting(data.get("direct_link_pacing_min_seconds"), 1.0)
+    direct_max = _normalize_numeric_setting(data.get("direct_link_pacing_max_seconds"), 2.0)
+    try:
+        cooldown = max(60, int(data.get("waf_cooldown_seconds") or 1800))
+    except Exception:
+        cooldown = 1800
+    _WRITE_API_PACING_MIN_SECONDS = write_min
+    _WRITE_API_PACING_MAX_SECONDS = max(write_min, write_max)
+    _DIRECT_URL_PACING_MIN_SECONDS = direct_min
+    _DIRECT_URL_PACING_MAX_SECONDS = max(direct_min, direct_max)
+    _115_WAF_COOLDOWN_SECONDS = cooldown
+
+
+def _stringify_115_error(value: Any, depth: int = 0) -> str:
+    if depth > 3:
+        return ""
+    parts = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            parts.append(str(key))
+            parts.append(_stringify_115_error(item, depth + 1))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            parts.append(_stringify_115_error(item, depth + 1))
+    else:
+        parts.append(str(value or ""))
+    return " ".join(part for part in parts if part)[:5000]
+
+
 def _is_115_rate_limited_response(response: Any) -> bool:
-    if not isinstance(response, dict):
-        return False
-    text = str(response)
+    text = _stringify_115_error(response)
     return (
-        str(response.get("code", "")) == "990009"
-        or str(response.get("errno", "")) == "990009"
-        or str(response.get("errNo", "")) == "990009"
+        (isinstance(response, dict) and (
+            str(response.get("code", "")) == "990009"
+            or str(response.get("errno", "")) == "990009"
+            or str(response.get("errNo", "")) == "990009"
+        ))
         or "990009" in text
         or "操作频繁" in text
         or "操作尚未执行完成" in text
     )
+
+
+def _is_115_waf_blocked(value: Any) -> bool:
+    text = _stringify_115_error(value).lower()
+    if not text:
+        return False
+    return any(token in text for token in (
+        "response [403]",
+        "response [405]",
+        "response [429]",
+        "code=403",
+        "code=405",
+        "code=429",
+        "httpstatuserror",
+        "method not allowed",
+        "too many requests",
+        "your request has been blocked",
+        "potential threats to the server's security",
+        "errors.aliyun.com",
+        "tengine",
+        "block_message",
+        "访问被阻断",
+        "安全威胁",
+        "访问受限",
+        "验证码",
+        "captcha",
+        "forbidden",
+        "waf",
+    ))
+
+
+def _get_115_cooldown_remaining_seconds() -> int:
+    with _115_COOLDOWN_LOCK:
+        return max(0, int(_115_COOLDOWN_UNTIL - time.monotonic()))
+
+
+def _raise_if_115_cooldown_active(operation: str):
+    remaining = _get_115_cooldown_remaining_seconds()
+    if remaining > 0:
+        raise OneOneFiveWafBlockedError(operation, remaining, "cooldown_active")
+
+
+def _trip_115_cooldown(operation: str, err_or_resp: Any):
+    global _115_COOLDOWN_UNTIL
+    detail = _stringify_115_error(err_or_resp)
+    with _115_COOLDOWN_LOCK:
+        _115_COOLDOWN_UNTIL = max(_115_COOLDOWN_UNTIL, time.monotonic() + _115_WAF_COOLDOWN_SECONDS)
+        remaining = max(0, int(_115_COOLDOWN_UNTIL - time.monotonic()))
+    logger.warning(f"[115风控] {operation} 触发 WAF/封控，进入冷却 {remaining}s: {detail[:300]}")
+    raise OneOneFiveWafBlockedError(operation, remaining, detail)
 
 
 def _get_115_rate_limit_backoff_seconds(attempt: int) -> float:
@@ -335,6 +441,7 @@ def run_115_write_request_sync(
     global _LAST_WRITE_API_AT
 
     for attempt in range(_WRITE_API_RATE_LIMIT_MAX_RETRIES + 1):
+        _raise_if_115_cooldown_active(request_name)
         with _WRITE_API_LOCK:
             now = time.monotonic()
             pacing_seconds = random.uniform(_WRITE_API_PACING_MIN_SECONDS, _WRITE_API_PACING_MAX_SECONDS)
@@ -344,8 +451,17 @@ def run_115_write_request_sync(
             _LAST_WRITE_API_AT = time.monotonic()
 
             write_client = _clone_115_client_for_write(client)
-            response = request_factory(write_client)
+            try:
+                response = request_factory(write_client)
+            except OneOneFiveWafBlockedError:
+                raise
+            except Exception as e:
+                if _is_115_waf_blocked(e):
+                    _trip_115_cooldown(request_name, e)
+                raise
 
+        if _is_115_waf_blocked(response):
+            _trip_115_cooldown(request_name, response)
         if isinstance(response, dict) and not response.get("state", True):
             if _is_115_rate_limited_response(response) and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
                 backoff = _get_115_rate_limit_backoff_seconds(attempt)
@@ -367,6 +483,7 @@ async def run_115_write_request(client, request_name: str, request_factory: Call
     global _LAST_WRITE_API_AT
 
     for attempt in range(_WRITE_API_RATE_LIMIT_MAX_RETRIES + 1):
+        _raise_if_115_cooldown_active(request_name)
         start_at = time.monotonic()
         async with _thread_lock_context(_WRITE_API_LOCK):
             try:
@@ -386,7 +503,15 @@ async def run_115_write_request(client, request_name: str, request_factory: Call
                 elapsed = time.monotonic() - start_at
                 logger.warning(f"[115] {request_name}超时: 耗时={elapsed:.2f}s")
                 raise TimeoutError(f"{request_name}超时: {elapsed:.2f}s") from e
+            except OneOneFiveWafBlockedError:
+                raise
+            except Exception as e:
+                if _is_115_waf_blocked(e):
+                    _trip_115_cooldown(request_name, e)
+                raise
 
+        if _is_115_waf_blocked(result):
+            _trip_115_cooldown(request_name, result)
         if isinstance(result, dict) and not result.get("state", True):
             if _is_115_rate_limited_response(result) and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
                 backoff = _get_115_rate_limit_backoff_seconds(attempt)
@@ -402,9 +527,11 @@ async def run_115_write_request(client, request_name: str, request_factory: Call
 
 async def _run_115_serial_request(request_name: str, request_factory: Callable[[], Any]):
     global _LAST_DIRECT_URL_AT
+    _raise_if_115_cooldown_active(request_name)
     await asyncio.to_thread(_DIRECT_URL_LOCK.acquire)
     try:
         for attempt in range(_DIRECT_URL_TIMEOUT_MAX_RETRIES + 1):
+            _raise_if_115_cooldown_active(request_name)
             now = time.monotonic()
             pacing_seconds = random.uniform(_DIRECT_URL_PACING_MIN_SECONDS, _DIRECT_URL_PACING_MAX_SECONDS)
             wait_seconds = pacing_seconds - (now - _LAST_DIRECT_URL_AT)
@@ -417,6 +544,8 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
                 result = request_factory()
                 if inspect.isawaitable(result):
                     result = await asyncio.wait_for(result, timeout=_DIRECT_URL_REQUEST_TIMEOUT_SECONDS)
+                if _is_115_waf_blocked(result):
+                    _trip_115_cooldown(request_name, result)
                 if isinstance(result, dict) and not result.get("state", True):
                     raise RuntimeError(f"{request_name}失败: {result}")
                 elapsed = time.monotonic() - request_started_at
@@ -430,6 +559,12 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
                     continue
                 logger.warning(f"[115] {request_name}超时: 请求耗时={elapsed:.2f}s")
                 return {}
+            except OneOneFiveWafBlockedError:
+                raise
+            except Exception as e:
+                if _is_115_waf_blocked(e):
+                    _trip_115_cooldown(request_name, e)
+                raise
     finally:
         _DIRECT_URL_LOCK.release()
 
@@ -487,6 +622,8 @@ async def _rename_115_file(client, file_item: dict, new_name: str, target_cid: s
                 else:
                     logger.info(f"[MediaOrganize] 文件移动成功: {source_path} -> {display_name}")
         return True
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.error(
             f"[MediaOrganize] 文件操作失败: source={source_path}, new_name={new_name}, "
@@ -549,6 +686,12 @@ async def _rename_115_files_batch(client, file_ops: list[dict], target_cid: str 
                 else:
                     logger.info(f"[MediaOrganize] 文件移动成功: {op['source_path']} -> {display_name}")
         return {"ok": True, "items": valid_ops, "error": "", "rename_done": rename_done, "move_done": move_done}
+    except OneOneFiveWafBlockedError as e:
+        logger.warning(
+            f"[MediaOrganize] 批量文件操作触发115风控，停止回退逐条处理: count={len(valid_ops)}, "
+            f"target={target_path or target_cid or ''}, rename_done={rename_done}, move_done={move_done}, err={e}"
+        )
+        return {"ok": False, "blocked": True, "items": valid_ops, "error": str(e), "rename_done": rename_done, "move_done": move_done}
     except Exception as e:
         logger.warning(
             f"[MediaOrganize] 批量文件操作失败，将回退逐条处理: count={len(valid_ops)}, "
@@ -766,6 +909,8 @@ async def _move_subtitle_ops(client, parent_id: str, subs: list, matched_ops: li
                     succeeded_ids.add(int(subtitle_id))
             await _apply_subtitle_move_results(parent_id, subs, succeeded_ids, subtitles_by_parent)
             return [{"name": op["new_name"], "pickcode": op.get("pickcode", "")} for op in matched_ops]
+        if batch_result.get("blocked"):
+            raise OneOneFiveWafBlockedError("字幕批量移动", _get_115_cooldown_remaining_seconds(), batch_result.get("error", ""))
 
     for op in matched_ops:
         sub_name = op["old_name"]
@@ -901,6 +1046,8 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
             await _apply_subtitle_move_results(parent_id, subs, succeeded_ids, subtitles_by_parent)
             continue
 
+        if batch_result.get("blocked"):
+            raise OneOneFiveWafBlockedError("字幕批量处理", _get_115_cooldown_remaining_seconds(), batch_result.get("error", ""))
         logger.warning(f"[MediaOrganize] 字幕批量处理失败，回退逐条处理: parent_id={parent_id}, err={batch_result.get('error', '')}")
         for op in unique_ops:
             ok = await _rename_115_file(client, op, op["new_name"], target_cid=target_cid, target_path=target_path)
@@ -939,6 +1086,8 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
                 target_cid=str(failed_dir_cid),
                 target_path=target_path,
             )
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.warning(
             f"[MediaOrganize] 移动失败文件失败: file={file_item.get('name', '')}, "
@@ -964,6 +1113,9 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
         for file_id, name in ids_to_move:
             moved_dirs.add(file_id)
             logger.debug(f"[MediaOrganize] 移动失败文件: {name} -> 整理失败目录")
+    except OneOneFiveWafBlockedError:
+        logger.warning(f"[MediaOrganize] 批量移动失败文件触发115风控，停止逐个移动: count={len(ids_to_move)}")
+        raise
     except Exception as e:
         logger.warning(f"[MediaOrganize] 批量移动失败文件失败: count={len(ids_to_move)}, err={e}")
         # 降级逐个移动
@@ -1075,14 +1227,19 @@ def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
         if elapsed_since_last_scan < _TREE_SCAN_MIN_INTERVAL_SECONDS:
             time.sleep(_TREE_SCAN_MIN_INTERVAL_SECONDS - elapsed_since_last_scan)
         scan_started_at = time.monotonic()
-        with _read_lock:
-            items = list(traverse_tree_with_path(
-                client,
-                cid=int(cid),
-                with_ancestors=True,
-                app="android",
-                max_workers=0,
-            ))
+        try:
+            with _read_lock:
+                items = list(traverse_tree_with_path(
+                    client,
+                    cid=int(cid),
+                    with_ancestors=True,
+                    app="android",
+                    max_workers=0,
+                ))
+        except Exception as e:
+            if _is_115_waf_blocked(e):
+                _trip_115_cooldown("扫描目录树", e)
+            raise
         _LAST_TREE_SCAN_FINISHED_AT = time.monotonic()
         logger.debug(f"[MediaOrganize] 目录树遍历完成: cid={cid} 耗时={_LAST_TREE_SCAN_FINISHED_AT - scan_started_at:.2f}s")
 
@@ -1136,6 +1293,8 @@ def _list_115_video_files(client, cid: str) -> tuple:
         sub_count = sum(len(v) for v in subtitles_by_parent.values())
         logger.debug(f"[MediaOrganize] 扫描到 {len(files)} 个视频文件, {sub_count} 个字幕文件")
         return files, subtitles_by_parent
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.error(f"[MediaOrganize] 列出视频文件失败: {e}")
         return [], {}
@@ -1154,6 +1313,8 @@ async def _get_115_direct_urls(pickcodes, drive_index: int = 0) -> dict[str, str
             user_agent="Mozilla/5.0",
             emby_index=drive_index,
         )
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.debug(f"[MediaOrganize] 批量获取直链失败: {e}")
         return {}

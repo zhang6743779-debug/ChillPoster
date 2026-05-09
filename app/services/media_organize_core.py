@@ -38,7 +38,8 @@ from app.services.media_organize_115_ops import (
     _rename_115_file, _rename_115_files_batch, _match_and_move_subtitles, _move_top_dir_to_failed, _move_failed_files_batch,
     _move_matched_subtitles_to_target, _match_and_move_subtitles_batch, _ensure_115_dir_chain_cached,
     _collect_event_video_sha1s_for_cache, _mkdir_115_dir, _move_115_items, _run_115_write_request_sync,
-    _get_115_direct_url, _get_115_direct_urls,
+    _get_115_direct_url, _get_115_direct_urls, _configure_115_op_tuning, _get_115_cooldown_remaining_seconds,
+    OneOneFiveWafBlockedError,
 )
 from app.services.media_organize_tmdb import (
     _parse_filename, _search_tmdb_for_title, _fetch_tmdb_data,
@@ -100,9 +101,24 @@ _FFPROBE_PROFILE_FIELDS = (
 _FFPROBE_CACHE_LOCK = threading.Lock()
 _FFPROBE_FILE_CACHE: Optional[dict] = None
 _FFPROBE_BATCH_CACHE: Optional[dict] = None
-_FFPROBE_MEDIA_DOWNLOAD_LIMIT = 3
+_FFPROBE_MEDIA_DOWNLOAD_LIMIT = 2
 _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(_FFPROBE_MEDIA_DOWNLOAD_LIMIT)
+_FFPROBE_GATE_CONFIG_LOCK = threading.Lock()
 _FFPROBE_EXEC_TIMEOUT_SECONDS = 45
+
+
+def _configure_ffprobe_tuning(config_data: dict | None):
+    global _FFPROBE_MEDIA_DOWNLOAD_LIMIT, _FFPROBE_MEDIA_GATE
+    data = config_data if isinstance(config_data, dict) else {}
+    try:
+        limit = min(10, max(1, int(data.get("ffprobe_concurrency") or 2)))
+    except Exception:
+        limit = 2
+    with _FFPROBE_GATE_CONFIG_LOCK:
+        if limit != _FFPROBE_MEDIA_DOWNLOAD_LIMIT:
+            _FFPROBE_MEDIA_DOWNLOAD_LIMIT = limit
+            _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(limit)
+            logger.info(f"[MediaOrganize] ffprobe并发已调整为 {limit}")
 
 
 def _load_ffprobe_file_cache() -> dict:
@@ -545,6 +561,8 @@ async def _probe_media_fields_via_ffprobe(file_item: dict, drive_index: int, dir
     except asyncio.TimeoutError:
         logger.warning(f"[MediaOrganize] ffprobe探测超时: file={file_name}, pickcode={pickcode}")
         return {}
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.debug(f"[MediaOrganize] ffprobe探测失败: pickcode={pickcode}, err={e}")
         return {}
@@ -573,6 +591,8 @@ async def _probe_wash_fields(pickcode: str, drive_index: int, file_name: str = "
     except asyncio.TimeoutError:
         logger.warning(f"[Wash] ffprobe探测超时: file={file_name}, pickcode={pickcode}")
         return {}
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.debug(f"[Wash] ffprobe探测失败: pickcode={pickcode}, err={e}")
         return {}
@@ -910,12 +930,16 @@ def _update_streaming_progress(run_id: str, *, scanned_video_count: int, process
         message = f"整理: 已扫描 {scanned_video_count} 个视频，已完成 {processed_result_count} 个"
     effective_status = status or "running"
     update_task_progress(run_id, message, pct, effective_status)
-    ACTIVE_TASKS[run_id]["detail"] = {
+    previous_detail = ACTIVE_TASKS.get(run_id, {}).get("detail") or {}
+    detail = {
         "total": scanned_video_count,
         "success": success_count,
         "failed": error_count,
         "strm": strm_generated_count,
     }
+    if previous_detail.get("safe_mode"):
+        detail["safe_mode"] = True
+    ACTIVE_TASKS[run_id]["detail"] = detail
 
 
 def _is_organize_cancel_requested(run_id: str) -> bool:
@@ -1196,6 +1220,8 @@ async def _run_organize_async(run_id: str, req):
     skipped_results = []
     success_count = 0
     strm_generated_count = 0
+    safe_mode_enabled = False
+    safe_mode_threshold = 1000
     organized_targets_by_parent: dict[str, list[dict]] = {}
     metadata_executor = None
     pending_library_cache_items: dict[str, dict] = {}
@@ -1273,6 +1299,12 @@ async def _run_organize_async(run_id: str, req):
 
     try:
         config_data = await _load_config_data()
+        _configure_115_op_tuning(config_data)
+        _configure_ffprobe_tuning(config_data)
+        try:
+            safe_mode_threshold = max(1, int(config_data.get("safe_mode_threshold") or 1000))
+        except Exception:
+            safe_mode_threshold = 1000
         drive_index = req.drive_index or config_data.get("drive_index", 0)
         target_cid = config_data.get("target_cid", "0")
         source_cid = config_data.get("source_cid", "0")
@@ -1376,6 +1408,8 @@ async def _run_organize_async(run_id: str, req):
                 raise
             except asyncio.CancelledError:
                 raise _OrganizeCancelledError("用户取消")
+            except OneOneFiveWafBlockedError:
+                raise
             except Exception as e:
                 logger.error(f"[MediaOrganize] 搜索异常: {e}")
                 search_cache[key] = None
@@ -1906,6 +1940,8 @@ async def _run_organize_async(run_id: str, req):
 
                         pending_tv_batches[batch_key]["items"].append(plan)
                         pending_tv_batches[batch_key]["item_index"][(season_num, episode_num)] = plan
+                except OneOneFiveWafBlockedError:
+                    raise
                 except Exception as e:
                     logger.error(f"[MediaOrganize] 整理文件失败 {file_name}: {e}", exc_info=True)
                     results.append({"file": file_name, "status": "error", "message": str(e)})
@@ -2075,6 +2111,8 @@ async def _run_organize_async(run_id: str, req):
                     raise
                 except asyncio.CancelledError:
                     raise _OrganizeCancelledError("用户取消")
+                except OneOneFiveWafBlockedError:
+                    raise
                 except Exception as gather_result:
                     logger.error(f"[MediaOrganize] 分组整理协程异常: {type(gather_result).__name__}: {gather_result}", exc_info=gather_result)
 
@@ -2123,6 +2161,10 @@ async def _run_organize_async(run_id: str, req):
                 continue
 
             scanned_video_count += 1
+            if not safe_mode_enabled and scanned_video_count > safe_mode_threshold:
+                safe_mode_enabled = True
+                logger.info(f"[MediaOrganize] 大任务安全模式自动启用: scanned={scanned_video_count}, threshold={safe_mode_threshold}")
+                ACTIVE_TASKS.setdefault(run_id, {}).setdefault("detail", {})["safe_mode"] = True
             vf = item
             file_name = vf.get("name", "")
             ext = os.path.splitext(file_name)[1] or ".mkv"
@@ -2214,6 +2256,8 @@ async def _run_organize_async(run_id: str, req):
         if scanned_video_count == 0:
             try:
                 await _cleanup_empty_source_dirs(client, str(source_cid))
+            except OneOneFiveWafBlockedError:
+                raise
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
@@ -2272,6 +2316,8 @@ async def _run_organize_async(run_id: str, req):
 
         try:
             await _cleanup_empty_source_dirs(client, str(source_cid))
+        except OneOneFiveWafBlockedError:
+            raise
         except Exception as e:
             logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
 
@@ -2294,6 +2340,7 @@ async def _run_organize_async(run_id: str, req):
             "sha1_duplicate_skipped": sha1_duplicate_skipped_count,
             "other_skipped": other_skipped_count,
             "strm": strm_generated_count,
+            "safe_mode": safe_mode_enabled,
         }
 
     except _OrganizeCancelledError:
@@ -2312,6 +2359,32 @@ async def _run_organize_async(run_id: str, req):
             "total": scanned_video_count, "success": success_count, "failed": _failed, "strm": strm_generated_count,
         }
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
+
+    except OneOneFiveWafBlockedError as e:
+        for task in list(locals().get("in_flight_group_tasks", []) or []):
+            if not task.done():
+                task.cancel()
+        try:
+            if metadata_executor:
+                metadata_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        remaining = _get_115_cooldown_remaining_seconds() or getattr(e, "cooldown_seconds", 0)
+        remaining_minutes = max(1, int((remaining + 59) // 60)) if remaining else 0
+        _processed = len(results)
+        _failed = _count_error_results(results)
+        message = f"115 风控冷却中，整理已停止：剩余约 {remaining_minutes} 分钟后重试"
+        update_task_progress(run_id, message, 100, "stopped")
+        ACTIVE_TASKS[run_id]["detail"] = {
+            "total": scanned_video_count,
+            "success": success_count,
+            "failed": _failed,
+            "processed": _processed,
+            "strm": strm_generated_count,
+            "safe_mode": safe_mode_enabled,
+            "cooldown_remaining": remaining,
+        }
+        logger.warning(f"[MediaOrganize] {message}: {e}")
 
     except Exception as e:
         try:
@@ -2602,6 +2675,8 @@ def _build_tv_batch_context(client, tmdb_data, variables, target_cid, config_dat
             else:
                 season_cid = created_cid
                 season_pickcode = created_pickcode
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.warning(f"[MediaOrganize] 创建目录链失败: {full_path}, {e}")
     if not season_cid:
@@ -2747,6 +2822,9 @@ def _execute_tv_batch_plan(client, plan_items: list[dict], subtitles_by_parent=N
         main_loop,
     )
 
+    if batch_result.get("blocked"):
+        raise OneOneFiveWafBlockedError("剧集批量整理", _get_115_cooldown_remaining_seconds(), batch_result.get("error", ""))
+
     if batch_result.get("ok"):
         subtitle_result_map = {}
         if subtitles_by_parent:
@@ -2858,6 +2936,9 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
         main_loop,
     )
 
+    if batch_result.get("blocked"):
+        raise OneOneFiveWafBlockedError("重复文件批量移动", _get_115_cooldown_remaining_seconds(), batch_result.get("error", ""))
+
     if batch_result.get("ok"):
         subtitle_result_map = {}
         if subtitles_by_parent:
@@ -2966,6 +3047,8 @@ def _organize_movie(client, file_item, file_name, ext, tmdb_data,
             task_key=library_task_key,
             dir_path=target_dir_path,
         )
+    except OneOneFiveWafBlockedError:
+        raise
     except Exception as e:
         logger.warning(f"[MediaOrganize] 创建目录失败: {folder_name}, {e}")
     if not dir_cid:

@@ -2126,6 +2126,13 @@ createApp({
             wash_reserved_1: false,
             wash_reserved_2: false,
             organize_parse_mode: 'ffprobe',
+            safe_mode_threshold: 1000,
+            write_pacing_min_seconds: 1,
+            write_pacing_max_seconds: 2,
+            direct_link_pacing_min_seconds: 1,
+            direct_link_pacing_max_seconds: 2,
+            ffprobe_concurrency: 2,
+            waf_cooldown_seconds: 1800,
             movie_folder_format: '{title} ({year}) {tmdb-{tmdb_id}}',
             movie_rename_format: '{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}',
             tv_folder_format: '{title} ({year}) {tmdb-{tmdb_id}}',
@@ -2676,6 +2683,32 @@ createApp({
             mediaOrganizeConfig.organize_parse_mode = 'filename';
         };
 
+        const normalizeMediaOrganizeTuning = () => {
+            const toNumber = (value, fallback, min) => {
+                const parsed = Number(value);
+                if (!Number.isFinite(parsed)) return fallback;
+                return Math.max(min, parsed);
+            };
+            const toInt = (value, fallback, min, max) => {
+                const parsed = parseInt(value, 10);
+                if (!Number.isFinite(parsed)) return fallback;
+                return Math.min(max, Math.max(min, parsed));
+            };
+            mediaOrganizeConfig.safe_mode_threshold = toInt(mediaOrganizeConfig.safe_mode_threshold, 1000, 1, 999999);
+            mediaOrganizeConfig.write_pacing_min_seconds = toNumber(mediaOrganizeConfig.write_pacing_min_seconds, 1, 0.1);
+            mediaOrganizeConfig.write_pacing_max_seconds = Math.max(
+                mediaOrganizeConfig.write_pacing_min_seconds,
+                toNumber(mediaOrganizeConfig.write_pacing_max_seconds, 2, 0.1),
+            );
+            mediaOrganizeConfig.direct_link_pacing_min_seconds = toNumber(mediaOrganizeConfig.direct_link_pacing_min_seconds, 1, 0.1);
+            mediaOrganizeConfig.direct_link_pacing_max_seconds = Math.max(
+                mediaOrganizeConfig.direct_link_pacing_min_seconds,
+                toNumber(mediaOrganizeConfig.direct_link_pacing_max_seconds, 2, 0.1),
+            );
+            mediaOrganizeConfig.ffprobe_concurrency = toInt(mediaOrganizeConfig.ffprobe_concurrency, 2, 1, 10);
+            mediaOrganizeConfig.waf_cooldown_seconds = toInt(mediaOrganizeConfig.waf_cooldown_seconds, 1800, 60, 86400);
+        };
+
         const fetchMediaOrganizeConfig = async () => {
             try {
                 const res = await axios.get('/api/media_organize/get');
@@ -2685,12 +2718,14 @@ createApp({
                 }
             } catch (e) { /* first load, use defaults */ }
             normalizeOrganizeParseMode();
+            normalizeMediaOrganizeTuning();
             mediaOrganizeConfig.scrape_enabled = !!mediaOrganizeConfig.emby_local_scrape;
         };
 
         const saveMediaOrganizeConfig = async () => {
             try {
                 normalizeOrganizeParseMode();
+                normalizeMediaOrganizeTuning();
                 await axios.post('/api/media_organize/save', { ...mediaOrganizeConfig, drive_index: 0 });
                 showToast('媒体整理配置已保存', 'success');
             } catch (e) {

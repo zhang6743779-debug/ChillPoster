@@ -10,7 +10,7 @@ import random
 import threading
 from cachetools import TTLCache
 from p115client import P115Client
-from app.services.media_organize_115_ops import _run_115_serial_request, run_115_write_request_sync
+from app.services.media_organize_115_ops import _run_115_serial_request, run_115_write_request_sync, OneOneFiveWafBlockedError
 from p115pickcode import to_id
 from p115client.tool.attr import get_attr
 from app.routers.config_302 import get_config_302
@@ -836,6 +836,11 @@ class Drive115Service:
                     result = await self._run_gateway_playback_direct_url_request("获取直链", request_factory)
                 else:
                     result = await _run_115_serial_request("获取直链", request_factory)
+            except OneOneFiveWafBlockedError as e:
+                logger.warning(f"[115] 批量获取直链触发风控冷却: count={len(normalized)}, err={e}")
+                if direct_link_context == "gateway_playback":
+                    return {}
+                raise
             except Exception as e:
                 logger.debug(f"[115] 批量获取直链失败: count={len(normalized)}, err={e}")
                 return {}
@@ -864,6 +869,10 @@ class Drive115Service:
                 if item_pickcode and final_url:
                     urls[item_pickcode] = final_url
             return urls
+        except OneOneFiveWafBlockedError:
+            if direct_link_context == "gateway_playback":
+                return {}
+            raise
         except Exception as e:
             logger.error(f"[115] 批量获取直链异常: {e}")
             return {}
