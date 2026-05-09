@@ -72,16 +72,6 @@ _WASH_CODEC_MULTIPLIERS = {
     "XVID": 0.6,
     "DIVX": 0.6,
 }
-_WASH_GBPH_RULES = {
-    ("720p", "H264"): (0.5, 5.0),
-    ("1080p", "H264"): (1.5, 25.0),
-    ("1080p", "H265"): (0.8, 15.0),
-    ("1080p", "AV1"): (0.8, 15.0),
-    ("2160p", "H264"): (6.0, 35.0),
-    ("2160p", "H265"): (4.0, 45.0),
-    ("2160p", "AV1"): (4.0, 45.0),
-}
-
 _FFPROBE_FILE_CACHE_PATH = "config/media_organize_ffprobe_cache.json"
 _FFPROBE_BATCH_CACHE_PATH = "config/media_organize_ffprobe_batch_cache.json"
 _FFPROBE_BATCH_CACHE_TTL_SECONDS = 1800
@@ -584,13 +574,15 @@ async def _probe_wash_fields(pickcode: str, drive_index: int, file_name: str = "
 
 
 async def _resolve_wash_media_info(file_item: dict, parsed: dict, drive_index: int,
+                                   preferred: dict | None = None, allow_probe: bool = True,
                                    require_duration: bool = False) -> dict:
+    preferred = preferred or {}
     info = {
-        "resource_pix": _normalize_wash_resolution((parsed or {}).get("resource_pix") or ""),
-        "video_encode": _normalize_wash_codec((parsed or {}).get("video_encode") or ""),
+        "resource_pix": _normalize_wash_resolution(preferred.get("resource_pix") or (parsed or {}).get("resource_pix") or ""),
+        "video_encode": _normalize_wash_codec(preferred.get("video_encode") or (parsed or {}).get("video_encode") or ""),
         "duration_seconds": 0.0,
     }
-    should_probe = (not info["resource_pix"]) or (not info["video_encode"]) or (require_duration and not info["duration_seconds"])
+    should_probe = allow_probe and ((not info["resource_pix"]) or (not info["video_encode"]))
     if should_probe:
         probed = await _probe_wash_fields(
             str((file_item or {}).get("pickcode", "") or ""),
@@ -683,12 +675,6 @@ def _select_existing_candidate(candidates: list[dict], expected_name: str = "") 
     return None, "ambiguous_candidates"
 
 
-def _compute_gb_per_hour(size_bytes: int, duration_seconds: float) -> float:
-    if not size_bytes or not duration_seconds or duration_seconds <= 0:
-        return 0.0
-    return (float(size_bytes) / (1024 ** 3)) / (float(duration_seconds) / 3600.0)
-
-
 def _count_error_results(results: list[dict]) -> int:
     return sum(1 for item in results if item.get("status") == "error")
 
@@ -699,25 +685,9 @@ def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, 
     old_resolution = _normalize_wash_resolution(old_info.get("resource_pix"))
     new_codec = _normalize_wash_codec(new_info.get("video_encode"))
     old_codec = _normalize_wash_codec(old_info.get("video_encode"))
-    new_duration = float(new_info.get("duration_seconds") or 0.0)
-    old_duration = float(old_info.get("duration_seconds") or 0.0)
 
     if not new_resolution or not old_resolution or not new_codec or not old_codec:
         return {"decision": "keep_existing", "reason": "missing_resolution_or_codec"}
-    if not new_duration or not old_duration:
-        return {"decision": "keep_existing", "reason": "missing_duration"}
-
-    new_rule = _WASH_GBPH_RULES.get((new_resolution, new_codec))
-    old_rule = _WASH_GBPH_RULES.get((old_resolution, old_codec))
-    if not new_rule or not old_rule:
-        return {"decision": "keep_existing", "reason": "missing_gbph_rule"}
-
-    new_gbph = _compute_gb_per_hour(new_size, new_duration)
-    old_gbph = _compute_gb_per_hour(old_size, old_duration)
-    if not (new_rule[0] <= new_gbph <= new_rule[1]):
-        return {"decision": "keep_existing", "reason": "new_out_of_range", "new_gbph": new_gbph}
-    if not (old_rule[0] <= old_gbph <= old_rule[1]):
-        return {"decision": "keep_existing", "reason": "old_out_of_range", "old_gbph": old_gbph}
 
     new_multiplier = _WASH_CODEC_MULTIPLIERS.get(new_codec)
     old_multiplier = _WASH_CODEC_MULTIPLIERS.get(old_codec)
@@ -733,16 +703,16 @@ def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, 
             "reason": "equivalent_size_higher",
             "new_equivalent_size": new_equivalent_size,
             "old_equivalent_size": old_equivalent_size,
-            "new_gbph": new_gbph,
-            "old_gbph": old_gbph,
+            "new_gbph": 0.0,
+            "old_gbph": 0.0,
         }
     return {
         "decision": "keep_existing",
         "reason": "equivalent_size_not_enough",
         "new_equivalent_size": new_equivalent_size,
         "old_equivalent_size": old_equivalent_size,
-        "new_gbph": new_gbph,
-        "old_gbph": old_gbph,
+        "new_gbph": 0.0,
+        "old_gbph": 0.0,
     }
 
 
@@ -786,24 +756,30 @@ async def _evaluate_library_replacement(config_data: dict, library_items: dict, 
             return {"decision": "no_candidate"}
         return {"decision": "keep_existing", "reason": match_reason}
 
-    incoming_parsed = dict((parsed or {}).get("meta_info") or {})
+    expected_parsed = _parse_filename(
+        expected_name,
+        media_type_hint=media_type,
+        file_path=_join_remote_path(candidate_dir, expected_name),
+    ) or {}
     existing_parsed = _parse_filename(
         str(candidate.get("name", "") or ""),
         media_type_hint=media_type,
         file_path=str(candidate.get("path", "") or ""),
     ) or {}
+    allow_wash_probe = (str(config_data.get("organize_parse_mode") or "filename").lower() == "filename")
 
     new_info = await _resolve_wash_media_info(
         file_item,
-        _extract_wash_meta_from_parsed({"meta_info": incoming_parsed}),
+        {},
         drive_index,
-        require_duration=True,
+        preferred=_extract_wash_meta_from_parsed(expected_parsed),
+        allow_probe=allow_wash_probe,
     )
     old_info = await _resolve_wash_media_info(
         candidate,
         _extract_wash_meta_from_parsed(existing_parsed),
         drive_index,
-        require_duration=True,
+        allow_probe=allow_wash_probe,
     )
     tolerance_percent = float(config_data.get("wash_tolerance_ratio", 0) or 0)
     tolerance_percent = max(0.0, min(tolerance_percent, 99.99))
@@ -865,17 +841,33 @@ async def _dedupe_pending_tv_plan_item(config_data: dict, drive_index: int, pend
     if not existing_plan:
         return True, None, "no_duplicate"
 
+    allow_wash_probe = (str(config_data.get("organize_parse_mode") or "filename").lower() == "filename")
+    incoming_expected = str(incoming_plan.get("renamed_file", "") or "")
+    existing_expected = str(existing_plan.get("renamed_file", "") or "")
+    incoming_expected_parsed = _parse_filename(
+        incoming_expected,
+        media_type_hint="tv",
+        file_path=_join_remote_path(str(incoming_plan.get("season_dir_path", "") or ""), incoming_expected),
+    ) or {}
+    existing_expected_parsed = _parse_filename(
+        existing_expected,
+        media_type_hint="tv",
+        file_path=_join_remote_path(str(existing_plan.get("season_dir_path", "") or ""), existing_expected),
+    ) or {}
+
     new_info = await _resolve_wash_media_info(
         incoming_plan.get("vf") or {},
-        _extract_wash_meta_from_parsed(incoming_plan.get("parsed") or {}),
+        {},
         drive_index,
-        require_duration=True,
+        preferred=_extract_wash_meta_from_parsed(incoming_expected_parsed),
+        allow_probe=allow_wash_probe,
     )
     old_info = await _resolve_wash_media_info(
         existing_plan.get("vf") or {},
-        _extract_wash_meta_from_parsed(existing_plan.get("parsed") or {}),
+        {},
         drive_index,
-        require_duration=True,
+        preferred=_extract_wash_meta_from_parsed(existing_expected_parsed),
+        allow_probe=allow_wash_probe,
     )
     tolerance_percent = float(config_data.get("wash_tolerance_ratio", 0) or 0)
     tolerance_percent = max(0.0, min(tolerance_percent, 99.99))

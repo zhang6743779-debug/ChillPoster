@@ -907,7 +907,7 @@
                                                 <span v-if="item.subscribed" class="mp-badge-sub"><i class="fa-solid fa-bell"></i></span>
                                                 <span v-else class="mp-badge-type">{{ item.media_type === 'tv' ? '剧集' : '电影' }}</span>
                                                 <span v-if="item.rating" class="mp-badge-rating"><i class="fa-solid fa-star"></i> {{ item.rating.toFixed(1) }}</span>
-                                                <span v-if="item.exists_in_library" class="mp-badge-exists">已存在</span>
+                                                <span v-if="item.exists_in_library" class="mp-badge-exists">已入库</span>
                                                 <div class="mp-poster-mask">
                                                     <div class="mp-poster-title">{{ item.title }}</div>
                                                     <div class="mp-poster-year">{{ item.year }}</div>
@@ -944,6 +944,7 @@
                                             <span v-if="item.subscribed" class="mp-badge-sub"><i class="fa-solid fa-bell"></i></span>
                                             <span v-else class="mp-badge-type">{{ item.media_type === 'tv' ? '剧集' : '电影' }}</span>
                                             <span v-if="item.rating" class="mp-badge-rating"><i class="fa-solid fa-star"></i> {{ item.rating.toFixed(1) }}</span>
+                                            <span v-if="item.exists_in_library" class="mp-badge-exists">已入库</span>
                                             <div class="mp-poster-mask">
                                                 <div class="mp-poster-title">{{ item.title }}</div>
                                                 <div class="mp-poster-year">{{ item.year }}</div>
@@ -980,7 +981,7 @@
                                             <div class="card-badge-tl">
                                                 <span v-if="item.subscribed" class="badge-subscribed" title="已订阅"><i class="fa-solid fa-bell"></i></span>
                                                 <span v-else class="badge-type">{{ item.media_type === 'tv' ? '剧' : '影' }}</span>
-                                                <span v-if="item.exists_in_library" class="badge-exists">已存在</span>
+                                                <span v-if="item.exists_in_library" class="badge-exists">已入库</span>
                                             </div>
                                             <div v-if="item.rating" class="card-badge-tr"><i class="fa-solid fa-star"></i> {{ item.rating.toFixed(1) }}</div>
                                             <div class="card-bottom-mask">
@@ -3626,7 +3627,7 @@
                                                 </div>
                                                 <div class="detail-related-badges">
                                                     <span class="detail-related-type">{{ item.media_type === 'tv' ? '剧集' : '电影' }}</span>
-                                                    <span v-if="item.exists_in_library" class="detail-related-exists">已存在</span>
+                                                    <span v-if="item.exists_in_library" class="detail-related-exists">已入库</span>
                                                     <span v-if="item.rating" class="detail-related-rating">{{ item.rating.toFixed(1) }}</span>
                                                 </div>
                                                 <div class="mp-poster-mask">
@@ -3649,7 +3650,7 @@
                                                 </div>
                                                 <div class="detail-related-badges">
                                                     <span class="detail-related-type">{{ item.media_type === 'tv' ? '剧集' : '电影' }}</span>
-                                                    <span v-if="item.exists_in_library" class="detail-related-exists">已存在</span>
+                                                    <span v-if="item.exists_in_library" class="detail-related-exists">已入库</span>
                                                     <span v-if="item.rating" class="detail-related-rating">{{ item.rating.toFixed(1) }}</span>
                                                 </div>
                                                 <div class="mp-poster-mask">
