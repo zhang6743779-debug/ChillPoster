@@ -17,7 +17,7 @@ logger = logging.getLogger("ChillPoster.mediainfo")
 _FFPROBE_SEMAPHORE = threading.BoundedSemaphore(4)
 
 
-def probe_file(filepath: str) -> Optional[dict]:
+def probe_file(filepath: str, timeout_seconds: int = 30, log_name: str = "") -> Optional[dict]:
     """
     调用 ffprobe 获取媒体流信息。支持本地路径和 HTTP(S) URL。
 
@@ -44,7 +44,7 @@ def probe_file(filepath: str) -> Optional[dict]:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=max(1, int(timeout_seconds or 30)),
             )
         if result.returncode != 0:
             logger.debug(f"ffprobe 返回非零状态码 {result.returncode}: {result.stderr[:200]}")
@@ -56,7 +56,8 @@ def probe_file(filepath: str) -> Optional[dict]:
         logger.warning("ffprobe 未安装或不在 PATH 中，跳过 MediaInfo 获取")
         return None
     except subprocess.TimeoutExpired:
-        logger.warning(f"ffprobe 超时: {filepath}")
+        display_name = log_name or (Path(filepath).name if not is_url else "remote_url")
+        logger.warning(f"ffprobe 超时: {display_name} ({max(1, int(timeout_seconds or 30))}s)")
         return None
     except (json.JSONDecodeError, Exception) as e:
         logger.debug(f"ffprobe 解析失败 '{filepath}': {e}")
@@ -386,7 +387,7 @@ def _extract_probe_media_fields(probe: dict) -> tuple[dict, Optional[float]]:
     return info, _extract_duration_seconds(ff_format, streams)
 
 
-def extract_media_fields(filepath: str) -> dict:
+def extract_media_fields(filepath: str, timeout_seconds: int = 30, log_name: str = "") -> dict:
     """
     从 ffprobe 结果提取标准模板变量字段。
 
@@ -406,7 +407,7 @@ def extract_media_fields(filepath: str) -> dict:
     if not is_url and not Path(filepath).is_file():
         return {}
 
-    probe = probe_file(filepath)
+    probe = probe_file(filepath, timeout_seconds=timeout_seconds, log_name=log_name)
     if not probe:
         return {}
 
@@ -414,12 +415,12 @@ def extract_media_fields(filepath: str) -> dict:
     return {k: v for k, v in info.items() if v is not None and v != ""}
 
 
-def extract_wash_fields(filepath: str) -> dict:
+def extract_wash_fields(filepath: str, timeout_seconds: int = 30, log_name: str = "") -> dict:
     is_url = filepath.startswith("http://") or filepath.startswith("https://")
     if not is_url and not Path(filepath).is_file():
         return {}
 
-    probe = probe_file(filepath)
+    probe = probe_file(filepath, timeout_seconds=timeout_seconds, log_name=log_name)
     if not probe:
         return {}
 

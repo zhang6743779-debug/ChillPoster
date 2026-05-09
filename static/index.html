@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260509c">
+    <link rel="stylesheet" href="/static/style.css?v=20260509d">
 
 </head>
 
@@ -1274,6 +1274,11 @@
                                             <label>ffprobe 并发数</label>
                                             <input type="number" min="1" max="10" step="1" v-model.number="mediaOrganizeConfig.ffprobe_concurrency">
                                             <div class="input-tip">控制 115 直链媒体探测并发，默认 2。</div>
+                                        </div>
+                                        <div class="form-item">
+                                            <label>ffprobe 单文件超时（秒）</label>
+                                            <input type="number" min="5" max="60" step="1" v-model.number="mediaOrganizeConfig.ffprobe_timeout_seconds">
+                                            <div class="input-tip">默认 20 秒；连续超时 2 次后会跳过同批次后续探测。</div>
                                         </div>
                                         <div class="form-item">
                                             <label>115 写操作最小间隔（秒）</label>
@@ -4048,6 +4053,6 @@
 
         <!-- 移动端抽屉菜单 (已移除，使用滑动导航栏替代) -->
 
-    </div> <script src="/static/app.js?v=20260509c"></script>
+    </div> <script src="/static/app.js?v=20260509d"></script>
 </body>
 </html>

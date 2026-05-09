@@ -73,6 +73,7 @@ class MediaOrganizeConfig(BaseModel):
     direct_link_pacing_min_seconds: float = 1.0
     direct_link_pacing_max_seconds: float = 2.0
     ffprobe_concurrency: int = 2
+    ffprobe_timeout_seconds: int = 20
     waf_cooldown_seconds: int = 1800
     movie_folder_format: str = '{title} ({year}) {tmdb-{tmdb_id}}'
     movie_rename_format: str = '{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}'
@@ -181,6 +182,7 @@ async def save_config(config: MediaOrganizeConfig):
             max(0.1, float(normalized_data.get("direct_link_pacing_max_seconds") or 2.0)),
         )
         normalized_data["ffprobe_concurrency"] = min(10, max(1, int(normalized_data.get("ffprobe_concurrency") or 2)))
+        normalized_data["ffprobe_timeout_seconds"] = min(60, max(5, int(normalized_data.get("ffprobe_timeout_seconds") or 20)))
         normalized_data["waf_cooldown_seconds"] = max(60, int(normalized_data.get("waf_cooldown_seconds") or 1800))
         normalized_config = MediaOrganizeConfig(**normalized_data)
         merged_data.update(normalized_config.dict())

@@ -2132,6 +2132,7 @@ createApp({
             direct_link_pacing_min_seconds: 1,
             direct_link_pacing_max_seconds: 2,
             ffprobe_concurrency: 2,
+            ffprobe_timeout_seconds: 20,
             waf_cooldown_seconds: 1800,
             movie_folder_format: '{title} ({year}) {tmdb-{tmdb_id}}',
             movie_rename_format: '{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}',
@@ -2706,6 +2707,7 @@ createApp({
                 toNumber(mediaOrganizeConfig.direct_link_pacing_max_seconds, 2, 0.1),
             );
             mediaOrganizeConfig.ffprobe_concurrency = toInt(mediaOrganizeConfig.ffprobe_concurrency, 2, 1, 10);
+            mediaOrganizeConfig.ffprobe_timeout_seconds = toInt(mediaOrganizeConfig.ffprobe_timeout_seconds, 20, 5, 60);
             mediaOrganizeConfig.waf_cooldown_seconds = toInt(mediaOrganizeConfig.waf_cooldown_seconds, 1800, 60, 86400);
         };
 

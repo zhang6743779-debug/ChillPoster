@@ -104,16 +104,21 @@ _FFPROBE_BATCH_CACHE: Optional[dict] = None
 _FFPROBE_MEDIA_DOWNLOAD_LIMIT = 2
 _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(_FFPROBE_MEDIA_DOWNLOAD_LIMIT)
 _FFPROBE_GATE_CONFIG_LOCK = threading.Lock()
-_FFPROBE_EXEC_TIMEOUT_SECONDS = 45
+_FFPROBE_EXEC_TIMEOUT_SECONDS = 20
 
 
 def _configure_ffprobe_tuning(config_data: dict | None):
-    global _FFPROBE_MEDIA_DOWNLOAD_LIMIT, _FFPROBE_MEDIA_GATE
+    global _FFPROBE_MEDIA_DOWNLOAD_LIMIT, _FFPROBE_MEDIA_GATE, _FFPROBE_EXEC_TIMEOUT_SECONDS
     data = config_data if isinstance(config_data, dict) else {}
     try:
         limit = min(10, max(1, int(data.get("ffprobe_concurrency") or 2)))
     except Exception:
         limit = 2
+    try:
+        timeout_seconds = min(60, max(5, int(data.get("ffprobe_timeout_seconds") or 20)))
+    except Exception:
+        timeout_seconds = 20
+    _FFPROBE_EXEC_TIMEOUT_SECONDS = timeout_seconds + 5
     with _FFPROBE_GATE_CONFIG_LOCK:
         if limit != _FFPROBE_MEDIA_DOWNLOAD_LIMIT:
             _FFPROBE_MEDIA_DOWNLOAD_LIMIT = limit
@@ -552,7 +557,7 @@ async def _probe_media_fields_via_ffprobe(file_item: dict, drive_index: int, dir
 
         def _run_probe_with_gate():
             with _FFPROBE_MEDIA_GATE:
-                return extract_media_fields(resolved_direct_url)
+                return extract_media_fields(resolved_direct_url, timeout_seconds=max(1, _FFPROBE_EXEC_TIMEOUT_SECONDS - 5), log_name=file_name)
 
         fields = await asyncio.wait_for(
             loop.run_in_executor(None, _run_probe_with_gate),
@@ -560,12 +565,14 @@ async def _probe_media_fields_via_ffprobe(file_item: dict, drive_index: int, dir
         )
     except asyncio.TimeoutError:
         logger.warning(f"[MediaOrganize] ffprobe探测超时: file={file_name}, pickcode={pickcode}")
-        return {}
+        return {"__timeout__": True}
     except OneOneFiveWafBlockedError:
         raise
     except Exception as e:
         logger.debug(f"[MediaOrganize] ffprobe探测失败: pickcode={pickcode}, err={e}")
         return {}
+    if isinstance(fields, dict) and fields.get("__timeout__"):
+        return fields
     normalized = _normalize_ffprobe_fields(fields or {})
     if normalized:
         _set_cached_ffprobe_fields(file_item, normalized)
@@ -582,7 +589,7 @@ async def _probe_wash_fields(pickcode: str, drive_index: int, file_name: str = "
     try:
         def _run_wash_with_gate():
             with _FFPROBE_MEDIA_GATE:
-                return extract_wash_fields(direct_url)
+                return extract_wash_fields(direct_url, timeout_seconds=max(1, _FFPROBE_EXEC_TIMEOUT_SECONDS - 5), log_name=file_name)
 
         fields = await asyncio.wait_for(
             loop.run_in_executor(None, _run_wash_with_gate),
@@ -590,12 +597,14 @@ async def _probe_wash_fields(pickcode: str, drive_index: int, file_name: str = "
         )
     except asyncio.TimeoutError:
         logger.warning(f"[Wash] ffprobe探测超时: file={file_name}, pickcode={pickcode}")
-        return {}
+        return {"__timeout__": True}
     except OneOneFiveWafBlockedError:
         raise
     except Exception as e:
         logger.debug(f"[Wash] ffprobe探测失败: pickcode={pickcode}, err={e}")
         return {}
+    if isinstance(fields, dict) and fields.get("__timeout__"):
+        return fields
     return {
         "resource_pix": _normalize_wash_resolution(fields.get("resource_pix")),
         "video_encode": _normalize_wash_codec(fields.get("video_encode")),
@@ -617,6 +626,9 @@ async def _resolve_wash_media_info(file_item: dict, parsed: dict, drive_index: i
             drive_index,
             file_name=str((file_item or {}).get("name", "") or ""),
         )
+        if probed.get("__timeout__"):
+            info["__timeout__"] = True
+            return info
         if probed.get("resource_pix"):
             info["resource_pix"] = probed["resource_pix"]
         if probed.get("video_encode"):
@@ -825,6 +837,16 @@ async def _evaluate_library_replacement(config_data: dict, library_items: dict, 
         drive_index,
         require_duration=True,
     )
+    if new_info.get("__timeout__") or old_info.get("__timeout__"):
+        return {
+            "decision": "keep_existing",
+            "reason": "ffprobe_timeout",
+            "candidate": candidate,
+            "candidate_dir": candidate_dir,
+            "match_reason": match_reason,
+            "new_info": new_info,
+            "old_info": old_info,
+        }
     tolerance_percent = float(config_data.get("wash_tolerance_ratio", 0) or 0)
     tolerance_percent = max(0.0, min(tolerance_percent, 99.99))
     comparison = _compare_equivalent_size_wash(
@@ -897,6 +919,8 @@ async def _dedupe_pending_tv_plan_item(config_data: dict, drive_index: int, pend
         drive_index,
         require_duration=True,
     )
+    if new_info.get("__timeout__") or old_info.get("__timeout__"):
+        return False, existing_plan, "ffprobe_timeout"
     tolerance_percent = float(config_data.get("wash_tolerance_ratio", 0) or 0)
     tolerance_percent = max(0.0, min(tolerance_percent, 99.99))
     comparison = _compare_equivalent_size_wash(
@@ -1415,12 +1439,14 @@ async def _run_organize_async(run_id: str, req):
                 search_cache[key] = None
 
             group_failed = []
+            group_wash_failed = []
             tv_root_scraped = set()
             season_scraped = set()
             pending_tv_batches = {}
             ffprobe_batch_profiles: dict = {}
             ffprobe_batch_sizes: dict = {}
-            ffprobe_stats = {"sample": 0, "anomaly": 0, "cache": 0, "reuse": 0, "batch_cache": 0, "mismatch": 0, "full_probe": 0}
+            ffprobe_timeout_counts: dict[tuple, int] = {}
+            ffprobe_stats = {"sample": 0, "anomaly": 0, "cache": 0, "reuse": 0, "batch_cache": 0, "mismatch": 0, "full_probe": 0, "timeout_skip": 0}
             ffprobe_group_urls: dict[str, str] = {}
             group_parse_mode = (config_data.get("organize_parse_mode") or "filename").lower()
             if group_parse_mode == "ffprobe_full":
@@ -1529,15 +1555,23 @@ async def _run_organize_async(run_id: str, req):
                     use_smart_ffprobe_mode = parse_mode == "ffprobe"
                     use_full_ffprobe_mode = parse_mode == "ffprobe_full"
                     variables = _build_template_variables(tmdb_data, file_req, ext, meta_info, _title_cache=_title_cache)
+                    ffprobe_batch_key = _build_ffprobe_batch_key(tmdb_id, parsed, file_item, ext)
+                    ffprobe_skip_probe = ffprobe_timeout_counts.get(ffprobe_batch_key, 0) >= 2
                     if use_full_ffprobe_mode:
-                        pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
-                        direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
-                        probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
-                        if probe_fields:
-                            variables = _merge_probe_fields_into_variables(variables, probe_fields)
-                        ffprobe_stats["full_probe"] += 1
+                        if ffprobe_skip_probe:
+                            ffprobe_stats["timeout_skip"] += 1
+                            logger.debug(f"[MediaOrganize] FFPROBE连续超时，跳过后续探测: {file_name} | batch={ffprobe_batch_key}")
+                        else:
+                            pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
+                            direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
+                            probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
+                            if probe_fields.get("__timeout__"):
+                                ffprobe_timeout_counts[ffprobe_batch_key] = ffprobe_timeout_counts.get(ffprobe_batch_key, 0) + 1
+                            elif probe_fields:
+                                ffprobe_timeout_counts[ffprobe_batch_key] = 0
+                                variables = _merge_probe_fields_into_variables(variables, probe_fields)
+                            ffprobe_stats["full_probe"] += 1
                     elif use_smart_ffprobe_mode:
-                        ffprobe_batch_key = _build_ffprobe_batch_key(tmdb_id, parsed, file_item, ext)
                         ffprobe_batch_sizes.setdefault(ffprobe_batch_key, []).append(int(file_item.get("size", 0) or 0))
                         cached_probe = _get_cached_ffprobe_fields(file_item)
                         if cached_probe:
@@ -1561,10 +1595,18 @@ async def _run_organize_async(run_id: str, req):
                                 variables = _merge_probe_fields_into_variables(variables, batch_profile)
                                 ffprobe_stats["reuse"] += 1
                             else:
-                                pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
-                                direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
-                                probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
-                                if probe_fields:
+                                if ffprobe_skip_probe:
+                                    ffprobe_stats["timeout_skip"] += 1
+                                    logger.debug(f"[MediaOrganize] FFPROBE连续超时，跳过后续探测: {file_name} | batch={ffprobe_batch_key}")
+                                    probe_fields = {}
+                                else:
+                                    pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
+                                    direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
+                                    probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
+                                if probe_fields.get("__timeout__"):
+                                    ffprobe_timeout_counts[ffprobe_batch_key] = ffprobe_timeout_counts.get(ffprobe_batch_key, 0) + 1
+                                elif probe_fields:
+                                    ffprobe_timeout_counts[ffprobe_batch_key] = 0
                                     variables = _merge_probe_fields_into_variables(variables, probe_fields)
                                     sampled_profile = {
                                         **probe_fields,
@@ -1710,7 +1752,7 @@ async def _run_organize_async(run_id: str, req):
                                 "status": "error",
                                 "message": f"洗版删除旧文件失败: {remove_reason}",
                             })
-                            group_failed.append(file_item)
+                            group_wash_failed.append(file_item)
                             _processed = len(results)
                             _update_streaming_progress(
                                 run_id,
@@ -2042,10 +2084,16 @@ async def _run_organize_async(run_id: str, req):
                     ))
 
             logger.debug(
-                f"[MediaOrganize] FFPROBE统计: 全量探测={ffprobe_stats['full_probe']} 样本={ffprobe_stats['sample']} 异常={ffprobe_stats['anomaly']} 文件缓存命中={ffprobe_stats['cache']} 批次缓存命中={ffprobe_stats['batch_cache']} 批次复用={ffprobe_stats['reuse']} 样本不一致={ffprobe_stats['mismatch']}"
+                f"[MediaOrganize] FFPROBE统计: 全量探测={ffprobe_stats['full_probe']} 样本={ffprobe_stats['sample']} 异常={ffprobe_stats['anomaly']} 文件缓存命中={ffprobe_stats['cache']} 批次缓存命中={ffprobe_stats['batch_cache']} 批次复用={ffprobe_stats['reuse']} 样本不一致={ffprobe_stats['mismatch']} 连续超时跳过={ffprobe_stats['timeout_skip']}"
             )
 
-            # 本组整理完：失败文件所在的顶层目录直接移到失败目录
+            # 本组整理完：洗版失败优先进洗版目录，普通失败进失败目录
+            if group_wash_failed and wash_dir_cid:
+                await _move_failed_files_batch(
+                    client, group_wash_failed, str(source_cid),
+                    wash_dir_cid, moved_dirs,
+                    subtitles_by_parent=subtitles_by_parent,
+                )
             if group_failed and has_failed_dir and failed_dir_cid:
                 await _move_failed_files_batch(
                     client, group_failed, str(source_cid),
