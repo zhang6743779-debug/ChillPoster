@@ -136,7 +136,7 @@ class TransferService:
                                 mkdir_resp = run_115_write_request_sync(
                                     client,
                                     "创建转存目录",
-                                    lambda write_client, part=part: write_client.fs_mkdir(part),
+                                    lambda write_client, part=part: write_client.fs_mkdir_app(part, app="android", async_=False),
                                     raise_on_state_false=False,
                                 )
                                 if mkdir_resp and mkdir_resp.get("state"):

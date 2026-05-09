@@ -304,13 +304,17 @@ def _ensure_115_dir(client: P115Client, parent_cid: int, name: str) -> str:
     if existing_cid:
         return existing_cid
 
-    def _mkdir(write_client):
-        try:
-            return write_client.fs_mkdir(name, pid=int(parent_cid))
-        except TypeError:
-            return write_client.fs_mkdir(name)
-
-    resp = run_115_write_request_sync(client, "创建配置目录", _mkdir, raise_on_state_false=False)
+    resp = run_115_write_request_sync(
+        client,
+        "创建配置目录",
+        lambda write_client: write_client.fs_mkdir_app(
+            name,
+            pid=int(parent_cid),
+            app="android",
+            async_=False,
+        ),
+        raise_on_state_false=False,
+    )
     if resp and resp.get("state"):
         created_cid = str(resp.get("cid") or resp.get("id") or "")
         if created_cid:

@@ -274,8 +274,8 @@ def _try_remove_empty_dir(client, dir_cid: str):
 # 文件操作（重命名 / 移动 / 字幕 / 上传）
 # ==========================================
 
-_WRITE_API_PACING_MIN_SECONDS = 0.4
-_WRITE_API_PACING_MAX_SECONDS = 0.8
+_WRITE_API_PACING_MIN_SECONDS = 0.5
+_WRITE_API_PACING_MAX_SECONDS = 1.0
 _DIRECT_URL_PACING_MIN_SECONDS = 0.5
 _DIRECT_URL_PACING_MAX_SECONDS = 1.0
 _WRITE_API_LOCK = threading.Lock()

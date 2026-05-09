@@ -450,7 +450,7 @@ class Drive115Service:
                 make_resp = run_115_write_request_sync(
                     client,
                     "创建复制目标目录",
-                    lambda write_client: write_client.fs_mkdir(dir_name),
+                    lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
                 )  # 默认 pid=0 (根目录)
                 
                 if make_resp and make_resp.get('state'):
@@ -630,7 +630,7 @@ class Drive115Service:
                 make_resp = run_115_write_request_sync(
                     secondary_client,
                     "创建秒传目标目录",
-                    lambda write_client: write_client.fs_mkdir(dir_name),
+                    lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
                 )
                 if make_resp and make_resp.get('state'):
                     target_cid_info = secondary_client.fs_dir_getid_app(target_dir)
