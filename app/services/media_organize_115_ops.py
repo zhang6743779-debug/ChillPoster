@@ -363,7 +363,13 @@ def run_115_write_request_sync(
 _run_115_write_request_sync = run_115_write_request_sync
 
 
-async def run_115_write_request(client, request_name: str, request_factory: Callable[[Any], Any]):
+async def run_115_write_request(
+    client,
+    request_name: str,
+    request_factory: Callable[[Any], Any],
+    *,
+    raise_on_state_false: bool = True,
+):
     global _LAST_WRITE_API_AT
 
     for attempt in range(_WRITE_API_RATE_LIMIT_MAX_RETRIES + 1):
@@ -396,7 +402,8 @@ async def run_115_write_request(client, request_name: str, request_factory: Call
                 )
                 await asyncio.sleep(backoff)
                 continue
-            raise RuntimeError(f"{request_name}失败: {result}")
+            if raise_on_state_false:
+                raise RuntimeError(f"{request_name}失败: {result}")
         return result
 
 

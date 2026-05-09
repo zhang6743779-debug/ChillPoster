@@ -8,11 +8,11 @@ from p115client.util import share_extract_payload
 from app.services.drive115_service import drive115_service
 from app.routers.config_302 import get_config_302
 from core.logger import logger
-from app.services.media_organize_115_ops import run_115_write_request_sync
+from app.services.media_organize_115_ops import run_115_write_request
 
 RE_115_LINK = re.compile(
     r'https?://(?:115\.com/s/|115cdn\.com/s/|share\.115\.com/|anxia\.com/\S*?)'
-    r'[a-zA-Z0-9]+(?:\?password=[a-zA-Z0-9]+)?'
+    r'[a-zA-Z0-9]+(?:\?\s*password\s*=\s*[a-zA-Z0-9]+)?'
 )
 RE_ED2K_LINK = re.compile(r'ed2k://\|file\|.*?\|/', re.IGNORECASE)
 RE_115_SHARE_CODE = re.compile(r'[a-zA-Z0-9]{6,20}-[a-zA-Z0-9]{4,20}')
@@ -61,7 +61,7 @@ class TransferService:
             return []
 
         links = []
-        links.extend(RE_115_LINK.findall(text))
+        links.extend(re.sub(r"\s+", "", link) for link in RE_115_LINK.findall(text))
         links.extend(match.group(0).strip() for match in RE_ED2K_LINK.finditer(text))
 
         stripped = text.strip()
@@ -141,7 +141,7 @@ class TransferService:
             return result
 
         try:
-            resp = run_115_write_request_sync(
+            resp = await run_115_write_request(
                 client,
                 "接收115分享",
                 lambda write_client: write_client.share_receive({
@@ -220,7 +220,7 @@ class TransferService:
         payload["wp_path_id"] = cid
 
         try:
-            resp = run_115_write_request_sync(
+            resp = await run_115_write_request(
                 client,
                 f"添加{len(links)}个离线任务",
                 lambda write_client: write_client.offline_add_urls(payload, async_=False),
@@ -249,10 +249,10 @@ class TransferService:
         if not client:
             return None, 0, "115 客户端未配置"
 
-        cid = self._resolve_transfer_cid(client, drives)
+        cid = await self._resolve_transfer_cid(client, drives)
         return client, cid, ""
 
-    def _resolve_transfer_cid(self, client, drives) -> int:
+    async def _resolve_transfer_cid(self, client, drives) -> int:
         cid = 0
         transfer_dir = ""
         if isinstance(drives, list) and len(drives) > 0:
@@ -270,18 +270,28 @@ class TransferService:
         try:
             for i, part in enumerate(parts):
                 current_path = "/" + "/".join(parts[:i + 1])
-                dir_info = client.fs_dir_getid_app(current_path)
+                dir_info = await run_115_write_request(
+                    client,
+                    "查询转存目录",
+                    lambda write_client, current_path=current_path: write_client.fs_dir_getid_app(current_path),
+                    raise_on_state_false=False,
+                )
                 if dir_info and dir_info.get("id"):
                     cid = dir_info["id"]
                 else:
-                    mkdir_resp = run_115_write_request_sync(
+                    mkdir_resp = await run_115_write_request(
                         client,
                         "创建转存目录",
                         lambda write_client, part=part: write_client.fs_mkdir_app(part, app="android", async_=False),
                         raise_on_state_false=False,
                     )
                     if mkdir_resp and mkdir_resp.get("state"):
-                        dir_info = client.fs_dir_getid_app(current_path)
+                        dir_info = await run_115_write_request(
+                            client,
+                            "查询转存目录",
+                            lambda write_client, current_path=current_path: write_client.fs_dir_getid_app(current_path),
+                            raise_on_state_false=False,
+                        )
                         cid = dir_info.get("id", 0) if dir_info else 0
                     else:
                         err = mkdir_resp.get("error", "未知错误") if mkdir_resp else "无响应"

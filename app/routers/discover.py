@@ -287,7 +287,15 @@ class _RefRequestUtils:
         self.headers = headers or {}
 
     def get_res(self, url, params=None):
-        return requests.get(url, params=params, headers=self.headers, timeout=20)
+        proxy_url = _get_proxy_url()
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+        try:
+            return requests.get(url, params=params, headers=self.headers, timeout=20, proxies=proxies)
+        except requests.RequestException as proxy_error:
+            if not proxies:
+                raise
+            logger.warning(f"[discover] 插件代理请求失败，回退直连: {proxy_error}")
+            return requests.get(url, params=params, headers=self.headers, timeout=20)
 
 
 def _load_reference_module(module_name: str):
@@ -542,6 +550,10 @@ def _normalize_provider_item(item: Any, source_key: str) -> dict:
         if poster_url.startswith("http://"):
             poster_url = "https://" + poster_url[len("http://"):]
         poster_url = f"/api/discover/bili_img?url={poster_url}"
+    elif source_key in {"bangumi", "bangumidaily"} and isinstance(poster_url, str) and poster_url:
+        if poster_url.startswith("http://"):
+            poster_url = "https://" + poster_url[len("http://"):]
+        poster_url = f"/api/discover/bangumi_img?url={poster_url}"
     raw_type = raw.get("media_type") or raw.get("type") or ""
     media_type = "tv"
     if raw_type in ("movie", "电影"):
@@ -1070,9 +1082,20 @@ def _fetch_bangumi_discover(type_value: str = "2", cat: str = "", sort: str = "r
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
     }
+    proxies = None
+    proxy_url = _get_proxy_url()
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
     try:
-        response = requests.get("https://api.bgm.tv/v0/subjects", params=params, headers=headers, timeout=20)
-        response.raise_for_status()
+        try:
+            response = requests.get("https://api.bgm.tv/v0/subjects", params=params, headers=headers, timeout=20, proxies=proxies)
+            response.raise_for_status()
+        except requests.RequestException as proxy_error:
+            if not proxies:
+                raise
+            logger.warning(f"[bangumi] 代理请求失败，回退直连: {proxy_error}")
+            response = requests.get("https://api.bgm.tv/v0/subjects", params=params, headers=headers, timeout=20)
+            response.raise_for_status()
         data = response.json()
     except requests.RequestException as e:
         logger.error(f"[bangumi] 请求失败: {e}")
@@ -1694,6 +1717,8 @@ _tmdb_img_cache: OrderedDict[str, tuple] = OrderedDict()  # path -> (bytes, cont
 _task_cover_cache: OrderedDict[str, tuple] = OrderedDict()  # key -> (bytes, content_type, expiry)
 _img_client: Optional[httpx.AsyncClient] = None
 _douban_img_client: Optional[httpx.AsyncClient] = None
+_bangumi_img_client: Optional[httpx.AsyncClient] = None
+_bangumi_direct_img_client: Optional[httpx.AsyncClient] = None
 
 def _get_img_client() -> httpx.AsyncClient:
     """复用全局 httpx.AsyncClient，避免每次新建连接"""
@@ -1711,13 +1736,30 @@ def _get_douban_img_client() -> httpx.AsyncClient:
         _douban_img_client = httpx.AsyncClient(verify=False, timeout=20, limits=limits)
     return _douban_img_client
 
+
+def _get_bangumi_img_client(use_proxy: bool = True) -> httpx.AsyncClient:
+    global _bangumi_img_client, _bangumi_direct_img_client
+    limits = httpx.Limits(max_connections=80, max_keepalive_connections=40)
+    if use_proxy:
+        proxy = _get_proxy_url()
+        if _bangumi_img_client is None or _bangumi_img_client.is_closed:
+            _bangumi_img_client = httpx.AsyncClient(verify=False, timeout=20, proxy=proxy or None, limits=limits)
+        return _bangumi_img_client
+    if _bangumi_direct_img_client is None or _bangumi_direct_img_client.is_closed:
+        _bangumi_direct_img_client = httpx.AsyncClient(verify=False, timeout=20, limits=limits)
+    return _bangumi_direct_img_client
+
 async def close_img_clients():
     """关闭全局图片代理客户端，在应用关闭时调用"""
-    global _img_client, _douban_img_client
+    global _img_client, _douban_img_client, _bangumi_img_client, _bangumi_direct_img_client
     if _img_client and not _img_client.is_closed:
         await _img_client.aclose()
     if _douban_img_client and not _douban_img_client.is_closed:
         await _douban_img_client.aclose()
+    if _bangumi_img_client and not _bangumi_img_client.is_closed:
+        await _bangumi_img_client.aclose()
+    if _bangumi_direct_img_client and not _bangumi_direct_img_client.is_closed:
+        await _bangumi_direct_img_client.aclose()
 
 
 def put_task_cover_preview(key: str, img_bytes: bytes, content_type: str = "image/jpeg", ttl_seconds: int = 86400):
@@ -1824,6 +1866,52 @@ async def douban_image_proxy(url: str = Query(..., description="豆瓣图片完�
                                  headers={"Cache-Control": "public, max-age=86400"})
     except httpx.HTTPError as e:
         raise HTTPException(502, f"图片代理请求失败: {e}")
+
+
+@router.get("/bangumi_img")
+async def bangumi_image_proxy(url: str = Query(..., description="Bangumi 图片完整 URL")):
+    """代理转发 Bangumi 图片，代理异常时回退直连。"""
+    if not url or "bgm.tv" not in url:
+        raise HTTPException(400, "无效的 Bangumi 图片 URL")
+
+    cache_key = url
+    if cache_key in _tmdb_img_cache:
+        img_bytes, content_type, expires = _tmdb_img_cache[cache_key]
+        if time.time() < expires:
+            _tmdb_img_cache.move_to_end(cache_key)
+            return Response(content=img_bytes, media_type=content_type,
+                          headers={"Cache-Control": "public, max-age=86400"})
+        del _tmdb_img_cache[cache_key]
+
+    headers = {"Referer": "https://bgm.tv/", "User-Agent": "Mozilla/5.0"}
+    proxy_url = _get_proxy_url()
+    attempts = [True, False] if proxy_url else [False]
+    last_error = None
+    for use_proxy in attempts:
+        client = _get_bangumi_img_client(use_proxy=use_proxy)
+        try:
+            resp = await client.get(url, follow_redirects=True, headers=headers)
+            if resp.status_code != 200:
+                last_error = f"HTTP {resp.status_code}"
+                if use_proxy:
+                    logger.warning(f"[bangumi] 图片代理请求失败，回退直连: {last_error}")
+                    continue
+                raise HTTPException(502, f"Bangumi 图片获取失败: {resp.status_code}")
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            img_bytes = resp.content
+            if len(_tmdb_img_cache) >= 500:
+                _tmdb_img_cache.popitem(last=False)
+            _tmdb_img_cache[cache_key] = (img_bytes, content_type, time.time() + 86400)
+            return Response(content=img_bytes, media_type=content_type,
+                          headers={"Cache-Control": "public, max-age=86400"})
+        except httpx.HTTPError as e:
+            last_error = e
+            if use_proxy:
+                logger.warning(f"[bangumi] 图片代理请求失败，回退直连: {e}")
+                continue
+            raise HTTPException(502, f"图片代理请求失败: {e}")
+
+    raise HTTPException(502, f"图片代理请求失败: {last_error}")
 
 
 @router.get("/bili_img")

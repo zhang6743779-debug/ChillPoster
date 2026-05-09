@@ -593,21 +593,36 @@ class TelegramNotifyService:
 
         logger.info("[Telegram通知] Polling 循环已退出")
 
+    def _extract_message_links(self, msg: dict) -> list[str]:
+        from app.services.transfer_service import transfer_service
+
+        links: list[str] = []
+        for field in ("text", "caption"):
+            value = str(msg.get(field, "") or "")
+            if value:
+                links.extend(transfer_service.extract_links(value))
+
+        for field in ("entities", "caption_entities"):
+            for entity in msg.get(field, []) or []:
+                url = str(entity.get("url", "") or "").strip()
+                if url:
+                    links.extend(transfer_service.extract_links(url))
+
+        return transfer_service._dedupe_links(links)
+
     def _handle_update(self, update: dict):
         """处理单条 Telegram update"""
         msg = update.get("message", {})
-        text = msg.get("text", "")
-        if not text:
-            return
 
         # 提取资源链接
-        from app.services.transfer_service import transfer_service
-        links = transfer_service.extract_links(text)
+        links = self._extract_message_links(msg)
         if not links:
             return
 
         chat_id = str(msg.get("chat", {}).get("id", ""))
         logger.info(f"[Telegram通知] 收到 {len(links)} 条资源链接 (chat={chat_id})")
+
+        from app.services.transfer_service import transfer_service
 
         # 同步处理转存（polling 在后台线程中）
         import asyncio

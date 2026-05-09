@@ -20,7 +20,7 @@ HEADERS = {
     "Referer": "https://www.mgtv.com",
 }
 
-BASE_UI = []
+BASE_UI = None
 
 def get_api(master_plugin):
     if "hitv.com" not in settings.SECURITY_IMAGE_DOMAINS:
@@ -183,6 +183,9 @@ def mangguo_discover(
     return results
 
 def mangguo_filter_ui():
+    global BASE_UI
+    if BASE_UI is None:
+        BASE_UI = init_base_ui()
     mtype_ui = [
         {
             "component": "VChip",

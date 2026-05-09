@@ -2,6 +2,7 @@
 import hashlib
 import asyncio
 import xml.etree.ElementTree as ET
+from functools import partial
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
@@ -247,13 +248,19 @@ async def wechat_callback_message(request: Request):
 
         # 异步处理转存（不阻塞微信回调响应）
         async def _process_and_notify():
-            results = await transfer_service.process_links(links, source="wechat")
-            for result in results:
-                send_to_all_channels(
-                    title=result.get("status", "转存"),
-                    description=result.get("message", ""),
-                    notify_type="resource_transfer",
-                )
+            try:
+                results = await transfer_service.process_links(links, source="wechat")
+                for result in results:
+                    await asyncio.to_thread(
+                        partial(
+                            send_to_all_channels,
+                            title=result.get("status", "转存"),
+                            description=result.get("message", ""),
+                            notify_type="resource_transfer",
+                        )
+                    )
+            except Exception as e:
+                logger.error(f"[WeChat] 转存后台任务异常: {e}", exc_info=True)
 
         asyncio.create_task(_process_and_notify())
 
