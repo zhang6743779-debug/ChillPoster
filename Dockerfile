@@ -170,6 +170,7 @@ launcher = """import asyncio\nimport os\nimport chillposter_main as app_main\n\n
 launcher_path = Path('/tmp/chillposter_launcher.py')
 launcher_path.write_text(launcher, encoding='utf-8')
 compile_sourceless(launcher_path, out / 'main.pyc')
+(out / 'main.py').write_text("import runpy\nrunpy.run_path('/app/main.pyc', run_name='__main__')\n", encoding='utf-8')
 
 for folder in ['app', 'core']:
     base = src / folder
