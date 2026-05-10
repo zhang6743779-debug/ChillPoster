@@ -6706,7 +6706,7 @@ input:checked + .ios-slider:before {
 .mp-badge-exists {
     position: absolute;
     right: 8px;
-    bottom: 44px;
+    bottom: 12px;
     background: linear-gradient(180deg, #10b981, #059669);
     color: #fff;
     font-size: 11px;

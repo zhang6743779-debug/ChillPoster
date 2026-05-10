@@ -608,6 +608,19 @@ class TelegramNotifyService:
                 if url:
                     links.extend(transfer_service.extract_links(url))
 
+        reply_markup = msg.get("reply_markup") or {}
+        for row in reply_markup.get("inline_keyboard", []) or []:
+            for button in row or []:
+                if not isinstance(button, dict):
+                    continue
+                url = str(button.get("url", "") or "").strip()
+                if url:
+                    links.extend(transfer_service.extract_links(url))
+                login_url = button.get("login_url") if isinstance(button.get("login_url"), dict) else {}
+                url = str(login_url.get("url", "") or "").strip()
+                if url:
+                    links.extend(transfer_service.extract_links(url))
+
         return transfer_service._dedupe_links(links)
 
     def _handle_update(self, update: dict):

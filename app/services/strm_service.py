@@ -23,7 +23,6 @@ from app.services.media_organize_scrape import (
 )
 from app.services.media_organize_tmdb import (
     _parse_filename,
-    _search_tmdb_for_title_sync,
     _fetch_tmdb_data_sync,
     _load_config_data,
     _build_scraping_config,
@@ -253,11 +252,10 @@ def _set_cached_tmdb_fallback_value(cache_key: tuple, value: dict | None):
 
 
 def _resolve_tmdb_data_with_short_cache(parsed: dict, api_key: str, task_cache: dict | None = None) -> tuple[dict | None, str]:
-    search_result = _search_tmdb_for_title_sync(parsed, api_key, set())
-    if not search_result:
-        return None, "未找到 TMDb 条目"
+    tmdb_id = int(parsed.get("tmdb_id_direct") or 0)
+    if not tmdb_id:
+        return None, "缺少直写 TMDb ID"
 
-    tmdb_id = int(search_result["tmdb_id"])
     media_type = str(parsed.get("media_type", "") or "")
     season_number = parsed.get("season")
     cache_key = (tmdb_id, media_type)
@@ -298,6 +296,8 @@ def _run_tmdb_metadata_fallback(plan: dict, scraping_config, api_key: str, task_
     parsed = _parse_filename(filename, file_path=remote_file_path)
     if not parsed:
         return "skip", 0, "文件名解析失败"
+    if not int(parsed.get("tmdb_id_direct") or 0):
+        return "skip", 0, "缺少直写 TMDb ID"
 
     check_started = perf_counter()
     missing = list_missing_tmdb_metadata_for_strm(
@@ -350,8 +350,6 @@ def _process_tmdb_batch(
     stats: dict,
     log_prefix: str,
     cancel_event: Optional[Event],
-    search_cache: dict,
-    failed_cache: set,
 ) -> None:
     """处理单批 TMDb 补齐：预处理 → 并发拉取 → 分组落盘，处理完后释放 data_by_key。"""
     prepared_items: list[dict] = []
@@ -373,6 +371,12 @@ def _process_tmdb_batch(
             stats["tmdb_skipped"] += 1
             continue
 
+        tmdb_id = int(parsed.get("tmdb_id_direct") or 0)
+        if not tmdb_id:
+            stats["tmdb_skipped"] += 1
+            logger.debug(f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 缺少直写 TMDb ID | 文件:{remote_file_path}")
+            continue
+
         check_started = perf_counter()
         missing = list_missing_tmdb_metadata_for_strm(
             local_file_path,
@@ -390,23 +394,7 @@ def _process_tmdb_batch(
             stats["tmdb_skipped"] += 1
             continue
 
-        direct_tmdb_id = int(parsed.get("tmdb_id_direct") or 0)
-        if direct_tmdb_id:
-            search_key = ("direct", str(parsed.get("media_type", "") or ""), direct_tmdb_id)
-        else:
-            search_key = tuple(parsed.get("group_key") or parsed.get("title_key") or ())
-        if search_key in search_cache:
-            search_result = search_cache[search_key]
-        else:
-            search_result = _search_tmdb_for_title_sync(parsed, api_key, failed_cache)
-            search_cache[search_key] = search_result
-        if not search_result:
-            stats["tmdb_failed"] += 1
-            logger.warning(f"[STRM] {log_prefix} TMDb 元数据补齐失败: 未找到 TMDb 条目 | 文件:{remote_file_path}")
-            continue
-
-        tmdb_id = int(search_result["tmdb_id"])
-        media_type = str(search_result.get("media_type", parsed.get("media_type", "")) or "")
+        media_type = str(parsed.get("media_type", "") or "")
         fetch_key = (tmdb_id, media_type)
         cached = _get_cached_tmdb_fallback_value(fetch_key)
         if cached is not None:
@@ -552,9 +540,6 @@ def _apply_tmdb_fallbacks(plans: list, scraping_config, api_key: str, stats: dic
     if bulk:
         set_bulk_mode(True)
 
-    search_cache: dict[tuple, dict | None] = {}
-    failed_cache: set = set()
-
     try:
         for batch_idx, batch_start in enumerate(range(0, total, batch_size)):
             if cancel_event and cancel_event.is_set():
@@ -569,8 +554,6 @@ def _apply_tmdb_fallbacks(plans: list, scraping_config, api_key: str, stats: dic
                 stats,
                 log_prefix,
                 cancel_event,
-                search_cache,
-                failed_cache,
             )
             logger.info(
                 f"[STRM] {log_prefix} 进度 {min(batch_start + batch_size, total)}/{total} | "
