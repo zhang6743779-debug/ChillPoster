@@ -784,7 +784,7 @@ def _should_treat_leading_number_as_title(cn_name: str, filename: str, season: O
 
 
 
-def _parse_filename(filename: str, media_type_hint: str = None, file_path: str = "") -> Optional[dict]:
+def _parse_filename(filename: str, media_type_hint: str = None, file_path: str = "", quiet: bool = False) -> Optional[dict]:
     """
     纯本地解析：优先复用 MetaInfo / MetaInfoPath，不发起任何网络请求。
     返回解析结果 dict，包含 cn_name, en_name, year, season, episode, media_type, meta_info, title_key 等。
@@ -852,7 +852,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         if episode is not None and season is None:
             season = 1
 
-    if sp_special and has_explicit_episode_marker:
+    if sp_special and has_explicit_episode_marker and explicit_episode is None:
         season = 0
         episode = None
 
@@ -887,14 +887,16 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             year_match = re.search(r'(?<!\d)((?:19|20)\d{2})(?!\d)', parent_dir_name)
             if year_match:
                 year = int(year_match.group(1))
-                logger.debug(f"[MediaIdentify] 从父目录补充年份: {parent_dir_name} -> {year}")
+                if not quiet:
+                    logger.debug(f"[MediaIdentify] 从父目录补充年份: {parent_dir_name} -> {year}")
 
     title = cn_name if cn_name else en_name
     need_parent = (not title or (not cn_name and (len(title) <= 3 or title.lower() in NOISY_SHORT_WORDS))) if title else True
     if need_parent and file_path:
         parent_name = os.path.basename(os.path.dirname(file_path))
         if parent_name and parent_name != "/":
-            logger.debug(f"[MediaIdentify] 文件名无标题，尝试父目录识别: {filename} -> {parent_name}")
+            if not quiet:
+                logger.debug(f"[MediaIdentify] 文件名无标题，尝试父目录识别: {filename} -> {parent_name}")
             parent_meta = MetaInfo(_preprocess_dir_name(parent_name))
             cn_name = parent_meta.cn_name or cn_name
             en_name = parent_meta.en_name or en_name
@@ -909,7 +911,8 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             if not title:
                 grandparent = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
                 if grandparent and grandparent not in {"/", "."}:
-                    logger.debug(f"[MediaIdentify] 父目录仍无标题，尝试上级目录: {grandparent}")
+                    if not quiet:
+                        logger.debug(f"[MediaIdentify] 父目录仍无标题，尝试上级目录: {grandparent}")
                     gp_meta = MetaInfo(_preprocess_dir_name(grandparent))
                     cn_name = gp_meta.cn_name or cn_name
                     en_name = gp_meta.en_name or en_name

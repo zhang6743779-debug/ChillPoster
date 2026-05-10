@@ -34,7 +34,7 @@ from app.services.strm_service import (
     DEFAULT_DATA_EXTS,
 )
 from app.services.media_organize_115_ops import (
-    _get_115_client, _get_115_fs, _list_115_video_files, _iter_115_media_entries,
+    _get_115_client, _get_115_fs, _list_115_tree_entries, _iter_115_media_entries, _iter_115_media_entries_from_tree,
     _rename_115_file, _rename_115_files_batch, _match_and_move_subtitles, _move_top_dir_to_failed, _move_failed_files_batch,
     _move_matched_subtitles_to_target, _match_and_move_subtitles_batch, _ensure_115_dir_chain_cached,
     _collect_event_video_sha1s_for_cache, _mkdir_115_dir, _move_115_items, _run_115_write_request_sync,
@@ -638,18 +638,34 @@ async def _resolve_wash_media_info(file_item: dict, parsed: dict, drive_index: i
 
 def _build_library_candidate_index(library_items: dict) -> dict:
     index = {"movie": {}, "tv": {}}
+    video_count = 0
+    tv_candidate_count = 0
+    movie_folder_count = 0
     for item in (library_items or {}).values():
         if not _is_video_cache_item(item):
             continue
         folder_path = _remote_dirname(item.get("path", ""))
         if not folder_path:
             continue
-        index["movie"].setdefault(folder_path, []).append(item)
-        parsed = _parse_filename(str(item.get("name", "") or ""), media_type_hint="tv", file_path=str(item.get("path", "") or "")) or {}
+        video_count += 1
+        movie_candidates = index["movie"].setdefault(folder_path, [])
+        if not movie_candidates:
+            movie_folder_count += 1
+        movie_candidates.append(item)
+        parsed = _parse_filename(
+            str(item.get("name", "") or ""),
+            media_type_hint="tv",
+            file_path=str(item.get("path", "") or ""),
+            quiet=True,
+        ) or {}
         season = parsed.get("season")
         episode = parsed.get("episode")
         if season is not None and episode is not None:
             index["tv"].setdefault((folder_path, season, episode), []).append(item)
+            tv_candidate_count += 1
+    logger.info(
+        f"[MediaOrganize] 目标媒体库候选索引完成: 视频={video_count} 电影目录={movie_folder_count} 剧集候选={tv_candidate_count} 剧集键={len(index['tv'])}"
+    )
     return index
 
 
@@ -995,49 +1011,38 @@ async def _reconcile_late_subtitles(client, subtitles_by_parent: dict, organized
 async def _scan_source_poll_snapshot(drive_index: int, source_cid: str) -> dict:
     loop = asyncio.get_event_loop()
     client = _get_115_client(drive_index)
-    video_files, subtitles_by_parent = await loop.run_in_executor(
+    tree_entries = await loop.run_in_executor(
         None,
-        _list_115_video_files,
+        _list_115_tree_entries,
         client,
         str(source_cid),
     )
-    video_entries = sorted(
-        (
-            str(item.get("id") or item.get("fid") or ""),
-            int(item.get("size", 0) or 0),
-            str(item.get("path", "") or ""),
-        )
-        for item in (video_files or [])
-        if str(item.get("id") or item.get("fid") or "")
-    )
-    subtitle_entries = sorted(
-        (
-            str(item.get("id") or item.get("fid") or ""),
-            str(item.get("path", "") or ""),
-        )
-        for items in (subtitles_by_parent or {}).values()
-        for item in items
-        if str(item.get("id") or item.get("fid") or "")
-    )
     return {
-        "video_count": len(video_entries),
-        "subtitle_count": len(subtitle_entries),
-        "video_entries": video_entries,
-        "subtitle_entries": subtitle_entries,
-        "video_total_size": sum(size for _, size, _ in video_entries),
+        "tree_entries": tree_entries,
+        "entry_count": len(tree_entries or []),
     }
 
 
 def _source_scan_signature(snapshot: dict) -> str:
     hasher = hashlib.sha1()
-    for item_id, size, path in snapshot.get("video_entries", []) or []:
-        hasher.update(f"v:{item_id}:{size}:{path}\n".encode("utf-8", errors="ignore"))
-    for item_id, path in snapshot.get("subtitle_entries", []) or []:
-        hasher.update(f"s:{item_id}:{path}\n".encode("utf-8", errors="ignore"))
+    for item in sorted(snapshot.get("tree_entries", []) or [], key=lambda value: (
+        str(value.get("path", "") or ""),
+        str(value.get("id") or value.get("fid") or ""),
+        str(value.get("name", "") or ""),
+    )):
+        item_id = str(item.get("id") or item.get("fid") or "")
+        parent_id = str(item.get("parent_id", item.get("cid", "")) or "")
+        name = str(item.get("name", "") or "")
+        path = str(item.get("path", "") or "")
+        size = int(item.get("size", 0) or 0)
+        sha1 = str(item.get("sha1", "") or "").upper()
+        pickcode = str(item.get("pickcode", item.get("pick_code", "")) or "")
+        is_dir = "1" if item.get("is_dir") else "0"
+        hasher.update(f"{is_dir}:{item_id}:{parent_id}:{name}:{path}:{size}:{sha1}:{pickcode}\n".encode("utf-8", errors="ignore"))
     return hasher.hexdigest()
 
 
-async def _trigger_auto_organize_and_wait(drive_index: int) -> tuple[str, str]:
+async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries: Optional[list[dict]] = None) -> tuple[str, str]:
     from app.routers.media_organize import organize_media, OrganizeRequest
 
     while True:
@@ -1056,10 +1061,14 @@ async def _trigger_auto_organize_and_wait(drive_index: int) -> tuple[str, str]:
                 await done_event.wait()
             else:
                 await asyncio.sleep(1)
+            source_tree_entries = None
             continue
 
         try:
-            result = await organize_media(OrganizeRequest(drive_index=drive_index))
+            organize_req = OrganizeRequest(drive_index=drive_index)
+            if source_tree_entries is not None:
+                organize_req._prefetched_source_tree_entries = list(source_tree_entries or [])
+            result = await organize_media(organize_req)
             if result.get("status") != "ok":
                 return "", str(result.get("message", "启动整理失败") or "启动整理失败")
 
@@ -1158,7 +1167,8 @@ async def _run_source_poll_loop():
 
                 snapshot = await _scan_source_poll_snapshot(drive_index, source_cid)
                 signature = _source_scan_signature(snapshot)
-                video_count = int(snapshot.get("video_count", 0) or 0)
+                entry_count = int(snapshot.get("entry_count", 0) or 0)
+                source_tree_entries = list(snapshot.get("tree_entries", []) or [])
                 phase = str(current.get("phase", "pre_run") or "pre_run")
                 last_signature = str(current.get("last_scan_signature", "") or "")
                 unchanged_polls = int(current.get("unchanged_polls", 0) or 0)
@@ -1171,11 +1181,11 @@ async def _run_source_poll_loop():
                     current["last_scan_signature"] = signature
                     current["unchanged_polls"] = unchanged_polls
                     logger.info(
-                        f"[115Life] 源目录轮询: phase=pre_run key={session_key} 视频={video_count} 签名={signature[:8]} 不变={unchanged_polls}"
+                        f"[115Life] 源目录轮询: phase=pre_run key={session_key} 条目={entry_count} 签名={signature[:8]} 不变={unchanged_polls}"
                     )
-                    if video_count > 0 and unchanged_polls >= 1:
-                        logger.info(f"[115Life] 源目录轮询命中稳定窗口，开始自动整理: key={session_key} reason=pre_run_stable_once")
-                        run_id, run_status = await _trigger_auto_organize_and_wait(drive_index)
+                    if unchanged_polls >= 1:
+                        logger.info(f"[115Life] 源目录轮询命中稳定窗口，开始自动整理: key={session_key} reason=pre_run_tree_stable")
+                        run_id, run_status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
                         current["active_run_id"] = run_id
                         current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
                         current["phase"] = "post_run"
@@ -1184,9 +1194,9 @@ async def _run_source_poll_loop():
                         logger.debug(f"[115Life] 自动整理完成，等待整理后复查 | 会话={session_key} | run_id={run_id} | 状态={run_status}")
                 else:
                     logger.debug(
-                        f"[115Life] 源目录复查: 整理完成后检查 | 会话={session_key} | 剩余视频={video_count} | 签名={signature[:8]}"
+                        f"[115Life] 源目录复查: 整理完成后检查 | 会话={session_key} | 剩余条目={entry_count} | 签名={signature[:8]}"
                     )
-                    if video_count <= 0:
+                    if entry_count <= 0:
                         with _source_poll_lock:
                             _state._source_poll_sessions.pop(session_key, None)
                         logger.debug(f"[115Life] 源目录已清空，停止自动补跑 | 会话={session_key}")
@@ -1194,10 +1204,10 @@ async def _run_source_poll_loop():
                     if int(current.get("organize_runs", 0) or 0) >= int(current.get("max_runs", 20) or 20):
                         with _source_poll_lock:
                             _state._source_poll_sessions.pop(session_key, None)
-                        logger.warning(f"[115Life] 源目录自动补跑达到上限，停止: key={session_key} reason=max_runs_exceeded 视频={video_count}")
+                        logger.warning(f"[115Life] 源目录自动补跑达到上限，停止: key={session_key} reason=max_runs_exceeded 条目={entry_count}")
                         continue
-                    logger.info(f"[115Life] 源目录仍有残留视频，继续自动补跑: key={session_key} reason=source_still_has_videos count={video_count}")
-                    run_id, run_status = await _trigger_auto_organize_and_wait(drive_index)
+                    logger.info(f"[115Life] 源目录仍有残留条目，继续自动补跑: key={session_key} reason=source_still_has_entries count={entry_count}")
+                    run_id, run_status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
                     current["active_run_id"] = run_id
                     current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
                     logger.info(f"[115Life] 自动补跑完成: key={session_key} run_id={run_id} status={run_status}")
@@ -2115,6 +2125,12 @@ async def _run_organize_async(run_id: str, req):
 
             _flush_pending_media_server_refreshes(immediate=True)
 
+        prefetched_source_tree_entries = getattr(req, "_prefetched_source_tree_entries", None)
+        has_prefetched_source_tree = prefetched_source_tree_entries is not None
+        if has_prefetched_source_tree:
+            prefetched_source_tree_entries = list(prefetched_source_tree_entries or [])
+            logger.info(f"[MediaOrganize] 复用源目录稳定快照: 条目={len(prefetched_source_tree_entries)}")
+
         logger.debug("[MediaOrganize] 阶段4/4: 执行整理与刮削")
         _semaphore = asyncio.Semaphore(20)
         in_flight_group_tasks = []
@@ -2170,7 +2186,12 @@ async def _run_organize_async(run_id: str, req):
                     continue
                 _drain_finished_group_tasks()
 
-        for entry in _iter_115_media_entries(client, str(source_cid)):
+        media_entries_iter = (
+            _iter_115_media_entries_from_tree(prefetched_source_tree_entries)
+            if has_prefetched_source_tree
+            else _iter_115_media_entries(client, str(source_cid))
+        )
+        for entry in media_entries_iter:
             kind = entry.get("kind")
             item = entry.get("item") or {}
             if kind == "subtitle":

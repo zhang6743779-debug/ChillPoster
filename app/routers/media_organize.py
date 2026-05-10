@@ -6,7 +6,7 @@ import asyncio
 import threading
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, PrivateAttr
 from typing import Optional, List
 from core.logger import logger
 from app.dependencies import update_task_progress
@@ -91,6 +91,7 @@ class OrganizeRequest(BaseModel):
     is_bluray: bool = False
     drive_index: int = 0
     overwrite: bool = False
+    _prefetched_source_tree_entries: Optional[list[dict]] = PrivateAttr(default=None)
 
 
 class Browse115Payload(BaseModel):

@@ -1087,8 +1087,8 @@ def _check_and_move(client, file_id, target_cid: str, filename: str, reused: boo
 # 视频 / 字幕文件扫描
 # ==========================================
 
-def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
-    """用 traverse_tree_with_path 递归列出源目录树，只产出视频/字幕条目，不写媒体库缓存。"""
+def _list_115_tree_entries(client, cid: str) -> list[dict]:
+    """用 traverse_tree_with_path 递归列出源目录树。"""
     from p115client.tool.iterdir import traverse_tree_with_path
 
     global _LAST_TREE_SCAN_FINISHED_AT
@@ -1106,9 +1106,13 @@ def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
                 max_workers=0,
             ))
         _LAST_TREE_SCAN_FINISHED_AT = time.monotonic()
-        logger.debug(f"[MediaOrganize] 目录树遍历完成: cid={cid} 耗时={_LAST_TREE_SCAN_FINISHED_AT - scan_started_at:.2f}s")
+        logger.debug(f"[MediaOrganize] 目录树遍历完成: cid={cid} 条目={len(items)} 耗时={_LAST_TREE_SCAN_FINISHED_AT - scan_started_at:.2f}s")
+        return items
 
-    for item in items:
+
+
+def _iter_115_media_entries_from_tree(items: list[dict]) -> Iterator[dict]:
+    for item in items or []:
         if item.get("is_dir"):
             continue
         name = str(item.get("name", "") or "")
@@ -1140,6 +1144,12 @@ def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
                     "path": item.get("path", ""),
                 },
             }
+
+
+
+def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
+    """用源目录树快照产出视频/字幕条目，不写媒体库缓存。"""
+    yield from _iter_115_media_entries_from_tree(_list_115_tree_entries(client, cid))
 
 
 def _list_115_video_files(client, cid: str) -> tuple:
