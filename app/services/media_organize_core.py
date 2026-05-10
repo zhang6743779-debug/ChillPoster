@@ -1163,6 +1163,7 @@ async def _run_organize_async(run_id: str, req):
     pending_emby_library_checks: list[dict] = []
     pending_refresh_payloads: list[dict] = []
     pending_duplicate_moves: list[dict] = []
+    pending_wash_reject_moves: list[dict] = []
     duplicate_batch_size = 200
 
     def _flush_pending_library_cache_updates():
@@ -1206,6 +1207,25 @@ async def _run_organize_async(run_id: str, req):
                 logger.warning(f"[MediaOrganize] 移动重复文件失败: {item.get('message', file_name)}")
         logger.info(f"[MediaOrganize] 重复文件批量移动完成: 成功 {success_count_local}/{len(batch)}")
         return len(failed_items)
+
+    async def _flush_pending_wash_reject_moves():
+        nonlocal pending_wash_reject_moves
+        if not pending_wash_reject_moves:
+            return 0
+        batch = pending_wash_reject_moves
+        pending_wash_reject_moves = []
+        logger.info(f"[Wash] 开始批量移动洗版未通过文件: {len(batch)} 条")
+        await _move_failed_files_batch(
+            client,
+            batch,
+            str(source_cid),
+            wash_dir_cid,
+            moved_dirs,
+            subtitles_by_parent=subtitles_by_parent,
+        )
+        moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
+        logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
+        return len(batch) - moved_count
 
     def _flush_pending_media_server_refreshes(immediate: bool = False):
         nonlocal pending_refresh_payloads
@@ -1635,14 +1655,8 @@ async def _run_organize_async(run_id: str, req):
                             "message": f"洗版未通过，保留旧文件（{wash_reason}）",
                         })
                         if wash_dir_cid:
-                            await _move_top_dir_to_failed(
-                                client,
-                                file_item,
-                                str(source_cid),
-                                wash_dir_cid,
-                                moved_dirs,
-                                subtitles_by_parent=subtitles_by_parent,
-                            )
+                            pending_wash_reject_moves.append(file_item)
+                            logger.debug(f"[Wash] 已暂存洗版未通过文件，整理结束后批量移走: {file_name}")
                         _processed = len(results)
                         _update_streaming_progress(
                             run_id,
@@ -2224,6 +2238,10 @@ async def _run_organize_async(run_id: str, req):
             await _wait_group_tasks_until_complete_or_cancel()
 
         _raise_if_organize_cancelled(run_id)
+        if pending_wash_reject_moves:
+            await _flush_pending_wash_reject_moves()
+            _raise_if_organize_cancelled(run_id)
+
         compensated_count = await _reconcile_late_subtitles(
             client,
             subtitles_by_parent,
