@@ -27,6 +27,25 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock.connect(self.socket_path)
 
 
+def _loads_docker_json(text: str):
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        items = []
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except json.JSONDecodeError:
+                return text
+        return items if items else text
+
+
 class DockerAPI:
     def __init__(self, socket_path: str = DOCKER_SOCKET, timeout: float = 30):
         self.socket_path = socket_path
@@ -51,12 +70,9 @@ class DockerAPI:
             raise DockerApiError(resp.status, text.strip() or resp.reason)
         content_type = resp.getheader("Content-Type", "")
         if "application/json" in content_type and text.strip():
-            return json.loads(text)
+            return _loads_docker_json(text)
         if text.strip().startswith("{") or text.strip().startswith("["):
-            try:
-                return json.loads(text)
-            except Exception:
-                return text
+            return _loads_docker_json(text)
         return text
 
     def ping(self):
@@ -72,7 +88,15 @@ class DockerAPI:
     def pull_image(self, image: str):
         repo, tag = split_image_ref(image)
         query = urllib.parse.urlencode({"fromImage": repo, "tag": tag})
-        return self.request("POST", f"/images/create?{query}")
+        result = self.request("POST", f"/images/create?{query}")
+        if isinstance(result, list):
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                error = item.get("error") or item.get("errorDetail", {}).get("message")
+                if error:
+                    raise DockerApiError(500, str(error))
+        return result
 
     def create_container(self, name: str, payload: dict):
         query = urllib.parse.urlencode({"name": name})
