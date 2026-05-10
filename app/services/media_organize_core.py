@@ -56,7 +56,7 @@ from app.services.media_organize_scrape import (
 from app.services.media_server_refresh import media_server_refresh
 from app.dependencies import ACTIVE_TASKS, update_task_progress
 from core.logger import logger
-from core.media_library_cache import build_task_key, get_task_item_by_id, get_task_items, get_task_sha1_set, remove_items_by_path_prefix, remove_task_items_by_sha1, remove_task_item_by_id, update_items_path_prefix, update_task_item_fields, upsert_task_item, upsert_dir_item, merge_task_items
+from core.media_library_cache import build_task_key, get_task_index, get_task_item_by_id, get_task_items, remove_items_by_path_prefix, remove_task_item_by_id, update_items_path_prefix, update_task_item_fields, upsert_task_item, upsert_dir_item, merge_task_items
 from core.meta.mediainfo import extract_wash_fields
 
 
@@ -636,84 +636,6 @@ async def _resolve_wash_media_info(file_item: dict, parsed: dict, drive_index: i
     return info
 
 
-def _build_library_candidate_index(library_items: dict) -> dict:
-    index = {"movie": {}, "tv": {}}
-    video_count = 0
-    tv_candidate_count = 0
-    movie_folder_count = 0
-    for item in (library_items or {}).values():
-        if not _is_video_cache_item(item):
-            continue
-        folder_path = _remote_dirname(item.get("path", ""))
-        if not folder_path:
-            continue
-        video_count += 1
-        movie_candidates = index["movie"].setdefault(folder_path, [])
-        if not movie_candidates:
-            movie_folder_count += 1
-        movie_candidates.append(item)
-        parsed = _parse_filename(
-            str(item.get("name", "") or ""),
-            media_type_hint="tv",
-            file_path=str(item.get("path", "") or ""),
-            quiet=True,
-        ) or {}
-        season = parsed.get("season")
-        episode = parsed.get("episode")
-        if season is not None and episode is not None:
-            index["tv"].setdefault((folder_path, season, episode), []).append(item)
-            tv_candidate_count += 1
-    logger.info(
-        f"[MediaOrganize] 目标媒体库候选索引完成: 视频={video_count} 电影目录={movie_folder_count} 剧集候选={tv_candidate_count} 剧集键={len(index['tv'])}"
-    )
-    return index
-
-
-def _remove_from_library_candidate_index(candidate_index: dict, item: dict) -> None:
-    if not candidate_index or not item:
-        return
-    folder_path = _remote_dirname(item.get("path", ""))
-    if not folder_path:
-        return
-    movie_items = candidate_index.get("movie", {}).get(folder_path)
-    if movie_items:
-        candidate_index["movie"][folder_path] = [candidate for candidate in movie_items if candidate is not item]
-    parsed = _parse_filename(str(item.get("name", "") or ""), media_type_hint="tv", file_path=str(item.get("path", "") or "")) or {}
-    season = parsed.get("season")
-    episode = parsed.get("episode")
-    if season is None or episode is None:
-        return
-    tv_key = (folder_path, season, episode)
-    tv_items = candidate_index.get("tv", {}).get(tv_key)
-    if tv_items:
-        candidate_index["tv"][tv_key] = [candidate for candidate in tv_items if candidate is not item]
-
-
-def _find_existing_library_candidates(library_items: dict, media_type: str, folder_path: str,
-                                      season_number: Optional[int] = None, episode_number: Optional[int] = None,
-                                      candidate_index: dict | None = None) -> list[dict]:
-    normalized_folder_path = _normalize_remote_path(folder_path)
-    if candidate_index is not None:
-        if media_type == "tv":
-            return list(candidate_index.get("tv", {}).get((normalized_folder_path, season_number, episode_number), []))
-        return list(candidate_index.get("movie", {}).get(normalized_folder_path, []))
-
-    candidates = []
-    for item in (library_items or {}).values():
-        if not _is_video_cache_item(item):
-            continue
-        if _remote_dirname(item.get("path", "")) != normalized_folder_path:
-            continue
-        if media_type != "tv":
-            candidates.append(item)
-            continue
-        parsed = _parse_filename(str(item.get("name", "") or ""), media_type_hint="tv", file_path=str(item.get("path", "") or ""))
-        if not parsed:
-            continue
-        if parsed.get("season") == season_number and parsed.get("episode") == episode_number:
-            candidates.append(item)
-    return candidates
-
 
 def _select_existing_candidate(candidates: list[dict], expected_name: str = "") -> tuple[Optional[dict], str]:
     if not candidates:
@@ -770,11 +692,11 @@ def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, 
     }
 
 
-async def _evaluate_library_replacement(config_data: dict, library_items: dict, drive_index: int,
+async def _evaluate_library_replacement(config_data: dict, drive_index: int,
                                         media_type: str, season_number: Optional[int],
                                         episode_number: Optional[int], target_base: str,
                                         file_item: dict, parsed: dict, variables: dict, ext: str,
-                                        candidate_index: dict | None = None) -> dict:
+                                        library_index) -> dict:
     if not (config_data.get("wash_enabled") and config_data.get("wash_by_equivalent_size")):
         return {"decision": "disabled"}
 
@@ -796,13 +718,11 @@ async def _evaluate_library_replacement(config_data: dict, library_items: dict, 
         rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
         expected_name = _render_template(rename_format, variables) + ext
 
-    candidates = _find_existing_library_candidates(
-        library_items,
+    candidates = library_index.find_existing_candidates(
         media_type,
         candidate_dir,
         season_number,
         episode_number,
-        candidate_index=candidate_index,
     )
     candidate, match_reason = _select_existing_candidate(candidates, expected_name=expected_name)
     if not candidate:
@@ -1246,7 +1166,7 @@ async def _run_organize_async(run_id: str, req):
     duplicate_batch_size = 200
 
     def _flush_pending_library_cache_updates():
-        nonlocal pending_library_cache_items, library_items
+        nonlocal pending_library_cache_items
         if not pending_library_cache_items:
             return 0
         merge_task_items(
@@ -1255,8 +1175,7 @@ async def _run_organize_async(run_id: str, req):
             meta={"last_status": "updated_by_media_organize"},
         )
         flushed_count = len(pending_library_cache_items)
-        library_items.update(pending_library_cache_items)
-        logger.info(f"[媒体库缓存] 已批量合并写入整理结果 {flushed_count} 条 | 总条目 {len(library_items)}")
+        logger.info(f"[媒体库缓存] 已批量合并写入整理结果 {flushed_count} 条 | 总条目 {library_index.item_count()}")
         pending_library_cache_items = {}
         return flushed_count
 
@@ -1352,19 +1271,17 @@ async def _run_organize_async(run_id: str, req):
         target_remote_path = str(config_data.get("target_name", "") or "")
         library_task_key = build_task_key(drive_index, target_remote_path)
 
-        # 加载媒体库缓存中的 SHA1 集合（用于去重）
-        target_sha1_set = get_task_sha1_set(library_task_key)
-        library_items = get_task_items(library_task_key)
+        library_index = get_task_index(library_task_key)
 
         # 初始化二级分类匹配器与目录链缓存（任务作用域）
         from app.services.category_matcher import CategoryMatcher
         _category_matcher = CategoryMatcher()
         _dir_chain_cache: dict = {}
         _category_match_cache: dict = {}
-        _library_candidate_index = _build_library_candidate_index(library_items)
         _tv_summary_logged: set[str] = set()
-        if target_sha1_set:
-            logger.debug(f"[MediaOrganize] 已加载媒体库缓存SHA1: {len(target_sha1_set)} 个 | task={library_task_key}")
+        target_sha1_count = library_index.sha1_count()
+        if target_sha1_count:
+            logger.debug(f"[MediaOrganize] 已加载媒体库缓存SHA1索引: {target_sha1_count} 个 | 条目={library_index.item_count()} | task={library_task_key}")
         else:
             logger.warning(f"[MediaOrganize] 未命中媒体库缓存，当前整理将跳过缓存排重: task={library_task_key}")
 
@@ -1668,7 +1585,6 @@ async def _run_organize_async(run_id: str, req):
 
                     wash_result = await _evaluate_library_replacement(
                         config_data=config_data,
-                        library_items=library_items,
                         drive_index=drive_index,
                         media_type=media_type,
                         season_number=season_num,
@@ -1678,7 +1594,7 @@ async def _run_organize_async(run_id: str, req):
                         parsed=parsed,
                         variables=variables,
                         ext=ext,
-                        candidate_index=_library_candidate_index,
+                        library_index=library_index,
                     )
                     wash_decision = wash_result.get("decision")
                     if wash_decision in ("keep_existing", "replace_existing"):
@@ -1765,31 +1681,21 @@ async def _run_organize_async(run_id: str, req):
                             )
                             _raise_if_organize_cancelled(run_id)
                             continue
-                        _remove_from_library_candidate_index(_library_candidate_index, candidate)
-                        candidate_sha1 = str(candidate.get("sha1", "") or "").upper().strip()
                         candidate_path = str(candidate.get("path", "") or "")
                         candidate_id_str = str(candidate.get("id", "") or "")
-                        if candidate_sha1:
-                            target_sha1_set.discard(candidate_sha1)
-                            remove_task_items_by_sha1(
+                        cache_removed = False
+                        if candidate_id_str:
+                            cache_removed = bool(remove_task_item_by_id(
                                 library_task_key,
-                                {candidate_sha1},
+                                candidate_id_str,
                                 meta={"last_status": "updated_by_media_organize_wash_replace"},
-                            )
-                            for item_key, item in list(library_items.items()):
-                                if str(item.get("sha1", "") or "").upper().strip() == candidate_sha1:
-                                    library_items.pop(item_key, None)
-                        elif candidate_path:
+                            ))
+                        if (not cache_removed) and candidate_path:
                             remove_items_by_path_prefix(
                                 library_task_key,
                                 candidate_path,
                                 meta={"last_status": "updated_by_media_organize_wash_replace"},
                             )
-                            for item_key, item in list(library_items.items()):
-                                if str(item.get("path", "") or "").rstrip("/") == candidate_path.rstrip("/"):
-                                    library_items.pop(item_key, None)
-                        if candidate_id_str:
-                            library_items.pop(candidate_id_str, None)
                         logger.info(
                             "[Wash] 新文件通过洗版，将替换旧文件: %s -> %s | reason=%s | new_size=%.2fGB | old_size=%.2fGB | "
                             "new_eq=%.2f | old_eq=%.2f | new_gbph=%.2f | old_gbph=%.2f",
@@ -1831,8 +1737,7 @@ async def _run_organize_async(run_id: str, req):
                                 category_path=category_path,
                                 effective_target_cid=str(effective_target_cid),
                                 library_task_key=library_task_key,
-                                library_items=library_items,
-                                target_sha1_set=target_sha1_set,
+                                        library_index=library_index,
                                 config_data=config_data,
                                 metadata_executor=metadata_executor,
                                 pending_library_cache_items=pending_library_cache_items,
@@ -2035,8 +1940,7 @@ async def _run_organize_async(run_id: str, req):
                             category_path=plan_item.get("category_path", ""),
                             effective_target_cid=plan_item.get("effective_target_cid", ""),
                             library_task_key=library_task_key,
-                            library_items=library_items,
-                            target_sha1_set=target_sha1_set,
+                                library_index=library_index,
                             config_data=config_data,
                             metadata_executor=metadata_executor,
                             pending_library_cache_items=pending_library_cache_items,
@@ -2229,7 +2133,7 @@ async def _run_organize_async(run_id: str, req):
                 continue
 
             file_sha1 = vf.get("sha1", "").upper()
-            if file_sha1 and file_sha1 in target_sha1_set:
+            if file_sha1 and library_index.has_sha1(file_sha1):
                 logger.info(f"[MediaOrganize] SHA1已存在，跳过整理: {file_name}")
                 results.append({
                     "file": file_name,
@@ -2470,13 +2374,11 @@ def _send_organize_notify(payload: dict):
 def _finalize_organize_result(
     *, result: dict, media_type: str, vf: dict, parsed: dict, variables: dict,
     target_base: str, category_path: str, effective_target_cid: str, library_task_key: str,
-    library_items: dict, target_sha1_set: set, config_data: dict,
+    library_index, config_data: dict,
     metadata_executor, pending_library_cache_items: dict,
     pending_strm_payloads: list, pending_emby_library_checks: list, pending_refresh_payloads: list,
 ):
     file_sha1 = vf.get("sha1", "").upper()
-    if file_sha1:
-        target_sha1_set.add(file_sha1)
 
     def _queue_cache_item(item_key: str, item_data: dict):
         normalized_key = str(item_key or "")
@@ -2493,7 +2395,7 @@ def _finalize_organize_result(
             "parent_id": int(item_data.get("parent_id", 0) or 0),
         }
         pending_library_cache_items[normalized_key] = normalized_item
-        library_items[normalized_key] = dict(normalized_item)
+        library_index.add_or_update_items({normalized_key: normalized_item})
 
     meta_ctx = result.get("metadata_context") or {}
     target_folder_name = result.get("target_folder", "")
