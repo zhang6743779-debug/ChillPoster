@@ -879,7 +879,7 @@ def _process_single_item(
     client: P115Client,
     write_queue: Queue,
     dl_futures: list,
-    aux_download_mode: str = "standard",
+    aux_download_mode: str = "cdn",
     cookie: str = "",
     cancel_event: Optional[Event] = None,
 ) -> Optional[ProcessResult]:
@@ -1649,9 +1649,7 @@ class StrmService:
                 pass
 
         drive_index = int(task.get("drive_index", 0) or 0)
-        aux_download_mode = str(task.get("aux_download_mode", "cdn") or "cdn").lower()
-        if aux_download_mode not in ("standard", "cdn"):
-            aux_download_mode = "cdn"
+        aux_download_mode = "cdn"
 
         try:
             client = self._get_client(drive_index)
@@ -1742,9 +1740,7 @@ class StrmService:
         download_tmdb_metadata = task_config.get("download_tmdb_metadata", False)
         min_video_size_mb = task_config.get("min_video_size_mb", 0)
         overwrite_mode = task_config.get("overwrite", "skip")
-        aux_download_mode = str(task_config.get("aux_download_mode", "cdn") or "cdn").lower()
-        if aux_download_mode not in ("standard", "cdn"):
-            aux_download_mode = "cdn"
+        aux_download_mode = "cdn"
 
         video_exts = _parse_exts(task_config.get("video_exts_str", DEFAULT_VIDEO_EXTS))
         audio_exts = _parse_exts(task_config.get("audio_exts_str", DEFAULT_AUDIO_EXTS))
@@ -1994,10 +1990,7 @@ class StrmService:
         download_tmdb_metadata = task_config.get("download_tmdb_metadata", False)
         min_video_size_mb = task_config.get("min_video_size_mb", 0)
         overwrite_mode = task_config.get("overwrite", "skip")
-        aux_download_mode = str(task_config.get("aux_download_mode", "cdn") or "cdn").lower()
-        if aux_download_mode not in ("standard", "cdn"):
-            logger.warning(f"[STRM] 未知附属下载模式 {aux_download_mode}，已回退 cdn")
-            aux_download_mode = "cdn"
+        aux_download_mode = "cdn"
         cookie = self._get_cookie(drive_index)
 
         video_exts = _parse_exts(task_config.get("video_exts_str", DEFAULT_VIDEO_EXTS))

@@ -3103,7 +3103,8 @@ def create_life_event_callback(
         cid_in_target = bool(target_cid_str and current_cid and current_cid == target_cid_str)
 
         is_move_event = event_name in ("move_file", "move_image_file")
-        is_file_event = bool(raw.get("file_category") == 1 or str(raw.get("ico", "") or "").strip())
+        raw_sha1 = str(raw.get("sha1", "") or "").strip()
+        is_file_event = bool(raw.get("file_category") == 1 or raw_sha1 or str(raw.get("ico", "") or "").strip())
 
         library_task_key = build_task_key(drive_index, target_dir)
         current_parent_path = ""
@@ -3389,21 +3390,20 @@ def create_life_event_callback(
                         target_event_path = _join_remote_path(current_parent_path, file_name)
                     elif cid_in_target:
                         target_event_path = _join_remote_path(target_dir, file_name)
-                if _state._main_event_loop and _state._main_event_loop.is_running():
-                    with _target_event_lock:
-                        _target_event_queue.append((target_event_path, file_id, drive_index, target_dir, event_name, event_type_cn))
-                        should_schedule = not _state._target_event_running
-                        if should_schedule:
-                            _state._target_event_running = True
-                    if should_schedule:
-                        try:
-                            asyncio.run_coroutine_threadsafe(_drain_target_event_queue(), _state._main_event_loop)
-                        except Exception as e:
-                            with _target_event_lock:
-                                _state._target_event_running = False
-                            logger.error(f"[115Life] 目标新增事件调度失败: {e}")
-                else:
-                    logger.error("[115Life] 主事件循环未注册，无法处理目标新增事件")
+                target_parent_path = ""
+                if is_file_event:
+                    target_parent_path = current_parent_path or _remote_dirname(target_event_path)
+                _schedule_or_refresh_target_event_poll(
+                    target_event_path,
+                    file_id,
+                    drive_index,
+                    target_dir,
+                    event_name,
+                    event_type_cn,
+                    is_file_event=is_file_event,
+                    parent_cid=current_cid if is_file_event else "",
+                    parent_path=target_parent_path,
+                )
                 return
 
         _schedule_or_refresh_source_poll(
@@ -3425,32 +3425,40 @@ async def _collect_target_event_entries(
     file_id: str,
     drive_index: int,
     target_dir: str,
-) -> List[dict]:
+    *,
+    include_status: bool = False,
+) -> List[dict] | tuple[List[dict], bool]:
+    unstable = False
+
+    def _done(items: List[dict]):
+        return (items, unstable) if include_status else items
+
     remote_file_path = (file_path or "").rstrip("/")
     td = (target_dir or "").rstrip("/")
     if not td:
-        return []
+        return _done([])
 
     entries: List[dict] = []
     if not file_id or not str(file_id).isdigit():
         if not remote_file_path or not (remote_file_path == td or remote_file_path.startswith(td + "/")):
-            return []
+            return _done([])
         normalized = _normalize_target_entry({
             "id": file_id,
             "name": os.path.basename(remote_file_path),
             "path": remote_file_path,
             "is_dir": False,
         })
-        return [normalized] if normalized else []
+        return _done([normalized] if normalized else [])
 
     try:
+        import warnings
         from app.services.drive115_service import drive115_service
         from p115client.tool.iterdir import iter_files_with_path
         from p115client.tool.attr import get_attr
 
         client, _ = await drive115_service.get_client(drive_index)
         if not client:
-            return []
+            return _done([])
 
         with _read_lock:
             attr = get_attr(client, int(file_id)) or {}
@@ -3463,7 +3471,7 @@ async def _collect_target_event_entries(
         if not is_dir:
             path = str(attr.get("path") or remote_file_path).rstrip("/")
             if not path or not (path == td or path.startswith(td + "/")):
-                return []
+                return _done([])
             normalized = _normalize_target_entry({
                 "id": int(file_id),
                 "name": str(attr.get("name") or os.path.basename(path) or ""),
@@ -3474,11 +3482,11 @@ async def _collect_target_event_entries(
                 "is_dir": False,
                 "parent_id": int(attr.get("parent_id", attr.get("cid", 0)) or 0),
             })
-            return [normalized] if normalized else []
+            return _done([normalized] if normalized else [])
 
         folder_path = str(attr.get("path") or remote_file_path).rstrip("/")
         if not folder_path or not (folder_path == td or folder_path.startswith(td + "/")):
-            return []
+            return _done([])
         folder_entry = _normalize_target_entry({
             "id": int(file_id),
             "name": str(attr.get("name") or os.path.basename(folder_path) or ""),
@@ -3492,8 +3500,19 @@ async def _collect_target_event_entries(
         if folder_entry:
             entries.append(folder_entry)
 
-        with _read_lock:
-            scanned_items = list(iter_files_with_path(client, cid=int(file_id), app="android", cooldown=1.0, page_size=1000))
+        caught_warnings = []
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with _read_lock:
+                scanned_items = list(iter_files_with_path(client, cid=int(file_id), app="android", cooldown=1.0, page_size=1000))
+            caught_warnings = list(caught)
+        for warning_item in caught_warnings:
+            message = str(getattr(warning_item, "message", "") or "")
+            if "detected count changes during iteration" in message:
+                unstable = True
+                logger.info(f"[115Life] 目标新增事件扫描检测到目录数量变化，等待稳定: {message}")
+            else:
+                warnings.warn(warning_item.message, warning_item.category)
         for item in scanned_items:
             normalized = _normalize_target_entry(item)
             if not normalized:
@@ -3503,13 +3522,343 @@ async def _collect_target_event_entries(
                 continue
             entries.append(normalized)
     except Exception as e:
+        if "detected count changes during iteration" in str(e):
+            unstable = True
         logger.warning(
             f"[115Life] 目标目录新增事件递归扫描失败: type={type(e).__name__} "
             f"repr={e!r} file_id={file_id} file_path={file_path} target_dir={target_dir}",
             exc_info=True,
         )
 
-    return entries
+    return _done(entries)
+
+
+def _build_target_event_session_key(drive_index: int, target_dir: str, scan_cid: str, scan_path: str) -> str:
+    scope = str(scan_cid or "").strip() or _normalize_remote_path(scan_path)
+    return f"{int(drive_index)}:{_normalize_remote_path(target_dir)}:{scope}"
+
+
+def _target_event_entries_signature(entries: List[dict]) -> str:
+    hasher = hashlib.sha1()
+    for entry in sorted(entries or [], key=lambda x: str(x.get("item_key", "") or x.get("path", ""))):
+        hasher.update(
+            (
+                f"{entry.get('item_key', '')}|{int(entry.get('size', 0) or 0)}|"
+                f"{entry.get('path', '')}|{entry.get('sha1', '')}|{1 if entry.get('is_dir') else 0}\n"
+            ).encode("utf-8", errors="ignore")
+        )
+    return hasher.hexdigest()
+
+
+def _target_cache_item_changed(cached: dict | None, item: dict) -> bool:
+    if not cached:
+        return True
+    for key in ("name", "path", "pickcode", "sha1"):
+        if str(cached.get(key, "") or "") != str(item.get(key, "") or ""):
+            return True
+    for key in ("size", "id", "parent_id"):
+        try:
+            if int(cached.get(key, 0) or 0) != int(item.get(key, 0) or 0):
+                return True
+        except (TypeError, ValueError):
+            return True
+    return bool(cached.get("is_dir", False)) != bool(item.get("is_dir", False))
+
+
+def _schedule_or_refresh_target_event_poll(
+    file_path: str,
+    file_id: str,
+    drive_index: int,
+    target_dir: str,
+    event_name: str,
+    event_type_cn: str,
+    *,
+    is_file_event: bool = False,
+    parent_cid: str = "",
+    parent_path: str = "",
+):
+    scan_cid = str(parent_cid or "").strip() if is_file_event else str(file_id or "").strip()
+    scan_path = _normalize_remote_path(parent_path) if is_file_event and scan_cid else _normalize_remote_path(file_path)
+    if is_file_event and not scan_cid:
+        scan_cid = str(file_id or "").strip()
+        scan_path = _normalize_remote_path(file_path)
+    if not scan_path and target_dir:
+        scan_path = _normalize_remote_path(target_dir)
+
+    if not scan_cid and not scan_path:
+        logger.warning(f"[115Life] 目标新增事件缺少可轮询范围: event={event_name}, file_id={file_id}, path={file_path}")
+        return
+    if not _state._main_event_loop or not _state._main_event_loop.is_running():
+        logger.error("[115Life] 主事件循环未注册，无法处理目标新增事件")
+        return
+
+    session_key = _build_target_event_session_key(drive_index, target_dir, scan_cid, scan_path)
+    now = _time.time()
+    with _target_event_lock:
+        session = _state._target_event_sessions.get(session_key)
+        if session is None:
+            session = {
+                "session_key": session_key,
+                "drive_index": int(drive_index),
+                "target_dir": _normalize_remote_path(target_dir),
+                "scan_cid": scan_cid,
+                "scan_path": scan_path,
+                "event_name": event_name,
+                "event_type_cn": event_type_cn,
+                "last_scan_signature": "",
+                "unchanged_polls": 0,
+                "polls": 0,
+                "event_generation": 1,
+                "event_count": 1,
+                "started_at": now,
+                "max_polls": 60,
+            }
+            _state._target_event_sessions[session_key] = session
+            logger.info(f"[115Life] 已创建目标新增稳定轮询会话: key={session_key} scope={scan_path or scan_cid}")
+        else:
+            session["event_name"] = event_name
+            session["event_type_cn"] = event_type_cn
+            session["event_generation"] = int(session.get("event_generation", 0) or 0) + 1
+            session["event_count"] = int(session.get("event_count", 0) or 0) + 1
+            session["last_scan_signature"] = ""
+            session["unchanged_polls"] = 0
+            logger.info(
+                f"[115Life] 已刷新目标新增稳定轮询会话: key={session_key} "
+                f"generation={session['event_generation']} events={session['event_count']}"
+            )
+
+        should_schedule = not _state._target_event_running
+        if should_schedule:
+            _state._target_event_running = True
+
+    if should_schedule:
+        try:
+            asyncio.run_coroutine_threadsafe(_run_target_event_poll_loop(), _state._main_event_loop)
+        except Exception as e:
+            with _target_event_lock:
+                _state._target_event_running = False
+            logger.error(f"[115Life] 目标新增稳定轮询调度失败: {e}")
+
+
+async def _process_target_event_entries(
+    entries: List[dict],
+    drive_index: int,
+    target_dir: str,
+    event_name: str,
+    event_type_cn: str,
+    scan_path: str,
+):
+    try:
+        if not entries:
+            logger.info(f"[115Life] 目标新增事件稳定后无可同步条目: {scan_path}")
+            return
+
+        deduped = {}
+        for entry in entries:
+            item_key = str(entry.get("item_key", "") or "")
+            if item_key:
+                deduped[item_key] = entry
+        entries = list(deduped.values())
+
+        task_key = build_task_key(drive_index, target_dir)
+        existing_items = get_task_items(task_key)
+        cache_items = {
+            entry["item_key"]: entry["cache_item"]
+            for entry in entries
+            if entry.get("item_key") and entry.get("cache_item")
+        }
+        if cache_items:
+            try:
+                merge_task_items(
+                    task_key,
+                    cache_items,
+                    meta={"last_status": "updated_by_target_add_event"},
+                )
+                logger.info(f"[115Life] 目标新增事件已批量写入缓存 {len(cache_items)} 条: {scan_path}")
+            except Exception as e:
+                logger.debug(f"[115Life] 目标新增事件批量写缓存失败: {e}")
+
+        from app.services.strm_service import strm_service
+
+        dir_entries = []
+        changed_file_entries = []
+        unchanged_files = 0
+        for entry in entries:
+            remote_file_path = str(entry.get("path", "") or "").rstrip("/")
+            if entry.get("is_dir"):
+                dir_entries.append(entry)
+                continue
+            if not remote_file_path or _is_recent_organize_generated(remote_file_path):
+                continue
+            item_key = str(entry.get("item_key", "") or "")
+            cache_item = entry.get("cache_item") or {}
+            if _target_cache_item_changed(existing_items.get(item_key), cache_item):
+                changed_file_entries.append(entry)
+            else:
+                unchanged_files += 1
+
+        dir_count = 0
+        dir_failed = 0
+        for entry in dir_entries:
+            remote_dir_path = str(entry.get("path", "") or "").rstrip("/")
+            if not remote_dir_path:
+                continue
+            result = strm_service.ensure_local_dir_for_remote_path(
+                remote_dir_path,
+                reason=f"115目标目录新增事件: {event_type_cn} {remote_dir_path} (event={event_name})",
+            )
+            if result.get("status") == "ok":
+                dir_count += 1
+            elif result.get("status") == "error":
+                dir_failed += 1
+
+        missing_pickcode_entries = [
+            entry for entry in changed_file_entries
+            if not str(entry.get("pickcode", "") or "") and str(entry.get("file_id", "") or "").isdigit()
+        ]
+        if missing_pickcode_entries:
+            try:
+                from app.services.drive115_service import drive115_service
+                from p115client.tool.attr import get_attr
+                client, _ = await drive115_service.get_client(drive_index)
+                if client:
+                    for entry in missing_pickcode_entries:
+                        try:
+                            with _read_lock:
+                                attr = get_attr(client, int(entry["file_id"])) or {}
+                            pickcode = str(attr.get("pickcode") or attr.get("pick_code") or attr.get("pc") or "")
+                            if not pickcode:
+                                continue
+                            entry["pickcode"] = pickcode
+                            cache_item = dict(entry.get("cache_item") or {})
+                            cache_item["pickcode"] = pickcode
+                            entry["cache_item"] = cache_item
+                            upsert_task_item(
+                                task_key,
+                                entry["file_id"],
+                                cache_item,
+                                meta={"last_status": "updated_by_target_add_event"},
+                            )
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug(f"[115Life] 目标新增事件补取 pickcode 失败: {e}")
+
+        incremental_items = []
+        for entry in changed_file_entries:
+            cache_item = dict(entry.get("cache_item") or {})
+            if not cache_item.get("pickcode"):
+                continue
+            incremental_items.append(cache_item)
+
+        sync_result = strm_service.process_incremental_items(incremental_items) if incremental_items else {
+            "generated": 0,
+            "downloaded": 0,
+            "download_failed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "matched_items": 0,
+        }
+
+        logger.info(
+            f"[115Life] 目标目录新增事件处理完成: 事件={event_name}/{event_type_cn} 范围={scan_path} "
+            f"扫描={len(entries)} 缓存={len(cache_items)} 目录创建={dir_count} 目录失败={dir_failed} "
+            f"待同步={len(incremental_items)} strm={int(sync_result.get('generated', 0) or 0)} "
+            f"附属下载={int(sync_result.get('downloaded', 0) or 0)} "
+            f"失败={int(sync_result.get('failed', 0) or 0) + int(sync_result.get('download_failed', 0) or 0)} "
+            f"跳过={int(sync_result.get('skipped', 0) or 0) + unchanged_files}"
+        )
+    except Exception as e:
+        logger.error(f"[115Life] 处理目标目录新增事件失败: {e}", exc_info=True)
+
+
+async def _run_target_event_poll_loop():
+    try:
+        while True:
+            with _target_event_lock:
+                sessions = [dict(s) for s in _state._target_event_sessions.values()]
+            if not sessions:
+                with _target_event_lock:
+                    _state._target_event_running = False
+                return
+
+            for session in sessions:
+                session_key = str(session.get("session_key", "") or "")
+                if not session_key:
+                    continue
+                current = _state._target_event_sessions.get(session_key)
+                if not current:
+                    continue
+
+                drive_index = int(current.get("drive_index", 0) or 0)
+                target_dir = str(current.get("target_dir", "") or "")
+                scan_cid = str(current.get("scan_cid", "") or "")
+                scan_path = str(current.get("scan_path", "") or "")
+                event_name = str(current.get("event_name", "") or "")
+                event_type_cn = str(current.get("event_type_cn", "") or "")
+                generation = int(current.get("event_generation", 0) or 0)
+
+                entries, unstable = await _collect_target_event_entries(
+                    scan_path,
+                    scan_cid,
+                    drive_index,
+                    target_dir,
+                    include_status=True,
+                )
+                signature = _target_event_entries_signature(entries)
+                last_signature = str(current.get("last_scan_signature", "") or "")
+                unchanged_polls = int(current.get("unchanged_polls", 0) or 0)
+                polls = int(current.get("polls", 0) or 0) + 1
+                max_polls = int(current.get("max_polls", 60) or 60)
+                file_count = sum(1 for entry in entries if not entry.get("is_dir"))
+                dir_count = sum(1 for entry in entries if entry.get("is_dir"))
+
+                if unstable:
+                    unchanged_polls = 0
+                    signature_for_next = ""
+                elif last_signature and signature == last_signature:
+                    unchanged_polls += 1
+                    signature_for_next = signature
+                else:
+                    unchanged_polls = 0
+                    signature_for_next = signature
+
+                current["last_scan_signature"] = signature_for_next
+                current["unchanged_polls"] = unchanged_polls
+                current["polls"] = polls
+
+                logger.info(
+                    f"[115Life] 目标新增稳定轮询: key={session_key} 文件={file_count} 目录={dir_count} "
+                    f"签名={signature[:8]} 不变={unchanged_polls} unstable={unstable} polls={polls}"
+                )
+
+                stable = bool(entries) and not unstable and unchanged_polls >= 1
+                timeout = polls >= max_polls
+                if not stable and not timeout:
+                    continue
+
+                if timeout and not stable:
+                    logger.warning(
+                        f"[115Life] 目标新增稳定轮询达到上限，按当前快照同步: key={session_key} 文件={file_count} 目录={dir_count}"
+                    )
+                else:
+                    logger.info(f"[115Life] 目标新增稳定窗口命中，开始批量同步: key={session_key} 文件={file_count} 目录={dir_count}")
+
+                await _process_target_event_entries(entries, drive_index, target_dir, event_name, event_type_cn, scan_path)
+
+                with _target_event_lock:
+                    latest = _state._target_event_sessions.get(session_key)
+                    if latest and int(latest.get("event_generation", 0) or 0) == generation:
+                        _state._target_event_sessions.pop(session_key, None)
+                    elif latest:
+                        latest["last_scan_signature"] = ""
+                        latest["unchanged_polls"] = 0
+
+            await asyncio.sleep(5)
+    except Exception as e:
+        with _target_event_lock:
+            _state._target_event_running = False
+        logger.error(f"[115Life] 目标新增稳定轮询异常退出: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -3524,145 +3873,9 @@ async def _sync_target_event_to_local(
     event_name: str,
     event_type_cn: str,
 ):
-    """处理目标目录新增事件：先写缓存，再按音视频/其他文件分别执行 STRM 与 CDN 下载。"""
-    try:
-        entries = await _collect_target_event_entries(file_path, file_id, drive_index, target_dir)
-        logger.info(f"[115Life] 目标新增事件扫描到 {len(entries)} 个条目: {file_path}")
-        if not entries:
-            return
-
-        task_key = build_task_key(drive_index, target_dir)
-        cache_items = {
-            entry["item_key"]: entry["cache_item"]
-            for entry in entries
-            if entry.get("item_key") and entry.get("cache_item")
-        }
-        if cache_items:
-            try:
-                merge_task_items(
-                    task_key,
-                    cache_items,
-                    meta={"last_status": "updated_by_target_add_event"},
-                )
-                logger.info(f"[115Life] 目标新增事件已批量写入缓存 {len(cache_items)} 条: {file_path}")
-            except Exception as e:
-                logger.debug(f"[115Life] 目标新增事件批量写缓存失败: {e}")
-
-        cfg = await _load_config_data()
-
-        from app.services.drive115_service import drive115_service
-        from p115client.tool.attr import get_attr
-        client, _ = await drive115_service.get_client(drive_index)
-        from app.services.strm_service import strm_service
-
-        dir_entries = []
-        media_entries = []
-        aux_entries = []
-        for entry in entries:
-            if entry.get("is_dir"):
-                dir_entries.append(entry)
-                continue
-            remote_file_path = str(entry.get("path", "") or "").rstrip("/")
-            if not remote_file_path or _is_recent_organize_generated(remote_file_path):
-                continue
-            file_class = str(entry.get("file_class", "") or "")
-            if file_class in ("video", "audio"):
-                media_entries.append(entry)
-            else:
-                aux_entries.append(entry)
-
-        strm_executor = ThreadPoolExecutor(max_workers=1)
-        strm_futures = []
-        dir_count = 0
-        dir_failed = 0
-        aux_count = 0
-        aux_failed = 0
-
-        for entry in dir_entries:
-            remote_dir_path = str(entry.get("path", "") or "").rstrip("/")
-            if not remote_dir_path:
-                continue
-            result = strm_service.ensure_local_dir_for_remote_path(
-                remote_dir_path,
-                reason=f"115目标目录新增事件: {event_type_cn} {remote_dir_path} (event={event_name})",
-            )
-            if result.get("status") == "ok":
-                dir_count += 1
-            elif result.get("status") == "error":
-                dir_failed += 1
-
-        for entry in media_entries:
-            remote_file_path = str(entry.get("path", "") or "").rstrip("/")
-            file_name = entry.get("name") or os.path.basename(remote_file_path)
-            if not file_name:
-                continue
-
-            pickcode = str(entry.get("pickcode", "") or "")
-            if not pickcode and client and str(entry.get("file_id", "") or "").isdigit():
-                try:
-                    with _read_lock:
-                        attr = get_attr(client, int(entry["file_id"])) or {}
-                    pickcode = str(attr.get("pickcode") or attr.get("pick_code") or attr.get("pc") or "")
-                    if pickcode:
-                        upsert_task_item(
-                            task_key,
-                            entry["file_id"],
-                            {
-                                "name": file_name,
-                                "path": remote_file_path,
-                                "pickcode": pickcode,
-                                "size": int(entry.get("size", 0) or 0),
-                                "id": int(entry["file_id"]),
-                                "sha1": str(entry.get("sha1", "") or ""),
-                                "is_dir": False,
-                                "parent_id": int(entry.get("parent_id", 0) or 0),
-                            },
-                            meta={"last_status": "updated_by_target_add_event"},
-                        )
-                except Exception:
-                    pickcode = ""
-
-            if pickcode:
-                strm_futures.append(strm_executor.submit(
-                    _generate_strm_for_event, pickcode, file_name, remote_file_path,
-                ))
-
-        for entry in aux_entries:
-            remote_file_path = str(entry.get("path", "") or "").rstrip("/")
-            file_name = entry.get("name") or os.path.basename(remote_file_path)
-            if not remote_file_path or not file_name:
-                continue
-            result = strm_service.download_aux_for_remote_file(
-                remote_file_path,
-                pickcode=str(entry.get("pickcode", "") or ""),
-                file_class=str(entry.get("file_class", "data") or "data"),
-                file_id=int(entry.get("file_id", 0) or 0),
-                sha1=str(entry.get("sha1", "") or ""),
-                file_size=int(entry.get("size", 0) or 0),
-                reason=f"115目标目录新增事件: {event_type_cn} {remote_file_path} (event={event_name})",
-            )
-            if result.get("status") == "ok":
-                aux_count += 1
-            elif result.get("status") == "error":
-                aux_failed += 1
-
-        strm_count = 0
-        for f in strm_futures:
-            try:
-                if f.result():
-                    strm_count += 1
-            except Exception as e:
-                logger.error(f"[115Life] STRM 生成异常: {e}")
-
-        strm_executor.shutdown(wait=False)
-
-        logger.info(
-            f"[115Life] 目标目录新增事件处理完成: 事件={event_name}/{event_type_cn} "
-            f"缓存={len(cache_items)} 目录创建={dir_count} 目录失败={dir_failed} strm={strm_count} 附属下载={aux_count} 附属失败={aux_failed}"
-        )
-
-    except Exception as e:
-        logger.error(f"[115Life] 处理目标目录新增事件失败: {e}")
+    entries = await _collect_target_event_entries(file_path, file_id, drive_index, target_dir)
+    logger.info(f"[115Life] 目标新增事件扫描到 {len(entries)} 个条目: {file_path}")
+    await _process_target_event_entries(entries, drive_index, target_dir, event_name, event_type_cn, file_path)
 
 
 # ---------------------------------------------------------------------------

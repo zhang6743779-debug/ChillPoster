@@ -48,6 +48,7 @@ _source_poll_running = False     # 源目录轮询任务是否在运行
 # ---------------------------------------------------------------------------
 
 _target_event_queue: List[tuple] = []                       # 待处理目标目录事件队列
+_target_event_sessions: dict = {}                           # 目标目录新增事件稳定轮询会话
 _source_poll_sessions: dict = {}                            # source 目录轮询会话
 _recent_organize_strm_paths: dict = {}                      # 整理后自动生成过strm的远端路径，短期去重
 _main_event_loop: Optional[asyncio.AbstractEventLoop] = None  # FastAPI 主事件循环
