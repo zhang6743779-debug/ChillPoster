@@ -64,6 +64,25 @@ class _OrganizeCancelledError(Exception):
     pass
 
 
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"[MediaOrganize] 环境变量 {name}={raw!r} 无效，使用默认值 {default}")
+        return default
+    if value < 1:
+        logger.warning(f"[MediaOrganize] 环境变量 {name}={raw!r} 必须大于 0，使用默认值 {default}")
+        return default
+    return value
+
+
+_MEDIA_METADATA_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_METADATA_WORKERS", 20)
+_MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 20)
+
+
 _WASH_CODEC_MULTIPLIERS = {
     "H264": 1.0,
     "H265": 1.6,
@@ -1270,7 +1289,7 @@ async def _run_organize_async(run_id: str, req):
         # 2. 获取刮削配置
         scraping_config = _build_scraping_config(config_data)
         _org_start = _time.time()
-        metadata_executor = ThreadPoolExecutor(max_workers=20)
+        metadata_executor = ThreadPoolExecutor(max_workers=_MEDIA_METADATA_WORKERS)
 
         # 3. 缓存已识别的 TMDb 数据（同名文件不用重复查）
         tmdb_cache = {}  # key: (tmdb_id, media_type) → tmdb_data
@@ -2035,7 +2054,7 @@ async def _run_organize_async(run_id: str, req):
             logger.info(f"[MediaOrganize] 复用源目录稳定快照: 条目={len(prefetched_source_tree_entries)}")
 
         logger.debug("[MediaOrganize] 阶段4/4: 执行整理与刮削")
-        _semaphore = asyncio.Semaphore(20)
+        _semaphore = asyncio.Semaphore(_MEDIA_ORGANIZE_CONCURRENCY)
         in_flight_group_tasks = []
         max_in_flight_group_tasks = 40
         grouped_items_by_key = {}
