@@ -971,7 +971,11 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         "part": path_meta.part or "",
     }, filename, path_meta)
 
-    titles_to_try = _build_titles_to_try(title, cn_name, en_name, file_meta.en_name)
+    parent_title = ""
+    if file_path and parent_dir_name and parent_dir_name not in {"/", "."}:
+        parent_meta = MetaInfo(_preprocess_dir_name(parent_dir_name))
+        parent_title = parent_meta.cn_name or ""
+    titles_to_try = _build_titles_to_try(parent_title, title, cn_name, en_name, file_meta.en_name)
 
     return {
         "filename": filename,
@@ -1064,9 +1068,16 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
 
         for result in exact_matches:
             tmdb_id = result.get('id')
-            logger.debug(f"{log_prefix} 精确匹配: '{filename}' -> {result.get('title') if item_type == 'movie' else result.get('name')} (ID: {tmdb_id})")
+            res_title = result.get('title') if item_type == 'movie' else result.get('name')
+            if year:
+                date_field = result.get('release_date') if item_type == 'movie' else result.get('first_air_date')
+                res_year = str(date_field)[:4] if date_field else None
+                if res_year and res_year != str(year) and not _tv_season_year_matches(media_type, season, year, tmdb_id, api_key):
+                    logger.debug(f"{log_prefix} 跳过年份不符的精确匹配: '{filename}' -> {res_title} ({res_year}) (ID: {tmdb_id})")
+                    continue
+            logger.debug(f"{log_prefix} 精确匹配: '{filename}' -> {res_title} (ID: {tmdb_id})")
             if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
-                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": result.get('title') if item_type == 'movie' else result.get('name')}
+                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
         if year:
             for result in contains_matches:
@@ -1078,11 +1089,14 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
                     logger.debug(f"{log_prefix} 包含年份匹配: '{filename}' -> {res_title} ({res_year}) (ID: {tmdb_id})")
                     return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
-        for result in contains_matches:
-            tmdb_id = result.get('id')
-            logger.debug(f"{log_prefix} 包含匹配: '{filename}' -> {result.get('title') if item_type == 'movie' else result.get('name')} (ID: {tmdb_id})")
-            if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
-                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": result.get('title') if item_type == 'movie' else result.get('name')}
+        if not year:
+            for result in contains_matches:
+                tmdb_id = result.get('id')
+                logger.debug(f"{log_prefix} 包含匹配: '{filename}' -> {result.get('title') if item_type == 'movie' else result.get('name')} (ID: {tmdb_id})")
+                if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                    return {"tmdb_id": tmdb_id, "media_type": media_type, "title": result.get('title') if item_type == 'movie' else result.get('name')}
+        elif contains_matches:
+            logger.debug(f"{log_prefix} 带年份标题未命中，跳过无年份包含兜底: '{filename}' -> {search_title} ({year})")
 
         if year and len(results) == 1:
             result = results[0]

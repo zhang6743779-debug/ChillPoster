@@ -2128,6 +2128,9 @@ class StrmService:
 
             logger.info(f"[STRM] 阶段1完成：扫描结束 {task_name} | 总数:{stats['scanned']} 目录:{stats['scanned_dirs']} 文件:{stats['scanned_files']}")
             _update_progress(run_id, f"STRM写缓存中: {task_name}", 45, "running", detail=stats.copy())
+            cache_start = perf_counter()
+            cache_item_count = len(current_run_items)
+            logger.info(f"[STRM] 阶段2开始：写媒体库缓存 {task_name} | 条目:{cache_item_count} | 跳过常驻索引重建")
             save_task_snapshot(
                 task_key,
                 current_run_items,
@@ -2135,8 +2138,10 @@ class StrmService:
                     "last_status": "scanned",
                     "updated_at": time.time(),
                 },
+                rebuild_resident_index=False,
             )
-            logger.info(f"[STRM] 阶段2完成：媒体库缓存已更新 {task_name} | 条目:{len(current_run_items)}")
+            cache_elapsed = perf_counter() - cache_start
+            logger.info(f"[STRM] 阶段2完成：媒体库缓存已更新 {task_name} | 条目:{cache_item_count} | 耗时 {cache_elapsed:.1f}s")
 
             if ACTIVE_TASKS.get(run_id, {}).get("cancel_requested"):
                 cancelled = True
@@ -2375,6 +2380,8 @@ class StrmService:
                 return
 
             stats["deleted"] += self._cleanup_local_orphans(local_path, remote_strm_paths, keep_dirs=remote_keep_dirs)
+            finish_cache_start = perf_counter()
+            logger.info(f"[STRM] 收尾缓存更新开始: {task_name} | 条目:{len(current_run_items)} | 跳过常驻索引重建")
             save_task_snapshot(
                 task_key,
                 current_run_items,
@@ -2382,7 +2389,9 @@ class StrmService:
                     "last_status": "finished",
                     "updated_at": time.time(),
                 },
+                rebuild_resident_index=False,
             )
+            logger.info(f"[STRM] 收尾缓存更新完成: {task_name} | 耗时 {perf_counter() - finish_cache_start:.1f}s")
             _update_progress(run_id, f"STRM全量同步完成: {task_name}", 100, "finished", detail=stats.copy())
             logger.info(f"[STRM] 全量同步完成: {task_name} | 耗时 {elapsed:.1f}s | 扫描:{stats['scanned']} 文件夹数量:{stats['scanned_dirs']} 生成:{stats['generated']} 下载:{stats['downloaded']} TMDb补齐:{stats['tmdb_generated']} TMDb跳过:{stats['tmdb_skipped']} TMDb失败:{stats['tmdb_failed']} 跳过:{stats['skipped']} 删除:{stats['deleted']} 失败:{stats['failed']} 重试成功:{stats['retry_success']} 重试失败:{stats['retry_failed']}")
             _notify_task("success", "", stats.copy(), elapsed)

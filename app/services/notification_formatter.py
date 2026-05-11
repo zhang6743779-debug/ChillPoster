@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 8
+TEMPLATE_VERSION = 9
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -25,6 +25,7 @@ DEFAULT_TEMPLATES = {
                 "{% if quality %}\n💎画质：{{ quality }}{% endif %}"
                 "{% if audio %}\n🎵音质：{{ audio }}{% endif %}"
                 "{% if episode_count %}\n📖数量：{{ episode_count }} 集{% endif %}"
+                "{% if episode_ranges %}\n📚集数：{{ episode_ranges }}{% endif %}"
                 "{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}"
                 "{% if tmdb_id %}\n🎬tmdbid：{{ tmdb_id }}{% endif %}"
                 "{% if release_group %}\n👨‍🎨制作组：{{ release_group }}{% endif %}"

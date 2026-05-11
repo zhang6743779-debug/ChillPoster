@@ -508,7 +508,7 @@ def merge_task_items(task_key: str, items: dict, meta: dict | None = None):
     _mark_index_dirty()
 
 
-def save_task_snapshot(task_key: str, items: dict, meta: dict | None = None):
+def save_task_snapshot(task_key: str, items: dict, meta: dict | None = None, rebuild_resident_index: bool = True):
     with _lock:
         _drop_resident_indexes_if_file_changed_locked()
         cache = load_cache()
@@ -516,7 +516,10 @@ def save_task_snapshot(task_key: str, items: dict, meta: dict | None = None):
         _save_cache(cache)
         index = _resident_task_indexes.get(task_key)
         if index:
-            index.replace_items_no_lock(current_items)
+            if rebuild_resident_index:
+                index.replace_items_no_lock(current_items)
+            else:
+                _resident_task_indexes.pop(task_key, None)
     _mark_index_dirty()
 
 

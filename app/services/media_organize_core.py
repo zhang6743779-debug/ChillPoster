@@ -2355,18 +2355,51 @@ async def _run_organize_async(run_id: str, req):
 # _organize_movie  /  _organize_tv
 # ---------------------------------------------------------------------------
 
+def _format_episode_range(values: list[int]) -> str:
+    if not values:
+        return ""
+    ranges = []
+    start = prev = values[0]
+    for value in values[1:]:
+        if value == prev + 1:
+            prev = value
+            continue
+        ranges.append(f"E{start:02d}" if start == prev else f"E{start:02d}-E{prev:02d}")
+        start = prev = value
+    ranges.append(f"E{start:02d}" if start == prev else f"E{start:02d}-E{prev:02d}")
+    return ",".join(ranges)
+
+
 def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_type: str, tmdb_id: str,
                                   episodes: list[tuple], success_count: int, total_size: int,
                                   elapsed_seconds: float) -> dict:
     source = tmdb_data.get("series_details") if "series_details" in tmdb_data else tmdb_data
     title = source.get("name" if media_type == "tv" else "title", "")
-    eps = sorted(set(e for _, e in episodes if e is not None))
-    seas = sorted(set(s for s, _ in episodes if s is not None))
     season_episode = ""
+    episode_ranges = ""
     if media_type == "tv":
-        s = f"S{seas[0]:02d}" if seas else ""
-        e = (f"E{eps[0]:02d}" if len(eps) == 1 else f"E{eps[0]:02d}-E{eps[-1]:02d}") if eps else ""
-        season_episode = s + e
+        episodes_by_season: dict[int, list[int]] = {}
+        for season, episode in episodes:
+            if season is None or episode is None:
+                continue
+            episodes_by_season.setdefault(int(season), []).append(int(episode))
+        season_parts = []
+        range_parts = []
+        for season in sorted(episodes_by_season):
+            eps = sorted(set(episodes_by_season[season]))
+            ranges = _format_episode_range(eps)
+            if len(eps) == 1:
+                season_parts.append(f"S{season:02d}E{eps[0]:02d}")
+            elif eps[-1] - eps[0] + 1 == len(eps) and len(eps) <= 24:
+                season_parts.append(f"S{season:02d}E{eps[0]:02d}-E{eps[-1]:02d}")
+            else:
+                season_parts.append(f"S{season:02d} 共{len(eps)}集")
+            if ranges:
+                range_parts.append(f"S{season:02d} {ranges}")
+        season_episode = ", ".join(season_parts)
+        episode_ranges = "; ".join(range_parts)
+        if len(episode_ranges) > 300:
+            episode_ranges = f"{episode_ranges[:300].rstrip(',; ')}..."
     vote = source.get("vote_average", 0)
     file_size = (
         f"{total_size/1024**3:.2f}G" if total_size >= 1024**3 else
@@ -2387,6 +2420,7 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         "quality": quality,
         "audio": audio,
         "episode_count": str(success_count) if media_type == "tv" else "",
+        "episode_ranges": episode_ranges,
         "file_size": file_size,
         "release_group": variables.get("release_group", ""),
         "elapsed": f"{elapsed_seconds:.1f}秒",
