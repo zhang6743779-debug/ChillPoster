@@ -53,6 +53,7 @@ from app.routers import strm
 from app.routers import media_organize
 from app.routers import upgrade
 from app.routers import drive115_cleanup
+from app.routers import drive115_upload
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -68,6 +69,7 @@ from app.services.task_service import task_service_instance
 from app.services.rss_service import rss_service_instance
 from app.services.hdhive_service import hdhive_service
 from app.services.telegram_service import telegram_notify_service
+from app.services.drive115_upload_service import drive115_upload_service
 # ============================================
 
 # ==========================================
@@ -207,6 +209,7 @@ async def lifespan_ui(app: FastAPI):
     task_service_instance.load_active_jobs()
     rss_service_instance.load_active_jobs()
     hdhive_service.setup_scheduler(task_service_instance.scheduler)
+    drive115_upload_service.start()
     if telegram_notify_service.config.get("enabled") and telegram_notify_service.config.get("bot_token"):
         telegram_notify_service.start_polling()
     logger.info("[启动] 基础任务与服务初始化完成")
@@ -276,6 +279,10 @@ async def lifespan_ui(app: FastAPI):
         pass
     telegram_notify_service.stop_polling()
     try:
+        drive115_upload_service.stop()
+    except Exception:
+        pass
+    try:
         task_service_instance.scheduler.shutdown(wait=False)
     except Exception:
         pass
@@ -310,6 +317,7 @@ app.include_router(strm.router)
 app.include_router(media_organize.router)
 app.include_router(upgrade.router)
 app.include_router(drive115_cleanup.router)
+app.include_router(drive115_upload.router)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")

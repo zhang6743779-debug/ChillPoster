@@ -721,6 +721,17 @@ def _is_strong_subtitle_title_token(token: str) -> bool:
     return bool(re.search(r"[一-鿿]", compact) or len(compact) >= 3)
 
 
+def _extract_subtitle_episode_keys(value: str) -> set[str]:
+    compact = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+    keys = set()
+    for season, episode in re.findall(r"s(\d{1,2})\s*e(\d{1,4})", compact):
+        keys.add(f"s{int(season):02d}e{int(episode):02d}")
+        keys.add(f"e{int(episode):02d}")
+    for episode in re.findall(r"(?:^|\s)(?:ep|e)(\d{1,4})(?=\s|$)", compact):
+        keys.add(f"e{int(episode):02d}")
+    return keys
+
+
 def _subtitle_cores_match(video_core: str, sub_core: str) -> bool:
     if not video_core or not sub_core:
         return False
@@ -810,7 +821,12 @@ def _collect_matched_subtitle_ops(file_item: dict, video_new_name: str, subtitle
         if not sub_id or sub_id in loose_ids:
             continue
         sub_core = _normalize_subtitle_match_core(sub_stem)
-        if not _subtitle_cores_match(video_core, sub_core):
+        core_matched = _subtitle_cores_match(video_core, sub_core)
+        if not core_matched:
+            video_episode_keys = _extract_subtitle_episode_keys(video_stem)
+            sub_episode_keys = _extract_subtitle_episode_keys(sub_stem)
+            core_matched = bool(video_episode_keys and sub_episode_keys and not video_episode_keys.isdisjoint(sub_episode_keys))
+        if not core_matched:
             continue
         loose_ids.add(sub_id)
         tag_suffix = _extract_subtitle_tag_suffix(sub_stem)
@@ -887,7 +903,7 @@ async def _match_and_move_subtitles(client, file_item: dict, video_new_name: str
         return []
     if not matched_ops:
         sub_names = [s.get("name", "") for s in subs]
-        logger.debug(f"[MediaOrganize] 目录下有字幕但未匹配视频 {file_item.get('name','')!r}: {sub_names}")
+        logger.info(f"[MediaOrganize] 目录下有字幕但未匹配视频 {file_item.get('name','')!r}: {sub_names}")
         return []
 
     logger.info(f"[MediaOrganize] 字幕匹配命中: video={file_item.get('name', '')!r} mode={match_mode} count={len(matched_ops)}")
@@ -949,7 +965,11 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
         subs = subtitles_by_parent.get(parent_id, [])
         video_id = str(plan.get("video_id") or file_item.get("id") or file_item.get("fid") or "")
         result_map[video_id] = []
-        if not subs or not matched_ops:
+        if not subs:
+            continue
+        if not matched_ops:
+            sub_names = [s.get("name", "") for s in subs]
+            logger.info(f"[MediaOrganize] 目录下有字幕但未匹配视频 {file_item.get('name','')!r}: {sub_names}")
             continue
 
         logger.info(f"[MediaOrganize] {log_prefix}: video={file_item.get('name', '')!r} mode={match_mode} count={len(matched_ops)}")

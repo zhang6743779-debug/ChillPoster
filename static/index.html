@@ -789,6 +789,213 @@
                         </div>
                     </div>
 
+                    <div v-else-if="tab === 'drive115_upload'" key="drive115_upload" class="scroll-view">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <h2>115 秒传/上传</h2>
+                                <button class="btn btn-primary" @click="showCreate115Upload ? (showCreate115Upload = false) : openCreate115Upload()">
+                                    <i class="fa-solid" :class="showCreate115Upload ? 'fa-minus' : 'fa-plus'"></i>
+                                    {{ showCreate115Upload ? '收起配置' : '新建监听任务' }}
+                                </button>
+                            </div>
+
+                            <div class="info-alert-box mb-20">
+                                <i class="fa-solid fa-circle-info"></i>
+                                <div class="info-content">
+                                    <div class="info-alert-box-title">实时监听说明</div>
+                                    一个任务监听一个本地目录并上传到一个 115 目标目录；可以创建多个任务。新文件稳定后会先尝试秒传，秒传未命中再后台真实上传，失败会记录并可重试。
+                                </div>
+                            </div>
+
+                            <transition name="slide">
+                                <div v-if="showCreate115Upload" class="card card-accent mb-20">
+                                    <div class="card-header">
+                                        <div class="card-title-l"><i class="fa-solid fa-cloud-arrow-up"></i> {{ upload115EditingId ? '编辑上传任务' : '配置上传任务' }}</div>
+                                        <button class="btn btn-ghost btn-sm" @click="showCreate115Upload=false; reset115UploadForm()">取消</button>
+                                    </div>
+
+                                    <div class="form-grid-2-tight">
+                                        <div>
+                                            <label>任务名称</label>
+                                            <input v-model="upload115Form.name" placeholder="例如：电影目录上传到 115">
+                                        </div>
+                                        <div>
+                                            <label>上传并发</label>
+                                            <select v-model.number="upload115Form.concurrency">
+                                                <option :value="1">1（推荐）</option>
+                                                <option :value="2">2</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div class="module-card-actions-split mt-15">
+                                        <label class="ios-switch" title="启停任务">
+                                            <input type="checkbox" v-model="upload115Form.enabled">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">启用实时监听</span>
+                                        <div class="module-card-divider"></div>
+                                        <label class="ios-switch" title="启动时扫描已有文件">
+                                            <input type="checkbox" v-model="upload115Form.include_existing_on_start">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">启动时包含已有文件</span>
+                                        <div class="module-card-divider"></div>
+                                        <label class="ios-switch" title="成功后删除本地文件">
+                                            <input type="checkbox" v-model="upload115Form.delete_local_after_success">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">成功后删除本地文件</span>
+                                    </div>
+
+                                    <div class="cleanup-folder-section mt-20">
+                                        <div class="inline-label-row">
+                                            <label>本地监听目录</label>
+                                            <button class="btn btn-ghost btn-sm" @click="open115UploadLocalBrowser">
+                                                <i class="fa-solid" :class="upload115LocalBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                {{ upload115LocalBrowser.visible ? '关闭浏览' : '浏览本地目录' }}
+                                            </button>
+                                        </div>
+                                        <div v-if="!upload115Form.local_folder" class="empty-state-card cleanup-empty">尚未选择本地目录</div>
+                                        <div v-else class="cleanup-folder-list">
+                                            <div class="cleanup-folder-chip">
+                                                <div>
+                                                    <strong>{{ upload115Form.local_folder }}</strong>
+                                                    <span>ChillPoster 所在服务器/NAS 可访问的路径</span>
+                                                </div>
+                                                <button class="icon-btn danger" @click="upload115Form.local_folder = ''"><i class="fa-solid fa-xmark"></i></button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="upload115LocalBrowser.visible" class="cleanup-browser mt-15">
+                                        <div class="cleanup-browser-header">
+                                            <button class="btn btn-ghost btn-sm" @click="upload115LocalUp" :disabled="upload115LocalBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ upload115LocalBrowser.currentPath }}</span>
+                                            <button class="btn btn-primary btn-sm" @click="selectCurrent115UploadLocalFolder">选择当前目录</button>
+                                            <button class="btn btn-ghost btn-sm" @click="upload115LocalBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="upload115LocalBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="upload115LocalBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                            <div v-else v-for="dir in upload115LocalBrowser.dirs" :key="dir.path" class="cleanup-browser-row" @click="select115UploadLocalDir(dir)">
+                                                <i class="fa-solid fa-folder"></i>
+                                                <span>{{ dir.name }}</span>
+                                                <i class="fa-solid fa-chevron-right"></i>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="cleanup-folder-section mt-20">
+                                        <div class="inline-label-row">
+                                            <label>115 目标目录</label>
+                                            <button class="btn btn-ghost btn-sm" @click="open115UploadBrowser">
+                                                <i class="fa-solid" :class="upload115Browser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                {{ upload115Browser.visible ? '关闭浏览' : '浏览 115 文件夹' }}
+                                            </button>
+                                        </div>
+                                        <div v-if="!upload115Form.target_cid" class="empty-state-card cleanup-empty">尚未选择 115 目标目录</div>
+                                        <div v-else class="cleanup-folder-list">
+                                            <div class="cleanup-folder-chip">
+                                                <div>
+                                                    <strong>{{ upload115Form.target_path || upload115Form.target_name }}</strong>
+                                                    <span>CID: {{ upload115Form.target_cid }}</span>
+                                                </div>
+                                                <button class="icon-btn danger" @click="upload115Form.target_cid = ''; upload115Form.target_name = ''; upload115Form.target_path = ''"><i class="fa-solid fa-xmark"></i></button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="upload115Browser.visible" class="cleanup-browser mt-15">
+                                        <div class="cleanup-browser-header">
+                                            <button class="btn btn-ghost btn-sm" @click="upload115Up" :disabled="upload115Browser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ upload115Browser.currentPath }}</span>
+                                            <button class="btn btn-primary btn-sm" @click="selectCurrent115UploadFolder" :disabled="upload115Browser.currentCid === '0'">选择当前目录</button>
+                                            <button class="btn btn-ghost btn-sm" @click="upload115Browser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="upload115Browser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="upload115Browser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                            <div v-else v-for="dir in upload115Browser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="select115UploadDir(dir)">
+                                                <i class="fa-solid fa-folder"></i>
+                                                <span>{{ dir.name }}</span>
+                                                <i class="fa-solid fa-chevron-right"></i>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-actions-end">
+                                        <button class="btn btn-primary" @click="save115UploadTask"><i class="fa-solid fa-save"></i> 保存任务</button>
+                                    </div>
+                                </div>
+                            </transition>
+
+                            <div class="server-grid-layout server-grid-layout-single">
+                                <div v-for="task in upload115Tasks" :key="task.id" class="module-card">
+                                    <div class="mc-header">
+                                        <div class="mc-title"><i class="fa-solid fa-cloud-arrow-up"></i> {{ task.name }}</div>
+                                        <div class="module-card-actions-split">
+                                            <span class="status-badge"><span class="dot" :class="get115UploadTaskState(task.id).running ? 'ok' : 'error'"></span>{{ get115UploadTaskState(task.id).running ? '监听中' : '已停止' }}</span>
+                                            <label class="ios-switch" title="启停任务">
+                                                <input type="checkbox" :checked="task.enabled !== false" @change="toggle115UploadTask(task)">
+                                                <span class="ios-slider"></span>
+                                            </label>
+                                            <button class="icon-btn icon-btn-success" @click="scan115UploadTask(task)" title="手动扫描"><i class="fa-solid fa-rotate"></i></button>
+                                            <button class="icon-btn" @click="edit115UploadTask(task)" title="编辑"><i class="fa-solid fa-pen"></i></button>
+                                            <button class="icon-btn danger" @click="delete115UploadTask(task)" title="删除"><i class="fa-solid fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                    <div class="mc-body mc-body-compact">
+                                        <div class="meta-row"><strong>本地:</strong> {{ task.local_folder }}</div>
+                                        <div class="meta-row"><strong>115:</strong> {{ task.target_path || task.target_name }} <span v-if="task.target_cid">CID: {{ task.target_cid }}</span></div>
+                                        <div class="meta-row"><strong>队列:</strong> {{ get115UploadTaskState(task.id).queue_size || 0 }} ｜ <strong>并发:</strong> {{ task.concurrency || 1 }}</div>
+                                        <div class="meta-row" v-if="get115UploadTaskState(task.id).message"><strong>状态:</strong> {{ get115UploadTaskState(task.id).message }}</div>
+
+                                        <div v-if="(get115UploadTaskState(task.id).active || []).length" class="upload115-section">
+                                            <div class="upload115-section-title">正在处理</div>
+                                            <div v-for="item in get115UploadTaskState(task.id).active" :key="item.job_id" class="upload115-job-row">
+                                                <div>
+                                                    <strong>{{ item.filename }}</strong>
+                                                    <span>{{ get115UploadStageLabel(item.stage) }} · {{ item.message }}</span>
+                                                </div>
+                                                <div class="upload115-progress-wrap">
+                                                    <div class="upload115-progress-bar"><div class="upload115-progress-fill" :style="{ width: (item.progress || 0) + '%' }"></div></div>
+                                                    <span>{{ item.progress == null ? '处理中' : item.progress + '%' }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div v-if="(get115UploadTaskState(task.id).failed || []).length" class="upload115-section">
+                                            <div class="upload115-section-title">失败记录</div>
+                                            <div v-for="item in (get115UploadTaskState(task.id).failed || []).slice(0, 5)" :key="item.job_id" class="upload115-record-row upload115-record-row-failed">
+                                                <div>
+                                                    <strong>{{ item.filename }}</strong>
+                                                    <span>{{ item.error || item.message }} · {{ format115UploadSize(item.size) }}</span>
+                                                </div>
+                                                <button class="btn btn-ghost btn-sm" @click="retry115UploadFile(task, item)">重试</button>
+                                            </div>
+                                        </div>
+
+                                        <div v-if="(get115UploadTaskState(task.id).recent || []).length" class="upload115-section">
+                                            <div class="upload115-section-title">最近成功</div>
+                                            <div v-for="item in (get115UploadTaskState(task.id).recent || []).slice(0, 5)" :key="item.job_id" class="upload115-record-row">
+                                                <div>
+                                                    <strong>{{ item.filename }}</strong>
+                                                    <span>{{ get115UploadMethodLabel(item.method) }} · {{ format115UploadSize(item.size) }} · {{ item.message }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mc-footer">
+                                        <span class="meta-row">已有文件：{{ task.include_existing_on_start ? '启动时扫描' : '默认忽略，手动扫描可入队' }}</span>
+                                        <button class="btn btn-ghost btn-sm" @click="clear115UploadHistory(task)">清理记录</button>
+                                    </div>
+                                </div>
+                                <div v-if="upload115Tasks.length === 0" class="empty-state-card">暂无 115 上传监听任务</div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'webhook'" key="webhook" class="scroll-view">
                         <div class="content-shell shell-md">
 
