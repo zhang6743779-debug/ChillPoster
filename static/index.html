@@ -3622,6 +3622,9 @@
                                         </div>
                                         <div v-if="detailModal.detail.tagline" class="detail-tagline detail-tagline-inline">“{{ detailModal.detail.tagline }}”</div>
                                         <div class="detail-actions detail-actions-header detail-actions-inline">
+                                            <span class="detail-library-status-badge" :class="getDetailLibraryState().status">
+                                                {{ getDetailLibraryState().label }}
+                                            </span>
                                             <span v-if="detailModal.subscribed && detailModal.detail.media_type !== 'tv'" @click="unsubscribeMedia(detailModal.item)" class="btn-subscribed btn-subscribed-action">
                                                 <i class="fa-solid fa-bell-slash"></i> 取消订阅
                                             </span>

@@ -6684,6 +6684,23 @@ createApp({
             return { status: 'exists', label: total ? `已入库 ${count}/${total}` : '已入库', count, total };
         };
 
+        const getDetailLibraryState = (detail = detailModal.detail) => {
+            if (!detail) return { status: 'missing', label: '未入库' };
+            if (detail.media_type !== 'tv') {
+                return detail.exists_in_library ? { status: 'exists', label: '已入库' } : { status: 'missing', label: '未入库' };
+            }
+            const seasons = getDetailSeasons(detail);
+            const total = seasons.reduce((sum, season) => sum + Number(season.episode_count || 0), 0);
+            const count = seasons.reduce((sum, season) => sum + getLibrarySeasonEpisodes(season.season_number).length, 0);
+            if (total > 0) {
+                if (!count) return { status: 'missing', label: '未入库', count, total };
+                if (count >= total) return { status: 'exists', label: '已入库', count, total };
+                return { status: 'partial', label: '部分入库', count, total };
+            }
+            if (detailModal.librarySeriesStatus?.exists || detail.exists_in_library) return { status: 'exists', label: '已入库' };
+            return { status: 'missing', label: '未入库' };
+        };
+
         const buildTmdbImageUrl = (path) => path ? `/api/discover/tmdb_img?path=${path}` : '';
 
         const normalizeDetailCardItem = (entry = {}, fallbackType = 'movie') => {
@@ -6730,8 +6747,8 @@ createApp({
                     imdb_id: imdbId,
                     tvdb_id: tvdbId,
                 },
-                recommendation_items: (detail.recommendations?.results || []).map(entry => normalizeDetailCardItem(entry, mediaType)),
-                similar_items: (detail.similar?.results || []).map(entry => normalizeDetailCardItem(entry, mediaType)),
+                recommendation_items: (detail.recommendations?.results || []).map(entry => normalizeDetailCardItem(entry, mediaType)).filter(item => item.poster_url),
+                similar_items: (detail.similar?.results || []).map(entry => normalizeDetailCardItem(entry, mediaType)).filter(item => item.poster_url),
             };
         };
 
@@ -7343,7 +7360,7 @@ createApp({
 
             // [新增] 发现推荐页
             detailModal, openMediaDetail, closeDetailModal,
-            setDetailSeason, toggleDetailSeasonExpanded, loadSeasonEpisodes, getSeasonLibraryState, isEpisodeInLibrary,
+            setDetailSeason, toggleDetailSeasonExpanded, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,
             subscribeMedia, unsubscribeMedia, getImdbLink, getTvdbLink,
             gridModal, gridModalEl, gridSentinel, openRowGrid, closeGridModal,
             searchMovieResults, searchTvResults, discoverSearchLoading,
