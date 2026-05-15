@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260515p">
+    <link rel="stylesheet" href="/static/style.css?v=20260515q">
 
 </head>
 
@@ -803,7 +803,7 @@
                                 <i class="fa-solid fa-circle-info"></i>
                                 <div class="info-content">
                                     <div class="info-alert-box-title">实时监听说明</div>
-                                    一个任务监听一个本地目录并递归上传到一个 115 目标目录；新文件稳定后会先尝试秒传，秒传未命中再后台真实上传。任务默认扫描已有文件，上传成功后删除本地文件并清理空目录。
+                                    一个任务监听一个本地目录并递归上传到一个 115 目标目录；新文件稳定后会先尝试秒传，秒传未命中再后台真实上传。可按任务选择上传成功后是否删除本地文件并清理空目录。
                                 </div>
                             </div>
 
@@ -834,7 +834,11 @@
                                         </label>
                                         <span class="meta-row">启用实时监听</span>
                                         <div class="module-card-divider"></div>
-                                        <span class="meta-row">递归扫描已有文件，成功后删除本地文件</span>
+                                        <label class="ios-switch" title="上传成功后删除本地文件">
+                                            <input type="checkbox" v-model="upload115Form.delete_local_after_success">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">成功后删除本地文件</span>
                                     </div>
 
                                     <div class="cleanup-folder-section mt-20">
@@ -976,7 +980,7 @@
                                         </div>
                                     </div>
                                     <div class="mc-footer">
-                                        <span class="meta-row">递归扫描已有文件，成功后删除本地文件并清理空目录</span>
+                                        <span class="meta-row">递归扫描已有文件，{{ task.delete_local_after_success === false ? '成功后保留本地文件' : '成功后删除本地文件并清理空目录' }}</span>
                                         <button class="btn btn-ghost btn-sm" @click="clear115UploadHistory(task)">清理记录</button>
                                     </div>
                                 </div>
@@ -4029,6 +4033,8 @@
                             <button class="mobile-more-item" :class="{active: tab === 'rss'}" @click="selectMobileTab('rss')"><i class="fa-solid fa-rss"></i><span>RSS</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
                         </div>
                     </div>
@@ -4077,6 +4083,6 @@
 
         <!-- 移动端抽屉菜单 (已替换为主入口 + 更多菜单) -->
 
-    </div> <script src="/static/app.js?v=20260515c"></script>
+    </div> <script src="/static/app.js?v=20260515e"></script>
 </body>
 </html>

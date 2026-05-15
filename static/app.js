@@ -5818,7 +5818,7 @@ createApp({
             upload115Form.target_path = task.target_path || '';
             upload115Form.watch_mode = 'realtime';
             upload115Form.include_existing_on_start = true;
-            upload115Form.delete_local_after_success = true;
+            upload115Form.delete_local_after_success = task.delete_local_after_success !== false;
             upload115Form.concurrency = Number(task.concurrency || 5);
             showCreate115Upload.value = true;
         };
