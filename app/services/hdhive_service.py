@@ -208,17 +208,17 @@ class HDHiveService:
 
             result = await asyncio.to_thread(_run_login)
             if not result:
-                return {"error": "Playwright 登录失败，未获取到 token"}
+                return {"error": "登录失败，未获取到 token"}
 
             cookie_str, token = result
             self._account_cookies[name] = cookie_str
-            logger.info(f"[HDHive] Playwright 登录成功: {name}")
+            logger.info(f"[HDHive] 登录成功: {name}")
             return {"success": True, "token": token, "cookie": cookie_str}
         except HDHiveLoginError as e:
-            logger.warning(f"[HDHive] Playwright 登录失败: {e}")
+            logger.warning(f"[HDHive] 登录失败: {e}")
             return {"error": str(e)}
         except Exception as e:
-            logger.error(f"[HDHive] Playwright 登录异常: {e}")
+            logger.error(f"[HDHive] 登录异常: {e}")
             return {"error": str(e)}
 
     async def _auto_login_for_account(self, account: HDHiveAccount) -> Optional[str]:

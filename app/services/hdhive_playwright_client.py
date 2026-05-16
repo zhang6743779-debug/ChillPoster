@@ -1,5 +1,6 @@
-__all__ = ["HDHivePlaywrightClient", "HDHiveLoginError"]
+__all__ = ["HDHivePlaywrightClient", "HDHiveLoginError", "get_proxy_session_data"]
 
+import base64
 import os
 import re
 from contextlib import contextmanager
@@ -14,7 +15,7 @@ from platform import machine as _machine
 from sys import platform
 from time import sleep
 from typing import Any, Dict, Iterator, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 from httpx import Client
 import orjson
@@ -38,6 +39,35 @@ except Exception:
         PROXY = getattr(global_config, "proxy_url", None)
 
     settings = _Settings()
+
+
+def get_proxy_session_data(target_url: str, flaresolverr_url: str = "http://localhost:8191/v1") -> dict:
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "cmd": "request.get",
+        "url": target_url,
+        "maxTimeout": 60000,
+    }
+    try:
+        with Client(verify=False, timeout=65.0) as client:
+            response = client.post(flaresolverr_url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status") != "ok":
+            return {"status": "error", "message": data.get("message", "代理服务返回未知错误")}
+        solution = data.get("solution") or {}
+        cookies = {
+            cookie.get("name"): cookie.get("value")
+            for cookie in solution.get("cookies") or []
+            if cookie.get("name") and cookie.get("value") is not None
+        }
+        return {
+            "status": "success",
+            "cookies": cookies,
+            "user_agent": solution.get("userAgent") or "",
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 class HDHiveLoginError(Exception):
@@ -64,6 +94,7 @@ class HDHivePlaywrightClient:
         self.login_page = "/login"
         self._headless = headless
         self._cookie_str: Optional[str] = None
+        self._user_agent = HDHivePlaywrightClient._build_ua()
 
     @staticmethod
     def _build_ua() -> str:
@@ -108,6 +139,11 @@ class HDHivePlaywrightClient:
             u = p.get("https") or p.get("http")
             return str(u) if u else None
         return None
+
+    @staticmethod
+    def _flaresolverr_url_from_env() -> Optional[str]:
+        raw = os.environ.get("FLARESOLVERR_URL") or os.environ.get("HDHIVE_FLARESOLVERR_URL")
+        return raw.rstrip("/") if raw else None
 
     @staticmethod
     def _playwright_proxy_settings() -> Optional[Dict[str, str]]:
@@ -200,6 +236,21 @@ class HDHivePlaywrightClient:
         return cookies
 
     @staticmethod
+    def _cookie_str_from_dict(cookies: Dict[str, str]) -> str:
+        names = ("token", "csrf_access_token", "refresh_token")
+        parts = [f"{name}={cookies[name]}" for name in names if cookies.get(name)]
+        parts.extend(
+            f"{name}={value}"
+            for name, value in cookies.items()
+            if name not in names and value
+        )
+        return "; ".join(parts)
+
+    @staticmethod
+    def _cookie_dict_from_httpx(client: Client) -> Dict[str, str]:
+        return {cookie.name: cookie.value for cookie in client.cookies.jar}
+
+    @staticmethod
     @contextmanager
     def _suppress_playwright_debug_output() -> Iterator[None]:
         debug_keys = ("DEBUG", "PWDEBUG")
@@ -220,6 +271,56 @@ class HDHivePlaywrightClient:
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+    def _fetch_login_action_hash(self, client: Client) -> Optional[str]:
+        try:
+            resp = client.get(f"{self.base_url}{self.login_page}")
+            html = resp.text.replace('\\"', '"')
+            scripts = re.findall(r'["\']([^"\']*_next/static/chunks/[^"\']+\.js)["\']', html)
+            for src in dict.fromkeys(scripts):
+                url = urljoin(self.base_url, src)
+                try:
+                    body = client.get(url).text
+                except Exception:
+                    continue
+                for pattern in (
+                    r'createServerReference\)\("([0-9a-f]{40,})"[^\n;]{0,300}"login"\)',
+                    r'createServerReference\("([0-9a-f]{40,})"[^\n;]{0,300}"login"\)',
+                ):
+                    m = re.search(pattern, body)
+                    if m:
+                        return m.group(1)
+        except Exception:
+            return None
+        return None
+
+    def _fetch_action_hash_via_http(self) -> Optional[str]:
+        if not self._cookie_str:
+            return None
+        cookies = HDHivePlaywrightClient._parse_cookie_str(self._cookie_str)
+        proxy_h = HDHivePlaywrightClient._proxy_url_from_settings()
+        try:
+            with Client(verify=False, timeout=30.0, proxy=proxy_h, follow_redirects=True) as client:
+                client.headers.update({"User-Agent": self._user_agent})
+                client.cookies.update(cookies)
+                resp = client.get(self.base_url)
+                html = resp.text.replace('\\"', '"')
+                scripts = re.findall(r'["\']([^"\']*_next/static/chunks/[^"\']+\.js)["\']', html)
+                for src in dict.fromkeys(scripts):
+                    url = urljoin(self.base_url, src)
+                    try:
+                        body = client.get(url).text
+                    except Exception:
+                        continue
+                    m = re.search(
+                        r'createServerReference\)\("([0-9a-f]{40,})"[^\n;]{0,300}"checkIn"\)',
+                        body,
+                    )
+                    if m:
+                        return m.group(1)
+        except Exception:
+            return None
+        return None
 
     def _fetch_action_hash_via_playwright(self) -> Optional[str]:
         if not self._cookie_str:
@@ -391,7 +492,7 @@ class HDHivePlaywrightClient:
         if not token:
             return False, "Cookie missing 'token'"
 
-        resolved_hash = self._fetch_action_hash_via_playwright()
+        resolved_hash = self._fetch_action_hash_via_http() or self._fetch_action_hash_via_playwright()
         if not resolved_hash:
             return False, "无法获取 action hash，签到中止，站点可能有反爬更新或网络问题。"
 
@@ -439,6 +540,72 @@ class HDHivePlaywrightClient:
         except Exception as e:
             return False, str(e)
 
+    def _login_with_http_session(
+        self,
+        username: str,
+        password: str,
+        cookies: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+    ) -> Optional[Tuple[str, str]]:
+        headers = {
+            "User-Agent": user_agent or self._user_agent,
+            "Accept": "text/x-component",
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Origin": self.base_url,
+            "Referer": f"{self.base_url}{self.login_page}",
+        }
+        proxy_h = HDHivePlaywrightClient._proxy_url_from_settings()
+        with Client(verify=False, timeout=30.0, proxy=proxy_h, follow_redirects=False) as client:
+            client.headers.update({"User-Agent": headers["User-Agent"]})
+            if cookies:
+                client.cookies.update(cookies)
+            action_hash = self._fetch_login_action_hash(client)
+            if not action_hash:
+                return None
+            headers["next-action"] = action_hash
+            password_payload = base64.b64encode(password.encode("utf-8")).decode("ascii")
+            body = orjson.dumps(
+                [
+                    {
+                        "username": username,
+                        "password": password_payload,
+                        "password_transport": "base64",
+                    },
+                    "/",
+                ]
+            )
+            client.post(
+                f"{self.base_url}{self.login_page}",
+                headers=headers,
+                content=body,
+            )
+            cookie_dict = HDHivePlaywrightClient._cookie_dict_from_httpx(client)
+            token = cookie_dict.get("token")
+            if token:
+                self._cookie_str = HDHivePlaywrightClient._cookie_str_from_dict(cookie_dict)
+                return self._cookie_str, token
+        return None
+
+    def _login_with_flaresolverr(self, username: str, password: str) -> Optional[Tuple[str, str]]:
+        flaresolverr_url = HDHivePlaywrightClient._flaresolverr_url_from_env()
+        if not flaresolverr_url:
+            return None
+        session = get_proxy_session_data(
+            f"{self.base_url}{self.login_page}",
+            flaresolverr_url=flaresolverr_url,
+        )
+        if session.get("status") != "success":
+            return None
+        user_agent = session.get("user_agent") or None
+        if user_agent:
+            self._user_agent = user_agent
+        return self._login_with_http_session(
+            username,
+            password,
+            cookies=session.get("cookies") or {},
+            user_agent=user_agent,
+        )
+
     def login(
         self,
         username: str,
@@ -448,39 +615,8 @@ class HDHivePlaywrightClient:
             raise HDHiveLoginError("必须传入用户名和密码")
 
         try:
-            with HDHivePlaywrightClient._suppress_playwright_debug_output():
-                with sync_playwright() as p:
-                    with HDHivePlaywrightClient._socks5_slippers_if_needed() as slip:
-                        proxy = (
-                            slip
-                            if slip is not None
-                            else HDHivePlaywrightClient._playwright_proxy_settings()
-                        )
-                        browser, context = self._make_context(p, proxy)
-                        try:
-                            page = context.new_page()
-                            ok = self._fill_and_submit(page, username, password)
-                            raw_cookies = context.cookies()
-                        finally:
-                            browser.close()
-
-            if not ok:
-                return None
-            token = next(
-                (c["value"] for c in raw_cookies if c["name"] == "token"), None
-            )
-            csrf = next(
-                (c["value"] for c in raw_cookies if c["name"] == "csrf_access_token"),
-                None,
-            )
-            if token:
-                parts = [f"token={token}"]
-                if csrf:
-                    parts.append(f"csrf_access_token={csrf}")
-                self._cookie_str = "; ".join(parts)
-                return self._cookie_str, token
+            return self._login_with_flaresolverr(username, password) or self._login_with_http_session(username, password)
         except HDHiveLoginError:
             raise
         except Exception as e:
             raise HDHiveLoginError(f"登录失败: {e}") from e
-        return None
