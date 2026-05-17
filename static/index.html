@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260518missing-default-sort">
+    <link rel="stylesheet" href="/static/style.css?v=20260518performance-grid">
 
 </head>
 
@@ -386,7 +386,7 @@
                                     </div>
                                 </div>
                                 <div v-if="dashboardRecentItems.length === 0" class="dashboard-empty-state">暂无最近入库媒体</div>
-                                <div v-else class="recent-media-row">
+                                <div v-else class="recent-media-row" @scroll="onDashboardLazyScroll('recent', $event)">
                                     <div v-for="item in dashboardVisibleRecentItems" :key="item.card_id || item.id" class="recent-media-item" @click="openDashboardItem(item)">
                                         <div class="recent-media-poster">
                                             <img v-if="item.poster_url" :src="item.poster_url" :alt="item.title" loading="lazy">
@@ -460,8 +460,8 @@
                                     </div>
                                 </div>
                                 <div v-if="dashboardRecentPlaybacks.length === 0" class="dashboard-empty-state">暂无最近播放记录</div>
-                                <div v-else class="playback-hero-list">
-                                    <div v-for="item in dashboardRecentPlaybacks" :key="`${item.id}-${item.played_at || ''}`" class="playback-hero-item" @click="openDashboardItem(item)">
+                                <div v-else class="playback-hero-list" @scroll="onDashboardLazyScroll('playback', $event)">
+                                    <div v-for="item in dashboardVisibleRecentPlaybacks" :key="`${item.id}-${item.played_at || ''}`" class="playback-hero-item" @click="openDashboardItem(item)">
                                         <div class="playback-hero-backdrop">
                                             <img v-if="item.backdrop_url || item.poster_url" :src="item.backdrop_url || item.poster_url" :alt="item.title" loading="lazy">
                                         </div>
@@ -496,8 +496,8 @@
                                     <div class="media-stat-chip">其他库 {{ dashboardMediaStats.other_libraries }}</div>
                                 </div>
                                 <div v-if="dashboardMediaStats.libraries.length === 0" class="dashboard-empty-state">暂无媒体统计数据</div>
-                                <div v-else class="media-library-list">
-                                    <div v-for="lib in dashboardMediaStats.libraries" :key="lib.id" class="media-library-row" @click="openDashboardLibrary(lib)">
+                                <div v-else class="media-library-list" @scroll="onDashboardLazyScroll('libraries', $event)">
+                                    <div v-for="lib in dashboardVisibleMediaLibraries" :key="lib.id" class="media-library-row" @click="openDashboardLibrary(lib)">
                                         <div class="media-library-info">
                                             <div class="media-library-name">{{ lib.name }}</div>
                                             <div class="media-library-type">{{ lib.type || 'unknown' }}</div>
@@ -1002,6 +1002,7 @@
                                         <input type="text" v-model="webhookUrl" readonly class="input-readonly-soft form-row-grow">
                                         <button class="btn btn-green" @click="copyWebhookUrl">复制</button>
                                     </div>
+                                    <div class="input-tip">这里显示的是当前浏览器访问地址；Emby 必须能从它所在的机器或容器访问这个 URL。内网 IP 测试不通时，请检查 5256 端口映射、防火墙，或直接使用可访问的反代域名。</div>
                                 </div>
 
                                 <div class="form-grid-2">
@@ -1038,7 +1039,7 @@
                                 <i class="fa-solid fa-circle-question"></i>
                                 <div class="info-content">
                                     <div class="info-alert-box-title">工作原理</div>
-                                    <br>1. 在 emby 的 webhook 中，填入上方的接收地址。
+                                    <br>1. 在 Emby 的 Webhooks 插件中，填入 Emby 所在环境可访问的接收地址；测试只验证网络可达，不受本页启用开关影响。
                                     <br>2. 请求内容类型选择application/json。
                                     <br>3. 勾选 <span class="highlight">LibraryNew</span> (媒体库新增) 和 <span class="highlight">LibraryScanComplete</span> (扫描完成) 等事件。
                                     <br>4. 当 Emby 触发回调时，系统会自动解析其中的 <b>库名称 (Library Name)</b>。
@@ -1502,10 +1503,16 @@
                                     <span>媒体整理</span>
                                 </div>
                                 <div class="server-toolbar-actions">
-                                    <button class="btn btn-green btn-sm" @click="saveMediaOrganizeConfig"><i class="fa-solid fa-save"></i> 保存配置</button>
+                                    <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
+                                    <button class="btn btn-green btn-sm" @click="saveMediaOrganizeConfig" :disabled="needs115Setup"><i class="fa-solid fa-save"></i> 保存配置</button>
                                 </div>
                             </div>
 
+                            <div v-if="needs115Setup" class="empty-state-card mb-20">
+                                请先完成 115 配置，再设置媒体整理目录。
+                            </div>
+
+                            <template v-else>
                             <div class="module-card mb-20">
                                 <div class="mc-header">
                                     <div class="mc-title"><i class="fa-solid fa-cog"></i> 基础配置</div>
@@ -1688,6 +1695,7 @@
                                     </div>
                                 </div>
                             </div>
+                            </template>
 
                         </div>
                     </div>
@@ -2023,11 +2031,17 @@
                                     <span>STRM同步</span>
                                 </div>
                                 <div class="server-toolbar-actions">
-                                    <button class="btn btn-primary btn-sm" @click="addStrmTask"><i class="fa-solid fa-plus"></i> 添加任务</button>
-                                    <button class="btn btn-green btn-sm" @click="saveStrmConfig"><i class="fa-solid fa-save"></i> 保存配置</button>
+                                    <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
+                                    <button class="btn btn-primary btn-sm" @click="addStrmTask" :disabled="needs115Setup"><i class="fa-solid fa-plus"></i> 添加任务</button>
+                                    <button class="btn btn-green btn-sm" @click="saveStrmConfig" :disabled="needs115Setup"><i class="fa-solid fa-save"></i> 保存配置</button>
                                 </div>
                             </div>
 
+                            <div v-if="needs115Setup" class="empty-state-card mb-20">
+                                请先完成 115 配置，再创建 STRM 同步任务。
+                            </div>
+
+                            <template v-else>
                             <div class="server-grid-layout server-grid-layout-wide mb-30">
                                 <div v-for="(task, idx) in strmConfig.sync_tasks" :key="idx" class="module-card">
                                     <div class="mc-header">
@@ -2148,6 +2162,7 @@
                                     </div>
                                 </div>
                             </div>
+                            </template>
 
                         </div>
                     </div>
@@ -2373,7 +2388,7 @@
                                         <input type="text" v-model="config302.embys[0].url">
 
                                         <label>外网地址 (用于图片展示 / Emby 跳转)</label>
-                                        <input type="text" v-model="config302.embys[0].public_host" placeholder="例如: https://emby.chillflix.cn:999">
+                                        <input type="text" v-model="config302.embys[0].public_host" placeholder="例如: https://emby.example.com:999">
 
                                         <label>Emby 密钥 (API Key)</label>
                                         <input type="text" v-model="config302.embys[0].key">
@@ -2407,8 +2422,9 @@
                                     <i class="fa-solid fa-bell"></i>
                                     <div class="info-content">
                                         <div class="info-alert-box-title">Emby 媒体库同步 Webhook</div>
-                                        复制下方地址到 Emby 后台的 Webhooks 插件中（勾选 "等待任务完成" 和 "库扫描完成" 事件）。
-                                        <br>URL: <span class="highlight">http://YOUR_NAS_IP:5256/api/webhook</span>
+                                        复制 Emby 所在环境可访问的地址到 Emby 后台的 Webhooks 插件中（勾选 "等待任务完成" 和 "库扫描完成" 事件）。
+                                        <br>URL: <span class="highlight">http://&lt;ChillPoster内网IP&gt;:5256/api/webhook</span>
+                                        <br><span class="server-id-text">如果内网 IP 测试不通，请检查 Docker 端口映射、防火墙或容器网络；也可以直接填写可访问的反代域名。</span>
                                         <br><span class="server-id-text">(支持自动触发名为 "库名" 的自动任务)</span>
                                     </div>
                                 </div>
@@ -4263,6 +4279,6 @@
 
         <!-- 移动端抽屉菜单 (已替换为主入口 + 更多菜单) -->
 
-    </div> <script src="/static/app.js?v=20260518missing-global-search"></script>
+    </div> <script src="/static/app.js?v=20260518ui-stability-scroll-fix"></script>
 </body>
 </html>

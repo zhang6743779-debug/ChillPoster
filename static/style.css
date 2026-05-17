@@ -1,4 +1,8 @@
 /* === 全局基础样式 === */
+[v-cloak] {
+    display: none !important;
+}
+
 :root {
     --sidebar-w: 240px;
     --header-h: 60px;
@@ -10658,6 +10662,20 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     }
 }
 
+@media (max-width: 768px) {
+    .device-performance-grid,
+    .stat-cards,
+    .recent-media-row,
+    .mp-top-source-tabs,
+    .mp-filter-options,
+    .mp-filter-options-wrap {
+        overscroll-behavior-x: contain;
+        contain: layout paint;
+        -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+        mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 28px), transparent 100%);
+    }
+}
+
 /* Universal mobile page polish */
 @media (max-width: 768px) {
     .scroll-view {
@@ -11338,15 +11356,24 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     }
 
     .device-performance-grid {
+        display: grid !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+        grid-template-rows: repeat(2, minmax(0, 1fr)) !important;
         gap: 8px !important;
-        padding-bottom: 2px !important;
+        overflow: visible !important;
+        scroll-snap-type: none !important;
+        padding: 0 !important;
+        -webkit-mask-image: none !important;
+        mask-image: none !important;
     }
 
     .metric-sub-card {
-        flex-basis: 112px !important;
+        flex: initial !important;
+        min-width: 0 !important;
         min-height: 82px !important;
         padding: 10px !important;
         border-radius: 18px !important;
+        scroll-snap-align: none !important;
     }
 
     .metric-sub-card-content {

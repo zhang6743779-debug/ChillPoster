@@ -608,7 +608,7 @@ class UniversalImporter:
         """RSS 解析 (保持原有健壮性逻辑)"""
         items = []
         
-        # [新增 1] 预判是否为豆瓣源 (包含你的 rss.chillflix.cn/douban/)
+        # 预判是否为豆瓣源
         is_douban_source = '/douban/' in url
 
         try:

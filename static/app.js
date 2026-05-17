@@ -667,9 +667,23 @@ createApp({
         const dashboardRecentItems = ref([]);
         const dashboardRecentPlaybacks = ref([]);
         const dashboardMediaStats = reactive({ total: 0, movie_count: 0, series_count: 0, episode_count: 0, user_count: 0, movie_libraries: 0, series_libraries: 0, other_libraries: 0, libraries: [] });
-        const DASHBOARD_DEVICE_POLL_INTERVAL = 1000;
+        const DASHBOARD_RECENT_RENDER_LIMIT_DESKTOP = 24;
+        const DASHBOARD_RECENT_RENDER_LIMIT_MOBILE = 12;
+        const DASHBOARD_RECENT_RENDER_STEP_DESKTOP = 12;
+        const DASHBOARD_RECENT_RENDER_STEP_MOBILE = 8;
+        const DASHBOARD_PLAYBACK_RENDER_LIMIT_DESKTOP = 6;
+        const DASHBOARD_PLAYBACK_RENDER_LIMIT_MOBILE = 4;
+        const DASHBOARD_PLAYBACK_RENDER_STEP_DESKTOP = 4;
+        const DASHBOARD_PLAYBACK_RENDER_STEP_MOBILE = 2;
+        const DASHBOARD_LIBRARY_RENDER_LIMIT_DESKTOP = 12;
+        const DASHBOARD_LIBRARY_RENDER_LIMIT_MOBILE = 8;
+        const DASHBOARD_LIBRARY_RENDER_STEP_DESKTOP = 8;
+        const DASHBOARD_LIBRARY_RENDER_STEP_MOBILE = 4;
+        const DASHBOARD_WALL_RENDER_LIMIT = 32;
+        const DASHBOARD_DEVICE_POLL_INTERVAL = 2500;
         const DASHBOARD_DEVICE_HISTORY_LIMIT = 72;
         const DASHBOARD_DEVICE_HISTORY_WINDOW_MS = 28000;
+        const DASHBOARD_DEVICE_POLL_GRACE_MS = 8000;
         const dashboardDeviceMetrics = reactive({
             cpu: { percent: 0 },
             memory: { percent: 0, used_gb: 0, total_gb: 0 },
@@ -708,6 +722,9 @@ createApp({
         const dashboard115ClickTimestamps = ref([]);
         const dashboardDeviceMetricsPulse = ref(false);
         const dashboardCovers = ref([]);
+        const dashboardRecentRenderPage = ref(0);
+        const dashboardPlaybackRenderPage = ref(0);
+        const dashboardLibraryRenderPage = ref(0);
         const wallRows = reactive([[], [], [], []]);
         const wallReady = ref(false);
         const dashboardOverviewLoading = ref(false);
@@ -759,6 +776,7 @@ createApp({
         let dashboardDeviceMetricsPolling = null;
         let dashboardDeviceMetricsAnimationFrame = null;
         let dashboard115Polling = null;
+        let dashboardDeviceMetricsRequestInFlight = false;
 
         const persistTaskLogs = () => {
             try {
@@ -901,7 +919,7 @@ createApp({
                 t: sampledAt,
                 value: Number.isFinite(nextValue) ? nextValue : 0,
             });
-            const cutoff = sampledAt - DASHBOARD_DEVICE_HISTORY_WINDOW_MS - DASHBOARD_DEVICE_POLL_INTERVAL * 2;
+            const cutoff = sampledAt - DASHBOARD_DEVICE_HISTORY_WINDOW_MS - DASHBOARD_DEVICE_POLL_GRACE_MS;
             while (queue.length > 0 && Number(queue[0]?.t || 0) < cutoff) {
                 queue.shift();
             }
@@ -937,6 +955,8 @@ createApp({
         };
 
         const fetchDashboardDeviceMetrics = async () => {
+            if (dashboardDeviceMetricsRequestInFlight || tab.value !== 'dashboard' || document.hidden) return;
+            dashboardDeviceMetricsRequestInFlight = true;
             try {
                 const res = await axios.get('/api/dashboard_device_metrics');
                 Object.assign(dashboardDeviceMetrics, {
@@ -947,6 +967,7 @@ createApp({
                     timestamp: null,
                 }, res.data || {});
                 recordDashboardDeviceMetricHistory();
+                startDashboardDeviceMetricsAnimation();
                 dashboardDeviceMetricsLoaded.value = true;
                 dashboardDeviceMetricsPulse.value = false;
                 requestAnimationFrame(() => {
@@ -958,6 +979,8 @@ createApp({
             } catch (e) {
                 console.log('Dashboard device metrics failed', e);
                 dashboardDeviceMetricsLoaded.value = false;
+            } finally {
+                dashboardDeviceMetricsRequestInFlight = false;
             }
         };
 
@@ -1238,7 +1261,7 @@ createApp({
         };
 
         const drawDashboardDeviceMetricCanvases = () => {
-            if (tab.value !== 'dashboard') return;
+            if (tab.value !== 'dashboard' || document.hidden) return;
             const canvases = document.querySelectorAll('.metric-sub-card-sparkline-canvas');
             if (!canvases.length) return;
             const now = Date.now();
@@ -1260,24 +1283,19 @@ createApp({
 
         const startDashboardDeviceMetricsAnimation = () => {
             if (dashboardDeviceMetricsAnimationFrame) return;
-            const tick = () => {
-                if (tab.value !== 'dashboard') {
-                    dashboardDeviceMetricsAnimationFrame = null;
-                    return;
-                }
+            dashboardDeviceMetricsAnimationFrame = requestAnimationFrame(() => {
+                dashboardDeviceMetricsAnimationFrame = null;
                 drawDashboardDeviceMetricCanvases();
-                dashboardDeviceMetricsAnimationFrame = requestAnimationFrame(tick);
-            };
-            dashboardDeviceMetricsAnimationFrame = requestAnimationFrame(tick);
+            });
         };
 
         const startDashboardDeviceMetricsPolling = () => {
             stopDashboardDeviceMetricsPolling();
-            if (tab.value !== 'dashboard') return;
+            if (tab.value !== 'dashboard' || document.hidden) return;
             startDashboardDeviceMetricsAnimation();
             fetchDashboardDeviceMetrics();
             dashboardDeviceMetricsPolling = setInterval(() => {
-                if (tab.value !== 'dashboard') return;
+                if (tab.value !== 'dashboard' || document.hidden) return;
                 fetchDashboardDeviceMetrics();
             }, DASHBOARD_DEVICE_POLL_INTERVAL);
         };
@@ -1297,6 +1315,18 @@ createApp({
                 if (tab.value !== 'dashboard') return;
                 fetchDashboard115Account();
             }, 300000);
+        };
+
+        const handleDashboardVisibilityChange = () => {
+            if (document.hidden) {
+                stopDashboardDeviceMetricsPolling();
+                stopDashboard115Polling();
+                return;
+            }
+            if (tab.value === 'dashboard') {
+                startDashboardDeviceMetricsPolling();
+                startDashboard115Polling();
+            }
         };
 
         const normalizeLogLevel = (level) => {
@@ -1738,6 +1768,26 @@ createApp({
             standard_topology: null
         });
 
+        const hasPrimary115Cookie = computed(() => {
+            const drive = Array.isArray(config302.drives) ? config302.drives[0] : null;
+            return !!String(drive?.cookie || '').trim();
+        });
+
+        const needs115Setup = computed(() => !hasPrimary115Cookie.value);
+
+        const open115ConfigPanel = () => {
+            if (isMobile.value) {
+                tab.value = 'config_115';
+                if (typeof mobileMenuVisible !== 'undefined') mobileMenuVisible.value = false;
+                return;
+            }
+            jumpToItem('config_115');
+        };
+
+        const notify115SetupRequired = () => {
+            showToast('请先完成 115 配置', 'info');
+        };
+
         // 定义默认模板
         const defaultDrive115 = {
             name: '',
@@ -2169,6 +2219,8 @@ createApp({
                 const saveRes = await axios.post('/api/config_302/save', payload);
                 if (saveRes.data?.standard_topology) {
                     config302.standard_topology = saveRes.data.standard_topology;
+                    fetchMediaOrganizeConfig();
+                    fetchStrmConfig();
                 }
                 showToast(saveRes.data?.message || '302 配置已保存', 'success');
             } catch (e) {
@@ -2295,14 +2347,18 @@ createApp({
                             overwrite: task?.overwrite === 'overwrite' ? 'overwrite' : 'skip'
                         }))
                         : [];
-                    if (strmConfig.sync_tasks.length === 0) addStrmTask();
+                    if (strmConfig.sync_tasks.length === 0 && !needs115Setup.value) addStrmTask();
                 }
             } catch (e) {
-                addStrmTask();
+                if (!needs115Setup.value) addStrmTask();
             }
         };
 
         const saveStrmConfig = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return false;
+            }
             try {
                 const syncTasks = strmConfig.sync_tasks.map(task => ({
                     ...task,
@@ -2312,12 +2368,18 @@ createApp({
                     sync_tasks: syncTasks
                 });
                 showToast('STRM 配置已保存', 'success');
+                return true;
             } catch (e) {
                 showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
             }
         };
 
         const addStrmTask = () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             strmConfig.sync_tasks.push(JSON.parse(JSON.stringify(defaultStrmTask)));
         };
 
@@ -2974,13 +3036,19 @@ createApp({
         };
 
         const saveMediaOrganizeConfig = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return false;
+            }
             try {
                 normalizeOrganizeParseMode();
                 applyDefaultScrapeSettings();
                 await axios.post('/api/media_organize/save', { ...mediaOrganizeConfig, drive_index: 0 });
                 showToast('媒体整理配置已保存', 'success');
+                return true;
             } catch (e) {
                 showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
             }
         };
 
@@ -3100,6 +3168,10 @@ createApp({
 
         // --- 源目录 115 浏览 ---
         const browseOrganizeSource = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             orgSourceBrowser.history = [];
             orgSourceBrowser.path = '';
             orgSourceBrowser.opened = true;
@@ -3150,6 +3222,10 @@ createApp({
 
         // --- 目标目录 115 浏览 ---
         const browseOrganizeTarget = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             orgTargetBrowser.history = [];
             orgTargetBrowser.path = '';
             orgTargetBrowser.opened = true;
@@ -3200,6 +3276,10 @@ createApp({
 
         // --- 失败目录 115 浏览 ---
         const browseOrganizeFailed = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             orgFailedBrowser.history = [];
             orgFailedBrowser.path = '';
             orgFailedBrowser.opened = true;
@@ -3250,6 +3330,10 @@ createApp({
 
         // 执行整理
         const runOrganize = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             if (!mediaOrganizeConfig.source_cid || mediaOrganizeConfig.source_cid === '0') { showToast('请先配置源目录', 'error'); return; }
             if (!mediaOrganizeConfig.target_cid || mediaOrganizeConfig.target_cid === '0') { showToast('请先配置目标目录', 'error'); return; }
 
@@ -3259,7 +3343,11 @@ createApp({
             organizeProgress.status_text = '启动中...';
             organizeProgress.detail = null;
             try {
-                await saveMediaOrganizeConfig();
+                const saved = await saveMediaOrganizeConfig();
+                if (!saved) {
+                    organizeLoading.value = false;
+                    return;
+                }
                 const res = await axios.post('/api/media_organize/organize', {
                     media_type: organizeForm.media_type,
                     is_bluray: organizeForm.is_bluray,
@@ -3342,9 +3430,14 @@ createApp({
         });
 
         const startStrmSync = async (taskIndex, mode) => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             try {
                 // 先保存配置
-                await saveStrmConfig();
+                const saved = await saveStrmConfig();
+                if (!saved) return;
 
                 const res = await axios.post('/api/strm/start', {
                     task_index: taskIndex,
@@ -3445,6 +3538,10 @@ createApp({
 
         // 115 目录浏览
         const browseStrmDir = async (taskIdx) => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
             strmBrowser.taskIdx = taskIdx;
             strmBrowser.history = [];
             await loadBrowseDir('0');
@@ -4400,6 +4497,7 @@ createApp({
 
             hydrateTaskLogs();
             webhookUrl.value = window.location.origin + '/api/webhook';
+            document.addEventListener('visibilitychange', handleDashboardVisibilityChange);
 
             startPolling();
             startDashboardDeviceMetricsPolling();
@@ -4457,10 +4555,13 @@ createApp({
             document.removeEventListener('keydown', handleKeydown);
             window.removeEventListener('resize', handleResize);
             window.removeEventListener('popstate', handleDetailPopstate);
+            document.removeEventListener('visibilitychange', handleDashboardVisibilityChange);
         });
 
         const splitIntoRows = () => {
-            const covers = dashboardCovers.value || [];
+            const covers = (dashboardCovers.value || [])
+                .filter(item => item?.cover_url)
+                .slice(0, DASHBOARD_WALL_RENDER_LIMIT);
             const rowCount = wallRows.length;
             for (let i = 0; i < rowCount; i++) {
                 wallRows[i] = [];
@@ -4600,6 +4701,7 @@ createApp({
                 startDashboard115Polling();
                 if (dashboardCovers.value.length === 0) initDashboard();
                 fetchDashboardOverview({ allowStale: true });
+                ensureDashboardLazyScrollableSections();
             } else {
                 stopDashboardDeviceMetricsPolling();
                 stopDashboard115Polling();
@@ -4710,9 +4812,153 @@ createApp({
             return { main: raw, unit: '', split: false };
         };
 
+        const getDashboardRenderLimit = (baseDesktop, baseMobile, stepDesktop, stepMobile, pageRef) => {
+            const base = isMobile.value ? baseMobile : baseDesktop;
+            const step = isMobile.value ? stepMobile : stepDesktop;
+            return base + Math.max(0, pageRef.value) * step;
+        };
+
+        const dashboardRecentVisibleLimit = computed(() => getDashboardRenderLimit(
+            DASHBOARD_RECENT_RENDER_LIMIT_DESKTOP,
+            DASHBOARD_RECENT_RENDER_LIMIT_MOBILE,
+            DASHBOARD_RECENT_RENDER_STEP_DESKTOP,
+            DASHBOARD_RECENT_RENDER_STEP_MOBILE,
+            dashboardRecentRenderPage
+        ));
+
+        const dashboardPlaybackVisibleLimit = computed(() => getDashboardRenderLimit(
+            DASHBOARD_PLAYBACK_RENDER_LIMIT_DESKTOP,
+            DASHBOARD_PLAYBACK_RENDER_LIMIT_MOBILE,
+            DASHBOARD_PLAYBACK_RENDER_STEP_DESKTOP,
+            DASHBOARD_PLAYBACK_RENDER_STEP_MOBILE,
+            dashboardPlaybackRenderPage
+        ));
+
+        const dashboardLibraryVisibleLimit = computed(() => getDashboardRenderLimit(
+            DASHBOARD_LIBRARY_RENDER_LIMIT_DESKTOP,
+            DASHBOARD_LIBRARY_RENDER_LIMIT_MOBILE,
+            DASHBOARD_LIBRARY_RENDER_STEP_DESKTOP,
+            DASHBOARD_LIBRARY_RENDER_STEP_MOBILE,
+            dashboardLibraryRenderPage
+        ));
+
         const dashboardVisibleRecentItems = computed(() => {
-            if (!isMobile.value) return dashboardRecentItems.value;
-            return dashboardRecentItems.value.slice(0, 100);
+            return dashboardRecentItems.value.slice(0, dashboardRecentVisibleLimit.value);
+        });
+
+        const dashboardVisibleRecentPlaybacks = computed(() => {
+            return dashboardRecentPlaybacks.value.slice(0, dashboardPlaybackVisibleLimit.value);
+        });
+
+        const dashboardVisibleMediaLibraries = computed(() => {
+            const libraries = Array.isArray(dashboardMediaStats.libraries) ? dashboardMediaStats.libraries : [];
+            return libraries.slice(0, dashboardLibraryVisibleLimit.value);
+        });
+
+        const dashboardLazyLoadLastAt = { recent: 0, playback: 0, libraries: 0 };
+        const dashboardLazyEnsurePending = { recent: false, playback: false, libraries: false };
+        const dashboardLazySelectorMap = {
+            recent: '.recent-media-row',
+            playback: '.playback-hero-list',
+            libraries: '.media-library-list',
+        };
+
+        const getDashboardLazyLoadState = (section) => {
+            if (section === 'recent') {
+                return {
+                    total: dashboardRecentItems.value.length,
+                    visible: dashboardVisibleRecentItems.value.length,
+                    page: dashboardRecentRenderPage,
+                };
+            }
+            if (section === 'playback') {
+                return {
+                    total: dashboardRecentPlaybacks.value.length,
+                    visible: dashboardVisibleRecentPlaybacks.value.length,
+                    page: dashboardPlaybackRenderPage,
+                };
+            }
+            const libraries = Array.isArray(dashboardMediaStats.libraries) ? dashboardMediaStats.libraries : [];
+            return {
+                total: libraries.length,
+                visible: dashboardVisibleMediaLibraries.value.length,
+                page: dashboardLibraryRenderPage,
+            };
+        };
+
+        const loadMoreDashboardSection = (section) => {
+            const state = getDashboardLazyLoadState(section);
+            if (state.visible >= state.total) return;
+            state.page.value += 1;
+            ensureDashboardLazyScrollable(section);
+        };
+
+        const ensureDashboardLazyScrollable = (section) => {
+            if (dashboardLazyEnsurePending[section]) return;
+            dashboardLazyEnsurePending[section] = true;
+            nextTick(() => {
+                requestAnimationFrame(() => {
+                    dashboardLazyEnsurePending[section] = false;
+                    if (tab.value !== 'dashboard') return;
+
+                    const selector = dashboardLazySelectorMap[section];
+                    const el = selector ? document.querySelector(selector) : null;
+                    if (!el) return;
+
+                    const state = getDashboardLazyLoadState(section);
+                    if (state.visible >= state.total) return;
+
+                    const hasHorizontalScroll = el.scrollWidth > el.clientWidth + 4;
+                    const hasVerticalScroll = el.scrollHeight > el.clientHeight + 4;
+                    if (!hasHorizontalScroll && !hasVerticalScroll) {
+                        loadMoreDashboardSection(section);
+                    }
+                });
+            });
+        };
+
+        const ensureDashboardLazyScrollableSections = () => {
+            ensureDashboardLazyScrollable('recent');
+            ensureDashboardLazyScrollable('playback');
+            ensureDashboardLazyScrollable('libraries');
+        };
+
+        const onDashboardLazyScroll = (section, event) => {
+            const el = event?.currentTarget;
+            if (!el) return;
+
+            const remainingX = el.scrollWidth - el.clientWidth - el.scrollLeft;
+            const remainingY = el.scrollHeight - el.clientHeight - el.scrollTop;
+            const nearHorizontalEnd = el.scrollWidth > el.clientWidth + 4 && remainingX < 96;
+            const nearVerticalEnd = el.scrollHeight > el.clientHeight + 4 && remainingY < 96;
+            if (!nearHorizontalEnd && !nearVerticalEnd) return;
+
+            const now = Date.now();
+            if (now - (dashboardLazyLoadLastAt[section] || 0) < 180) return;
+            dashboardLazyLoadLastAt[section] = now;
+            loadMoreDashboardSection(section);
+        };
+
+        watch(dashboardRecentItems, () => {
+            dashboardRecentRenderPage.value = 0;
+            ensureDashboardLazyScrollable('recent');
+        });
+
+        watch(dashboardRecentPlaybacks, () => {
+            dashboardPlaybackRenderPage.value = 0;
+            ensureDashboardLazyScrollable('playback');
+        });
+
+        watch(() => dashboardMediaStats.libraries, () => {
+            dashboardLibraryRenderPage.value = 0;
+            ensureDashboardLazyScrollable('libraries');
+        });
+
+        watch(isMobile, () => {
+            dashboardRecentRenderPage.value = 0;
+            dashboardPlaybackRenderPage.value = 0;
+            dashboardLibraryRenderPage.value = 0;
+            ensureDashboardLazyScrollableSections();
         });
 
         const dashboardDeviceMetricCards = computed(() => {
@@ -7557,7 +7803,8 @@ createApp({
             currentSchema, accountForm, updateAccount, updatingAccount,
             transServerIdx, loadTransFromLib, editingTaskId, editTask, cancelEdit, runSavedTask,
             tasksState, toggleTaskLog, accordions, toggleAccordion, showCreateTask, clearLogs,
-            dashboardStats, dashboardRecentItems, dashboardVisibleRecentItems, dashboardRecentPlaybacks, dashboardMediaStats,
+            dashboardStats, dashboardRecentItems, dashboardVisibleRecentItems, dashboardRecentPlaybacks, dashboardVisibleRecentPlaybacks, dashboardVisibleMediaLibraries, dashboardMediaStats,
+            onDashboardLazyScroll,
             dashboardDeviceMetrics, dashboardDeviceMetricsLoaded, dashboardDeviceMetricsPulse, dashboardDeviceMetricCards,
             dashboard115Account, dashboard115Loaded, handleDashboard115CardClick,
             dashboardCovers, wallRows, wallReady, dashboardOverviewLoading, initDashboard, fetchDashboardOverview, formatDashboardPlayedAt, getDeviceMetricState, formatDevicePercent, formatDeviceMemory, openDashboardLibrary, openDashboardItem, ensureDashboardServerId,
@@ -7597,6 +7844,7 @@ createApp({
             add302Emby, remove302Emby,
             test115Cookie, manualCleanup115,
             qrcode115State, open115QrLogin, close115QrLogin, create115QrCode,
+            hasPrimary115Cookie, needs115Setup, open115ConfigPanel,
 
             // [修复] 全局变量及方法
             globalConfig, saveGlobalSettings, toggleDebugMode,
