@@ -1455,7 +1455,7 @@ async def _run_organize_async(run_id: str, req):
                 return tmdb_cache[cache_key]
 
         async def _identify_group(key, group):
-            notify_started_at = _time.time()
+            tmdb_identify_started_at = _time.time()
             try:
                 _, search_result = await _search_group(key, group)
                 search_cache[key] = search_result
@@ -1491,7 +1491,7 @@ async def _run_organize_async(run_id: str, req):
                 "search_result": search_result,
                 "tmdb_data": tmdb_data,
                 "error_message": error_message,
-                "notify_started_at": notify_started_at,
+                "tmdb_elapsed_seconds": max(0.0, _time.time() - tmdb_identify_started_at),
             }
 
         logger.debug("[MediaOrganize] 阶段1/4: 加载源目录快照并前置SHA1排重")
@@ -1514,10 +1514,9 @@ async def _run_organize_async(run_id: str, req):
             identified_tmdb_data = identified.get("tmdb_data")
             identified_error_message = str(identified.get("error_message", "") or "")
             try:
-                notify_started_at = float(identified.get("notify_started_at") or _time.time())
+                tmdb_elapsed_seconds = max(0.0, float(identified.get("tmdb_elapsed_seconds") or 0.0))
             except (TypeError, ValueError):
-                notify_started_at = _time.time()
-            common_notify_elapsed_seconds = max(0.0, _time.time() - notify_started_at)
+                tmdb_elapsed_seconds = 0.0
             search_cache[key] = identified_search_result
             group_failed = []
             tv_root_scraped = set()
@@ -1604,7 +1603,6 @@ async def _run_organize_async(run_id: str, req):
                 file_item = vf
 
                 try:
-                    item_notify_started_at = _time.time()
                     search_result = identified_search_result
 
                     if not search_result:
@@ -1922,10 +1920,11 @@ async def _run_organize_async(run_id: str, req):
                         )
 
                     if media_type == 'movie':
+                        notify_elapsed_started_at = _time.time()
                         result = await loop.run_in_executor(None, lambda _c=client, _fi=file_item, _fn=file_name, _e=ext, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _ow=req.overwrite, _cp=category_path or "", _tb=target_base, _sp=subtitles_by_parent, _ltk=library_task_key: _organize_movie(
                             _c, _fi, _fn, _e, _td, _v, _tc, _cd, _ow, category_path=_cp, target_path_base=_tb, subtitles_by_parent=_sp, main_loop=_state._main_event_loop, library_task_key=_ltk
                         ))
-                        notify_elapsed_seconds = common_notify_elapsed_seconds + max(0.0, _time.time() - item_notify_started_at)
+                        notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
                         results.append({"file": file_name, "status": result["status"], "message": result.get("message", "")})
                         if result["status"] == "success":
                             success_count += 1
@@ -1938,6 +1937,7 @@ async def _run_organize_async(run_id: str, req):
                                 success_count=1,
                                 total_size=vf.get("size", 0),
                                 elapsed_seconds=notify_elapsed_seconds,
+                                tmdb_elapsed_seconds=tmdb_elapsed_seconds,
                             ))
                             _finalize_organize_result(
                                 result=result,
@@ -1990,7 +1990,6 @@ async def _run_organize_async(run_id: str, req):
                                 "batch_context": batch_context,
                                 "items": [],
                                 "item_index": {},
-                                "prepare_elapsed": 0.0,
                             }
                             if scrape_tv_root:
                                 tv_root_scraped.add(tv_root_key)
@@ -2034,17 +2033,11 @@ async def _run_organize_async(run_id: str, req):
                             incoming_size_gb = float((vf or {}).get("size", 0) or 0) / (1024 ** 3)
                             existing_size_gb = float(((existing_plan.get("vf") or {}).get("size", 0) or 0)) / (1024 ** 3)
                             if keep_incoming:
-                                batch_entry = pending_tv_batches[batch_key]
-                                batch_entry["items"] = [
-                                    item for item in batch_entry["items"]
+                                pending_tv_batches[batch_key]["items"] = [
+                                    item for item in pending_tv_batches[batch_key]["items"]
                                     if item is not existing_plan
                                 ]
-                                batch_entry["item_index"].pop((season_num, episode_num), None)
-                                batch_entry["prepare_elapsed"] = max(
-                                    0.0,
-                                    float(batch_entry.get("prepare_elapsed") or 0.0)
-                                    - float(existing_plan.get("_notify_prepare_elapsed") or 0.0),
-                                )
+                                pending_tv_batches[batch_key]["item_index"].pop((season_num, episode_num), None)
                                 logger.info(
                                     "[Wash] 同批次重复剧集命中，保留新文件: %s -> %s | S%02dE%02d | reason=%s | new_size=%.2fGB | old_size=%.2fGB",
                                     file_name,
@@ -2096,12 +2089,8 @@ async def _run_organize_async(run_id: str, req):
                                     )
                                 continue
 
-                        batch_entry = pending_tv_batches[batch_key]
-                        plan_prepare_elapsed = max(0.0, _time.time() - item_notify_started_at)
-                        plan["_notify_prepare_elapsed"] = plan_prepare_elapsed
-                        batch_entry["items"].append(plan)
-                        batch_entry["item_index"][(season_num, episode_num)] = plan
-                        batch_entry["prepare_elapsed"] = float(batch_entry.get("prepare_elapsed") or 0.0) + plan_prepare_elapsed
+                        pending_tv_batches[batch_key]["items"].append(plan)
+                        pending_tv_batches[batch_key]["item_index"][(season_num, episode_num)] = plan
                 except Exception as e:
                     logger.error(f"[MediaOrganize] 整理文件失败 {file_name}: {e}", exc_info=True)
                     results.append({"file": file_name, "status": "error", "message": str(e)})
@@ -2122,17 +2111,12 @@ async def _run_organize_async(run_id: str, req):
 
             for batch_key, batch_entry in pending_tv_batches.items():
                 plan_items = batch_entry.get("items", [])
-                batch_execute_started_at = _time.time()
+                notify_elapsed_started_at = _time.time()
                 batch_results = await loop.run_in_executor(
                     None,
                     lambda _c=client, _items=plan_items, _sp=subtitles_by_parent: _execute_tv_batch_plan(_c, _items, subtitles_by_parent=_sp, main_loop=_state._main_event_loop),
                 )
-                batch_execute_elapsed = max(0.0, _time.time() - batch_execute_started_at)
-                notify_elapsed_seconds = (
-                    common_notify_elapsed_seconds
-                    + float(batch_entry.get("prepare_elapsed") or 0.0)
-                    + batch_execute_elapsed
-                )
+                notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
                 batch_success = 0
                 batch_size = 0
                 batch_episodes = []
@@ -2196,6 +2180,7 @@ async def _run_organize_async(run_id: str, req):
                         success_count=batch_success,
                         total_size=batch_size,
                         elapsed_seconds=notify_elapsed_seconds,
+                        tmdb_elapsed_seconds=tmdb_elapsed_seconds,
                     ))
 
             logger.debug(
@@ -2772,7 +2757,7 @@ def _format_episode_range(values: list[int]) -> str:
 
 def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_type: str, tmdb_id: str,
                                   episodes: list[tuple], success_count: int, total_size: int,
-                                  elapsed_seconds: float) -> dict:
+                                  elapsed_seconds: float, tmdb_elapsed_seconds: float | None = None) -> dict:
     source = tmdb_data.get("series_details") if "series_details" in tmdb_data else tmdb_data
     title = source.get("name" if media_type == "tv" else "title", "")
     season_episode = ""
@@ -2823,6 +2808,7 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         "episode_ranges": episode_ranges,
         "file_size": file_size,
         "release_group": variables.get("release_group", ""),
+        "tmdb_elapsed": f"{tmdb_elapsed_seconds:.1f}秒" if tmdb_elapsed_seconds is not None else "",
         "elapsed": f"{elapsed_seconds:.1f}秒",
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "original_name": source.get("original_name" if media_type == "tv" else "original_title", ""),
