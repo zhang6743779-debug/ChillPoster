@@ -1125,13 +1125,27 @@ async def _run_source_poll_loop():
                     signature = _source_scan_signature(snapshot)
                     entry_count = int(snapshot.get("entry_count", 0) or 0)
                     source_tree_entries = list(snapshot.get("tree_entries", []) or [])
+                    remaining_video_count = sum(
+                        1
+                        for entry in _iter_115_media_entries_from_tree(source_tree_entries)
+                        if entry.get("kind") == "video"
+                    )
                     logger.debug(
-                        f"[115Life] 源目录复查: 整理完成后检查 | 会话={session_key} | 剩余条目={entry_count} | 签名={signature[:8]}"
+                        f"[115Life] 源目录复查: 整理完成后检查 | 会话={session_key} | "
+                        f"剩余条目={entry_count} | 剩余视频={remaining_video_count} | 签名={signature[:8]}"
                     )
                     if entry_count <= 0:
                         with _source_poll_lock:
                             _state._source_poll_sessions.pop(session_key, None)
                         logger.debug(f"[115Life] 源目录已清空，停止自动补跑 | 会话={session_key}")
+                        continue
+                    if remaining_video_count <= 0:
+                        with _source_poll_lock:
+                            _state._source_poll_sessions.pop(session_key, None)
+                        logger.info(
+                            f"[115Life] 源目录无可整理视频，停止自动补跑: "
+                            f"key={session_key} residual_entries={entry_count}"
+                        )
                         continue
                     if int(current.get("organize_runs", 0) or 0) >= int(current.get("max_runs", 20) or 20):
                         with _source_poll_lock:
@@ -1419,7 +1433,6 @@ async def _run_organize_async(run_id: str, req):
         # === Phase 2+3：SHA1 排重完成后按媒体分组整理 ===
         async def _organize_identified_group(key, group, identified: Optional[dict] = None):
             nonlocal success_count, strm_generated_count
-            group_started_at = _time.time()
             loop = asyncio.get_event_loop()
             identified = identified or {}
             identified_search_result = identified.get("search_result")
@@ -1828,9 +1841,11 @@ async def _run_organize_async(run_id: str, req):
                         )
 
                     if media_type == 'movie':
+                        notify_elapsed_started_at = _time.time()
                         result = await loop.run_in_executor(None, lambda _c=client, _fi=file_item, _fn=file_name, _e=ext, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _ow=req.overwrite, _cp=category_path or "", _tb=target_base, _sp=subtitles_by_parent, _ltk=library_task_key: _organize_movie(
                             _c, _fi, _fn, _e, _td, _v, _tc, _cd, _ow, category_path=_cp, target_path_base=_tb, subtitles_by_parent=_sp, main_loop=_state._main_event_loop, library_task_key=_ltk
                         ))
+                        notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
                         results.append({"file": file_name, "status": result["status"], "message": result.get("message", "")})
                         if result["status"] == "success":
                             success_count += 1
@@ -1842,7 +1857,7 @@ async def _run_organize_async(run_id: str, req):
                                 episodes=[(season_num, episode_num)],
                                 success_count=1,
                                 total_size=vf.get("size", 0),
-                                elapsed_seconds=_time.time() - group_started_at,
+                                elapsed_seconds=notify_elapsed_seconds,
                             ))
                             _finalize_organize_result(
                                 result=result,
@@ -2016,10 +2031,12 @@ async def _run_organize_async(run_id: str, req):
 
             for batch_key, batch_entry in pending_tv_batches.items():
                 plan_items = batch_entry.get("items", [])
+                notify_elapsed_started_at = _time.time()
                 batch_results = await loop.run_in_executor(
                     None,
                     lambda _c=client, _items=plan_items, _sp=subtitles_by_parent: _execute_tv_batch_plan(_c, _items, subtitles_by_parent=_sp, main_loop=_state._main_event_loop),
                 )
+                notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
                 batch_success = 0
                 batch_size = 0
                 batch_episodes = []
@@ -2082,7 +2099,7 @@ async def _run_organize_async(run_id: str, req):
                         episodes=batch_episodes,
                         success_count=batch_success,
                         total_size=batch_size,
-                        elapsed_seconds=_time.time() - group_started_at,
+                        elapsed_seconds=notify_elapsed_seconds,
                     ))
 
             logger.debug(

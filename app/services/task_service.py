@@ -40,7 +40,7 @@ from app.dependencies import (
 # ==========================================
 # 1. 任务执行逻辑 (封面生成)
 # ==========================================
-def _build_wechat_cover_preview(image_data: bytes, width: int = 900, height: int = 506) -> bytes:
+def _build_wechat_cover_preview(image_data: bytes, width: int = 900, height: int = 383) -> bytes:
     source = Image.open(BytesIO(image_data)).convert("RGB")
     bg = source.copy()
     bg_ratio = width / height
