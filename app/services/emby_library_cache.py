@@ -25,7 +25,7 @@ _server_idx = 0
 _level = "level1"
 
 # Emby 可用性索引：整部媒体、标题映射、剧集季/集状态
-DISCOVER_INDEX_VERSION = 2
+DISCOVER_INDEX_VERSION = 3
 DISCOVER_INDEX_TTL_SECONDS = 24 * 60 * 60
 DISCOVER_INDEX_MIN_REFRESH_INTERVAL = 5 * 60
 _discover_index: dict[str, str] = {}
@@ -981,7 +981,17 @@ def build_discover_index(server_idx: int = 0, reason: str = "manual", force: boo
         if not client:
             return
         libraries = _collect_server_libraries(client)
-        items = {}
+        all_items = client.get_all_library_items()
+        items = {
+            key: value
+            for key, value in (all_items or {}).items()
+            if isinstance(value, dict) and value.get("media_type") != "tv"
+        }
+        fallback_tv_items = {
+            key: value
+            for key, value in (all_items or {}).items()
+            if isinstance(value, dict) and value.get("media_type") == "tv"
+        }
         tv_library_count = 0
         for lib in libraries:
             lib_id = lib.get("id")
@@ -999,8 +1009,11 @@ def build_discover_index(server_idx: int = 0, reason: str = "manual", force: boo
             if library_items:
                 tv_library_count += 1
                 items.update(library_items)
-        if not items:
-            items = client.get_all_library_items()
+        if fallback_tv_items and not any(
+            isinstance(value, dict) and value.get("media_type") == "tv"
+            for value in items.values()
+        ):
+            items.update(fallback_tv_items)
         index: dict[str, str] = {}
         series_index: dict[str, dict[int, set[int]]] = {}
         discover_items: dict[str, dict] = {}

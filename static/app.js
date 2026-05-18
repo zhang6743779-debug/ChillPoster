@@ -680,6 +680,10 @@ createApp({
         const DASHBOARD_LIBRARY_RENDER_STEP_DESKTOP = 8;
         const DASHBOARD_LIBRARY_RENDER_STEP_MOBILE = 4;
         const DASHBOARD_WALL_RENDER_LIMIT = 32;
+        const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 80;
+        const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 24;
+        const MISSING_EPISODE_RENDER_STEP_DESKTOP = 40;
+        const MISSING_EPISODE_RENDER_STEP_MOBILE = 16;
         const DASHBOARD_DEVICE_POLL_INTERVAL = 2500;
         const DASHBOARD_DEVICE_HISTORY_LIMIT = 72;
         const DASHBOARD_DEVICE_HISTORY_WINDOW_MS = 28000;
@@ -725,6 +729,7 @@ createApp({
         const dashboardRecentRenderPage = ref(0);
         const dashboardPlaybackRenderPage = ref(0);
         const dashboardLibraryRenderPage = ref(0);
+        const missingEpisodeRenderPage = ref(0);
         const wallRows = reactive([[], [], [], []]);
         const wallReady = ref(false);
         const dashboardOverviewLoading = ref(false);
@@ -1089,12 +1094,6 @@ createApp({
                     .filter((sample) => Number.isFinite(sample.t) && Number.isFinite(sample.value))
                     .sort((a, b) => a.t - b.t)
                 : [];
-            if (samples.length === 0) {
-                return [{ t: now - DASHBOARD_DEVICE_HISTORY_WINDOW_MS, value: 0 }, { t: now, value: 0 }];
-            }
-            if (samples.length === 1) {
-                return [{ t: now - DASHBOARD_DEVICE_HISTORY_WINDOW_MS, value: samples[0].value }, samples[0]];
-            }
             return samples;
         };
 
@@ -1178,15 +1177,15 @@ createApp({
             ctx.clearRect(0, 0, width, height);
 
             const samples = normalizeCanvasSamples(config.history, now);
+            if (samples.length < 2) return true;
             const windowStart = now - DASHBOARD_DEVICE_HISTORY_WINDOW_MS;
             const beforeWindow = [...samples].reverse().find((sample) => sample.t < windowStart);
+            const hasWindowBoundarySample = !!beforeWindow;
             const rawVisibleSamples = samples.filter((sample) => sample.t >= windowStart && sample.t <= now + DASHBOARD_DEVICE_POLL_INTERVAL);
             if (beforeWindow) {
                 rawVisibleSamples.unshift({ t: windowStart, value: beforeWindow.value });
             }
-            if (rawVisibleSamples.length === 0) {
-                rawVisibleSamples.push({ t: windowStart, value: samples[0].value }, { t: now, value: samples[samples.length - 1].value });
-            }
+            if (rawVisibleSamples.length < 2) return true;
 
             const latestSample = samples[samples.length - 1];
             const targetScale = getCanvasMetricScale(rawVisibleSamples, config.mode);
@@ -1216,15 +1215,12 @@ createApp({
                 y: yForValue(sample.value),
             })).filter((point) => point.x >= -width * 0.08 && point.x <= width * 1.08);
 
-            if (points.length === 0) {
-                const y = yForValue(0);
-                points = [{ x: 0, y }, { x: width, y }];
-            }
-            if (points[0].x > 0) {
+            if (points.length < 2) return true;
+            if (hasWindowBoundarySample && points[0].x > 0) {
                 points.unshift({ x: 0, y: points[0].y });
             }
             const latestPoint = points[points.length - 1];
-            if (latestPoint.x < width) {
+            if (now - latestSample.t <= DASHBOARD_DEVICE_POLL_INTERVAL * 1.5 && latestPoint.x < width) {
                 points.push({ x: width, y: latestPoint.y });
             }
 
@@ -1240,8 +1236,10 @@ createApp({
             ctx.save();
             ctx.beginPath();
             traceCanvasMetricCurve(ctx, points);
-            ctx.lineTo(width, height + 2);
-            ctx.lineTo(0, height + 2);
+            const fillStartX = Math.max(0, points[0].x);
+            const fillEndX = Math.min(width, points[points.length - 1].x);
+            ctx.lineTo(fillEndX, height + 2);
+            ctx.lineTo(fillStartX, height + 2);
             ctx.closePath();
             ctx.fillStyle = fillGradient;
             ctx.fill();
@@ -6801,6 +6799,69 @@ createApp({
             });
             return sortedItems;
         });
+        const missingEpisodeVisibleLimit = computed(() => {
+            const base = isMobile.value ? MISSING_EPISODE_RENDER_LIMIT_MOBILE : MISSING_EPISODE_RENDER_LIMIT_DESKTOP;
+            const step = isMobile.value ? MISSING_EPISODE_RENDER_STEP_MOBILE : MISSING_EPISODE_RENDER_STEP_DESKTOP;
+            return base + Math.max(0, missingEpisodeRenderPage.value) * step;
+        });
+        const visibleMissingEpisodeStatsProblemItems = computed(() => {
+            return missingEpisodeStatsProblemItems.value.slice(0, missingEpisodeVisibleLimit.value);
+        });
+        const missingEpisodeHasMoreVisibleItems = computed(() => {
+            return visibleMissingEpisodeStatsProblemItems.value.length < missingEpisodeStatsProblemItems.value.length;
+        });
+        let missingEpisodeLazyLoadLastAt = 0;
+        let missingEpisodeLazyEnsurePending = false;
+
+        const loadMoreMissingEpisodeItems = () => {
+            if (!missingEpisodeHasMoreVisibleItems.value) return;
+            missingEpisodeRenderPage.value += 1;
+            ensureMissingEpisodeLazyScrollable();
+        };
+
+        const ensureMissingEpisodeLazyScrollable = () => {
+            if (missingEpisodeLazyEnsurePending) return;
+            missingEpisodeLazyEnsurePending = true;
+            nextTick(() => {
+                requestAnimationFrame(() => {
+                    missingEpisodeLazyEnsurePending = false;
+                    if (tab.value !== 'missing_episode_stats') return;
+                    if (!missingEpisodeHasMoreVisibleItems.value) return;
+                    const el = document.querySelector('.missing-episode-poster-grid');
+                    if (!el) return;
+                    const hasVerticalScroll = el.scrollHeight > el.clientHeight + 4;
+                    if (!hasVerticalScroll) loadMoreMissingEpisodeItems();
+                });
+            });
+        };
+
+        const resetMissingEpisodeRenderedItems = () => {
+            missingEpisodeRenderPage.value = 0;
+            ensureMissingEpisodeLazyScrollable();
+        };
+
+        const onMissingEpisodeLazyScroll = (event) => {
+            const el = event?.currentTarget;
+            if (!el || !missingEpisodeHasMoreVisibleItems.value) return;
+            const remainingY = el.scrollHeight - el.clientHeight - el.scrollTop;
+            if (remainingY >= 180) return;
+            const now = Date.now();
+            if (now - missingEpisodeLazyLoadLastAt < 180) return;
+            missingEpisodeLazyLoadLastAt = now;
+            loadMoreMissingEpisodeItems();
+        };
+
+        watch(isMobile, () => {
+            resetMissingEpisodeRenderedItems();
+        });
+
+        watch(() => missingEpisodeStats.searchQuery, () => {
+            resetMissingEpisodeRenderedItems();
+        });
+
+        watch(() => missingEpisodeStatsProblemItems.value.length, () => {
+            resetMissingEpisodeRenderedItems();
+        });
 
         const isDoubanMainGrid = () => discoverActiveSource.value === 'douban';
 
@@ -6976,18 +7037,22 @@ createApp({
 
         const setMissingEpisodeLibrary = (libraryKey) => {
             missingEpisodeStats.activeLibraryKey = libraryKey;
+            resetMissingEpisodeRenderedItems();
         };
 
         const setMissingEpisodeFilter = (filter) => {
             missingEpisodeStats.filter = filter || 'all';
+            resetMissingEpisodeRenderedItems();
         };
 
         const setMissingEpisodeStatusFilter = (filter) => {
             missingEpisodeStats.statusFilter = filter || 'all';
+            resetMissingEpisodeRenderedItems();
         };
 
         const setMissingEpisodeSort = (sortBy) => {
             missingEpisodeStats.sortBy = sortBy || 'year_desc';
+            resetMissingEpisodeRenderedItems();
         };
 
         const openDiscoverFromMissingStats = () => {
@@ -7897,13 +7962,14 @@ createApp({
             // [新增] 发现推荐页
             detailModal, openMediaDetail, closeDetailModal,
             missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
+            visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, onMissingEpisodeLazyScroll,
             runMissingEpisodeStats, refreshMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
             setDetailSeason, toggleDetailSeasonExpanded, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,
             subscribeMedia, unsubscribeMedia, getImdbLink, getTvdbLink,
             gridModal, gridModalEl, gridSentinel, openRowGrid, closeGridModal,
             searchMovieResults, searchTvResults, discoverSearchLoading,
-            discoverHasSearched, searchPage, searchTotalPages,
-            loadMoreSearch,
+            discoverSearchQuery, discoverHasSearched, searchPage, searchTotalPages,
+            searchDiscover, loadMoreSearch, clearDiscoverSearch,
             genreList,
             discoverSourceTabs, discoverActiveSource,
             discoverSourceSupported, discoverEmptyText,

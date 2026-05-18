@@ -6518,6 +6518,122 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 
 .mp-main-wrap { min-height: 420px; margin-top: 18px; }
 .mp-search-section { margin-top: 18px; margin-bottom: 18px; }
+.mp-discover-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 14px 0 18px;
+}
+.mp-discover-search-box {
+    min-width: 0;
+    flex: 1;
+    height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    background: rgba(255,255,255,0.035);
+    color: var(--ui-text-muted);
+    padding: 0 12px;
+    transition: border-color var(--ui-transition-fast), background var(--ui-transition-fast), box-shadow var(--ui-transition-fast);
+}
+.mp-discover-search-box:focus-within {
+    border-color: rgba(139,92,246,0.36);
+    background: rgba(139,92,246,0.10);
+    box-shadow: 0 0 0 3px rgba(139,92,246,0.09);
+}
+.mp-discover-search-box > i {
+    flex: 0 0 auto;
+    color: #c4b5fd;
+    font-size: 14px;
+}
+.mp-discover-search-box input {
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0 !important;
+    outline: 0 !important;
+    border-radius: 0;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    -webkit-appearance: none;
+    appearance: none;
+    color: var(--ui-text-main);
+    font-size: 13px;
+    line-height: 42px;
+    transition: none;
+}
+.mp-discover-search-box input:hover,
+.mp-discover-search-box input:focus {
+    border: 0 !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+}
+.mp-discover-search-box input::placeholder {
+    color: rgba(148,163,184,0.78);
+}
+.mp-discover-search-box input::-webkit-search-cancel-button,
+.mp-discover-search-box input::-webkit-search-decoration,
+.mp-discover-search-box input::-webkit-search-results-button,
+.mp-discover-search-box input::-webkit-search-results-decoration {
+    display: none;
+    -webkit-appearance: none;
+}
+.mp-discover-search-clear,
+.mp-discover-search-submit,
+.mp-discover-search-back {
+    height: 42px;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    color: var(--ui-text-main);
+    cursor: pointer;
+    transition: border-color var(--ui-transition-fast), background var(--ui-transition-fast), color var(--ui-transition-fast);
+}
+.mp-discover-search-clear {
+    width: 26px;
+    height: 26px;
+    flex: 0 0 26px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.09);
+    color: var(--ui-text-muted);
+    font-size: 11px;
+}
+.mp-discover-search-submit,
+.mp-discover-search-back {
+    flex: 0 0 auto;
+    padding: 0 15px;
+    background: rgba(139,92,246,0.16);
+    border-color: rgba(139,92,246,0.24);
+    color: #ddd6fe;
+    font-size: 13px;
+    font-weight: 700;
+}
+.mp-discover-search-back {
+    background: rgba(255,255,255,0.035);
+    border-color: rgba(255,255,255,0.08);
+    color: var(--ui-text-muted);
+}
+.mp-discover-search-clear:hover,
+.mp-discover-search-submit:hover,
+.mp-discover-search-back:hover {
+    border-color: rgba(139,92,246,0.34);
+    background: rgba(139,92,246,0.13);
+    color: #ddd6fe;
+}
+.mp-discover-search-submit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 
 .missing-episode-page {
     display: flex;
@@ -6600,6 +6716,50 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 }
 .missing-episode-filter-btn strong {
     font-size: 15px;
+}
+.missing-episode-mobile-controls {
+    display: none;
+}
+.missing-episode-mobile-control-group {
+    min-width: 0;
+}
+.missing-episode-mobile-control-title {
+    margin-bottom: 7px;
+    color: var(--ui-text-muted);
+    font-size: 12px;
+}
+.missing-episode-mobile-chip-scroll {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+}
+.missing-episode-mobile-chip-scroll::-webkit-scrollbar {
+    display: none;
+}
+.missing-episode-mobile-chip-scroll button {
+    min-height: 32px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.035);
+    color: var(--ui-text-muted);
+    border-radius: 999px;
+    padding: 0 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    font-weight: 700;
+}
+.missing-episode-mobile-chip-scroll button.active {
+    border-color: rgba(139,92,246,0.36);
+    background: rgba(139,92,246,0.13);
+    color: #ddd6fe;
+}
+.missing-episode-mobile-chip-scroll button strong {
+    color: inherit;
+    font-size: 12px;
 }
 .missing-episode-workspace {
     display: grid;
@@ -6843,51 +7003,99 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     max-width: 420px;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    height: 42px;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    background: rgba(15,23,42,0.28);
     color: var(--ui-text-muted);
-    font-size: 12px;
+    padding: 0 12px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+    transition: border-color var(--ui-transition-fast), background var(--ui-transition-fast), box-shadow var(--ui-transition-fast);
+}
+.missing-episode-search-control:focus-within {
+    border-color: rgba(139,92,246,0.38);
+    background: rgba(17,24,39,0.52);
+    box-shadow: 0 0 0 3px rgba(139,92,246,0.10), inset 0 1px 0 rgba(255,255,255,0.045);
+}
+.missing-episode-search-label {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #c4b5fd;
+    background: transparent;
+    font-size: 15px;
 }
 .missing-episode-search-box {
-    height: 34px;
+    height: 100%;
     min-width: 0;
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 8px;
-    border: 1px solid rgba(255,255,255,0.09);
-    border-radius: 10px;
-    background: rgba(255,255,255,0.045);
+    border: 0;
+    border-radius: 0;
+    background: transparent;
     color: var(--ui-text-muted);
-    padding: 0 8px 0 10px;
-}
-.missing-episode-search-box:focus-within {
-    border-color: rgba(139,92,246,0.35);
-    background: rgba(139,92,246,0.10);
+    padding: 0;
 }
 .missing-episode-search-box input {
     width: 100%;
     min-width: 0;
-    border: 0;
-    outline: 0;
-    background: transparent;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0 !important;
+    outline: 0 !important;
+    border-radius: 0;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    -webkit-appearance: none;
+    appearance: none;
     color: var(--ui-text-main);
     font-size: 13px;
+    line-height: 42px;
+    transition: none;
+}
+.missing-episode-search-box input:hover,
+.missing-episode-search-box input:focus {
+    border: 0 !important;
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+}
+.missing-episode-search-box input::placeholder {
+    color: rgba(148,163,184,0.78);
+}
+.missing-episode-search-box input::-webkit-search-cancel-button,
+.missing-episode-search-box input::-webkit-search-decoration,
+.missing-episode-search-box input::-webkit-search-results-button,
+.missing-episode-search-box input::-webkit-search-results-decoration {
+    display: none;
+    -webkit-appearance: none;
 }
 .missing-episode-search-box button {
-    width: 22px;
-    height: 22px;
+    width: 26px;
+    height: 26px;
+    flex: 0 0 26px;
     border: 0;
     border-radius: 999px;
-    background: rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.09);
     color: var(--ui-text-muted);
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    font-size: 11px;
+    transition: background var(--ui-transition-fast), color var(--ui-transition-fast), transform var(--ui-transition-fast);
 }
 .missing-episode-search-box button:hover {
     color: var(--ui-text-main);
-    background: rgba(255,255,255,0.14);
+    background: rgba(255,255,255,0.16);
+    transform: scale(1.04);
 }
 .missing-episode-poster-grid {
     display: grid;
@@ -6905,6 +7113,16 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 .missing-episode-poster-card {
     min-width: 0;
     cursor: pointer;
+}
+.missing-episode-lazy-more {
+    grid-column: 1 / -1;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--ui-text-muted);
+    font-size: 12px;
 }
 .missing-episode-poster-frame {
     position: relative;
@@ -7210,6 +7428,13 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .mp-filter-label { flex-basis: 32px; font-size: 13px; }
     .mp-filter-chip { min-height: 30px; font-size: 13px; padding: 0 10px; }
     .mp-grid { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 10px; }
+    .mp-discover-search-bar {
+        gap: 8px;
+    }
+    .mp-discover-search-submit,
+    .mp-discover-search-back {
+        padding: 0 12px;
+    }
     .missing-episode-page,
     #app[data-v-app] .content-area:not(.panel-mode) > .scroll-view.missing-episode-page { padding: 16px 12px 96px; overflow-y: auto; }
     .missing-episode-shell { width: 100%; height: auto; min-height: calc(100vh - 112px); overflow: visible; }
@@ -7221,6 +7446,20 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .missing-episode-view-controls { width: 100%; justify-content: flex-start; }
     .missing-episode-search-control { max-width: none; }
     .missing-episode-filter-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .missing-episode-mobile-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-bottom: 14px;
+        border: 1px solid rgba(255,255,255,0.07);
+        background: rgba(255,255,255,0.025);
+        border-radius: 14px;
+        padding: 12px;
+    }
+    .missing-episode-control-panel,
+    .missing-episode-library-panel {
+        display: none;
+    }
     .missing-episode-poster-grid,
     .missing-episode-skeleton-list { max-height: 62vh; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
 }
@@ -7230,6 +7469,16 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .mp-rating-wrap { width: 100%; }
     .mp-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .mp-rating-value { width: 62px; font-size: 16px; height: 34px; }
+    .mp-discover-search-bar {
+        flex-wrap: wrap;
+    }
+    .mp-discover-search-box {
+        flex-basis: 100%;
+    }
+    .mp-discover-search-submit,
+    .mp-discover-search-back {
+        flex: 1 1 0;
+    }
     .missing-episode-topbar { flex-direction: column; align-items: stretch; }
     .missing-episode-actions-stack { width: 100%; min-width: 0; align-items: stretch; }
     .missing-episode-actions { width: 100%; justify-content: stretch; }
@@ -7238,7 +7487,7 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .missing-episode-summary-grid { grid-template-columns: 1fr 1fr; }
     .missing-episode-view-controls label,
     .missing-episode-view-controls select,
-    .missing-episode-search-box { width: 100%; min-width: 0; }
+    .missing-episode-search-control { width: 100%; min-width: 0; }
     .missing-episode-poster-grid,
     .missing-episode-skeleton-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .missing-episode-poster-badge { font-size: 10px; padding: 4px 7px; }
@@ -8686,7 +8935,8 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 
     html[data-theme="light"] .missing-episode-sidebar,
     html[data-theme="light"] .missing-episode-results,
-    html[data-theme="light"] .missing-episode-status-card {
+    html[data-theme="light"] .missing-episode-status-card,
+    html[data-theme="light"] .missing-episode-mobile-controls {
         background: rgba(255, 255, 255, 0.78);
         border-color: rgba(15, 23, 42, 0.08);
         box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
@@ -8697,10 +8947,16 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     html[data-theme="light"] .missing-episode-library-item,
     html[data-theme="light"] .missing-episode-chip-grid button,
     html[data-theme="light"] .missing-episode-filter-btn,
+    html[data-theme="light"] .missing-episode-mobile-chip-scroll button,
     html[data-theme="light"] .missing-episode-view-controls select,
-    html[data-theme="light"] .missing-episode-search-box {
+    html[data-theme="light"] .missing-episode-search-control {
         background: rgba(15, 23, 42, 0.035);
         border-color: rgba(15, 23, 42, 0.07);
+    }
+
+    html[data-theme="light"] .missing-episode-search-label {
+        background: transparent;
+        color: #7c3aed;
     }
 
     html[data-theme="light"] .missing-episode-poster-card:hover .missing-episode-poster-frame {
@@ -10928,7 +11184,7 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 
     .recent-media-row {
         margin: 0 !important;
-        padding: 0 18px 8px 28px !important;
+        padding: 0 14px 8px !important;
     }
 
     .playback-hero-list {
@@ -12678,6 +12934,98 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .dashboard-recent-card,
     .dashboard-playback-card {
         min-height: 0 !important;
+    }
+}
+
+/* Mobile menu pages: align card surfaces with the dashboard theme */
+@media (max-width: 768px) {
+    .scroll-view .card,
+    .scroll-view .module-card,
+    .scroll-view .inner-panel,
+    .scroll-view .modern-accordion,
+    .scroll-view .template-editor,
+    .scroll-view .rename-editor-card,
+    .scroll-view .notification-card,
+    .scroll-view .resource-card,
+    .scroll-view .lib-card,
+    .scroll-view .subclass-card,
+    .scroll-view .design-tips-card,
+    .scroll-view .info-alert-box,
+    .scroll-view .dir-browser,
+    .scroll-view .strm-browser,
+    .scroll-view .organize-result,
+    .scroll-view .organize-scrape-card,
+    .scroll-view .strm-progress-result,
+    .scroll-view .upload115-task-card,
+    .scroll-view .upload115-job-row,
+    .scroll-view .upload115-record-row,
+    .scroll-view .cleanup-task-card,
+    .scroll-view .rapid-account-card,
+    .scroll-view .upgrade-meta-item,
+    .scroll-view .stat-tile {
+        border-color: rgba(255, 255, 255, 0.11) !important;
+        background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.035)),
+            rgba(10, 14, 28, 0.64) !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.08),
+            0 14px 34px rgba(0, 0, 0, 0.2) !important;
+        backdrop-filter: blur(18px) saturate(130%);
+        -webkit-backdrop-filter: blur(18px) saturate(130%);
+    }
+
+    .scroll-view .card-header,
+    .scroll-view .mc-header,
+    .scroll-view .mc-footer,
+    .scroll-view .acc-header,
+    .scroll-view .sa-header {
+        background: rgba(255, 255, 255, 0.045) !important;
+        border-color: rgba(255, 255, 255, 0.08) !important;
+    }
+
+    .scroll-view .card-body,
+    .scroll-view .mc-body {
+        background: transparent !important;
+    }
+
+    html[data-theme="light"] .scroll-view .card,
+    html[data-theme="light"] .scroll-view .module-card,
+    html[data-theme="light"] .scroll-view .inner-panel,
+    html[data-theme="light"] .scroll-view .modern-accordion,
+    html[data-theme="light"] .scroll-view .template-editor,
+    html[data-theme="light"] .scroll-view .rename-editor-card,
+    html[data-theme="light"] .scroll-view .notification-card,
+    html[data-theme="light"] .scroll-view .resource-card,
+    html[data-theme="light"] .scroll-view .lib-card,
+    html[data-theme="light"] .scroll-view .subclass-card,
+    html[data-theme="light"] .scroll-view .design-tips-card,
+    html[data-theme="light"] .scroll-view .info-alert-box,
+    html[data-theme="light"] .scroll-view .dir-browser,
+    html[data-theme="light"] .scroll-view .strm-browser,
+    html[data-theme="light"] .scroll-view .organize-result,
+    html[data-theme="light"] .scroll-view .organize-scrape-card,
+    html[data-theme="light"] .scroll-view .strm-progress-result,
+    html[data-theme="light"] .scroll-view .upload115-task-card,
+    html[data-theme="light"] .scroll-view .upload115-job-row,
+    html[data-theme="light"] .scroll-view .upload115-record-row,
+    html[data-theme="light"] .scroll-view .cleanup-task-card,
+    html[data-theme="light"] .scroll-view .rapid-account-card,
+    html[data-theme="light"] .scroll-view .upgrade-meta-item,
+    html[data-theme="light"] .scroll-view .stat-tile {
+        border-color: rgba(15, 23, 42, 0.08) !important;
+        background: rgba(255, 255, 255, 0.86) !important;
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.7),
+            0 14px 34px rgba(15, 23, 42, 0.08) !important;
+    }
+
+    html[data-theme="light"] .scroll-view .card-header,
+    html[data-theme="light"] .scroll-view .mc-header,
+    html[data-theme="light"] .scroll-view .mc-footer,
+    html[data-theme="light"] .scroll-view .acc-header,
+    html[data-theme="light"] .scroll-view .sa-header {
+        background: rgba(15, 23, 42, 0.035) !important;
+        border-color: rgba(15, 23, 42, 0.07) !important;
     }
 }
 
