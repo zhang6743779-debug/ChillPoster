@@ -86,6 +86,13 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("websockets.client").setLevel(logging.WARNING)
 logging.getLogger("websockets.server").setLevel(logging.WARNING)
 logging.getLogger("websockets.protocol").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.WARNING)
+logging.getLogger("telethon.client").setLevel(logging.WARNING)
+logging.getLogger("telethon.crypto").setLevel(logging.WARNING)
+logging.getLogger("telethon.extensions").setLevel(logging.WARNING)
+logging.getLogger("telethon.network").setLevel(logging.WARNING)
+logging.getLogger("telethon.network.connection").setLevel(logging.WARNING)
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
 
 # 2. [新增] 屏蔽 apscheduler 的英文启动日志
 logging.getLogger("apscheduler").setLevel(logging.WARNING)

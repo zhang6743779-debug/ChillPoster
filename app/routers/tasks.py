@@ -13,7 +13,7 @@ from app.schemas import CreateTaskRequest, UpdateTaskRequest, RunTaskRequest, Ru
 from app.dependencies import ACTIVE_TASKS, update_task_progress
 from app.services.task_service import execute_task_logic, task_service_instance
 from core.configs import TASKS_FILE, APP_LOG_FILE, TEMPLATES_DIR
-from core.logger import logger
+from core.logger import logger, should_hide_console_log_line
 
 router = APIRouter(tags=["Tasks"])
 
@@ -180,7 +180,7 @@ def format_sse_event(data: dict, event: str | None = None, event_id: int | None 
 def publish_log_line(line: str):
     global NEXT_LOG_EVENT_ID
 
-    if not line:
+    if not line or should_hide_console_log_line(line):
         return
 
     with LOG_STREAM_LOCK:
@@ -219,6 +219,7 @@ def snapshot_recent_logs(level: str = "ALL", keyword: str = "", category: str = 
             entry["line"]
             for entry in LOG_BUFFER
             if is_level_match(entry["level"], filter_level)
+            and not should_hide_console_log_line(entry["line"])
             and is_category_match(entry["line"], filter_category)
             and is_keyword_match(entry["line"], filter_keyword)
         )
@@ -243,6 +244,8 @@ def load_log_buffer_from_file():
             LOG_BUFFER.clear()
             next_id = 1
             for line in lines:
+                if should_hide_console_log_line(line):
+                    continue
                 LOG_BUFFER.append({
                     "id": next_id,
                     "line": line,
@@ -289,6 +292,7 @@ def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL"
                 line_level = extract_level_from_line(line)
                 if (
                     is_level_match(line_level, filter_level)
+                    and not should_hide_console_log_line(line)
                     and is_category_match(line, filter_category)
                     and is_keyword_match(line, filter_keyword)
                 ):
@@ -346,6 +350,7 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
                     e for e in snapshot
                     if e["id"] > cursor
                     and is_level_match(e["level"], filter_level)
+                    and not should_hide_console_log_line(e["line"])
                     and is_category_match(e["line"], filter_category)
                     and is_keyword_match(e["line"], filter_keyword)
                 ]
@@ -353,6 +358,7 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
                 replay_entries = [
                     e for e in snapshot
                     if is_level_match(e["level"], filter_level)
+                    and not should_hide_console_log_line(e["line"])
                     and is_category_match(e["line"], filter_category)
                     and is_keyword_match(e["line"], filter_keyword)
                 ]
@@ -366,6 +372,8 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
                     break
                 try:
                     entry = await asyncio.wait_for(q.get(), timeout=15)
+                    if should_hide_console_log_line(entry["line"]):
+                        continue
                     yield format_sse_event({
                         "chunk": entry["line"],
                         "id": entry["id"],

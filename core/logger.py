@@ -6,6 +6,42 @@ from .configs import APP_LOG_FILE, CONFIG_DIR, CONFIG_FILE
 
 _log_line_publisher = None
 
+HIDDEN_CONSOLE_LOG_FRAGMENTS = (
+    "libssl detected, it will be used for encryption",
+    "Handling update UpdateShort",
+    "Handling update Updates",
+    "Handling container",
+    "Handling acknowledge for",
+    "Handling RPC result for message",
+    "Handling bad salt for message",
+    "Handling new session created",
+    "Receiving items from the network",
+    "Waiting for messages to send",
+    "Assigned msg_id =",
+    "Encrypting ",
+    "Encrypted messages put in a queue to be sent",
+    "Getting difference for channel",
+    "Got difference for channel",
+    "Timeout waiting for updates expired",
+    "Starting direct file download",
+    "Borrowing sender for dc_id",
+    "Returning borrowed sender for dc_id",
+    "Connecting to ",
+    "Connection to ",
+    "Connection attempt ",
+    "Connection success",
+    "Starting send loop",
+    "Starting receive loop",
+    "Disconnecting from ",
+    "Disconnection from ",
+    "Closing current connection",
+    "Cancelling ",
+)
+
+
+def should_hide_console_log_line(message: str) -> bool:
+    return any(fragment in message for fragment in HIDDEN_CONSOLE_LOG_FRAGMENTS)
+
 def register_log_line_publisher(publisher):
     global _log_line_publisher
     _log_line_publisher = publisher
@@ -75,7 +111,8 @@ class LoggerWriter:
             "GET /api/system_logs/stream" in message or
             "/api/save HTTP/1.1" in message or
             "/api/clear_task_progress HTTP/1.1" in message or
-            "INFO:" in message and "HTTP/1.1\"" in message
+            "INFO:" in message and "HTTP/1.1\"" in message or
+            should_hide_console_log_line(message)
         ):
             return
 
@@ -143,6 +180,32 @@ def _read_log_level_from_settings():
     return "INFO"
 
 
+def _quiet_noisy_dependency_loggers():
+    noisy_loggers = (
+        "httpx",
+        "httpcore",
+        "apscheduler",
+        "urllib3",
+        "requests",
+        "asyncio",
+        "tzlocal",
+        "tzdata",
+        "websockets",
+        "websockets.client",
+        "websockets.server",
+        "websockets.protocol",
+        "telethon",
+        "telethon.client",
+        "telethon.crypto",
+        "telethon.extensions",
+        "telethon.network",
+        "telethon.network.connection",
+        "telethon.network.mtprotosender",
+    )
+    for logger_name in noisy_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
 
 def set_log_level(level_value, announce=True):
     level_name = _normalize_log_level(level_value)
@@ -158,19 +221,8 @@ def set_log_level(level_value, announce=True):
     logging.getLogger("uvicorn").setLevel(level)
     logging.getLogger("uvicorn.access").setLevel(level)
 
-    # 噪音依旧保持压制
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("apscheduler").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-    logging.getLogger("tzlocal").setLevel(logging.WARNING)
-    logging.getLogger("tzdata").setLevel(logging.WARNING)
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("websockets.client").setLevel(logging.WARNING)
-    logging.getLogger("websockets.server").setLevel(logging.WARNING)
-    logging.getLogger("websockets.protocol").setLevel(logging.WARNING)
+    # 噪音依旧保持压制。DEBUG 模式只放大本项目日志，不展开第三方网络库细节。
+    _quiet_noisy_dependency_loggers()
 
     if announce and previous_level != level_name:
         if level_name == "DEBUG":

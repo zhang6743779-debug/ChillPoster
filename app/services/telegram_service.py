@@ -275,6 +275,8 @@ class TelegramNotifyService:
         try:
             await client.disconnect()
         except Exception as e:
+            if "database is locked" in str(e).lower():
+                return
             logger.warning(f"[Telegram账号] 断开客户端失败: {e}")
 
     async def _account_status_payload(self) -> dict:
@@ -459,6 +461,8 @@ class TelegramNotifyService:
         path = self.avatar_path(filename)
         if path:
             return path
+        if self.is_monitor_running():
+            return None
 
         safe_name = os.path.basename(str(filename or ""))
         if not safe_name.endswith(".jpg"):
