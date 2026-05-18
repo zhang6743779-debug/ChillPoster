@@ -106,8 +106,19 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
 
     notify_task_name = f"海报任务 · {display_task_name if is_webhook_task else task_name}"
 
-    def send_task_notification(status: str, detail: str, total: int = 0, generated_count: int = 0, failed_count: int = 0, poster_url: str = ""):
+    def send_task_notification(status: str, detail: str, total: int = 0, generated_count: int = 0,
+                               failed_count: int = 0, poster_url: str = "", failed_details: list | None = None):
         elapsed = str(datetime.now() - started_at).split(".")[0]
+        detail_text = detail
+        if failed_details:
+            lines = []
+            for item in failed_details[:10]:
+                library_name = str(item.get("library_name") or "未知媒体库").strip() or "未知媒体库"
+                reason = str(item.get("reason") or "未知原因").strip() or "未知原因"
+                lines.append(f"• {library_name}: {reason}")
+            if len(failed_details) > 10:
+                lines.append(f"• 其余 {len(failed_details) - 10} 个失败媒体库已省略")
+            detail_text = f"{detail}\n失败明细：\n" + "\n".join(lines)
         notify_kwargs = {
             "task_name": notify_task_name,
             "status": status,
@@ -116,7 +127,7 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
             "posters_count": total,
             "generated": generated_count,
             "failed": failed_count,
-            "detail": detail,
+            "detail": detail_text,
             "summary": detail,
         }
         if is_webhook_task and poster_url:
@@ -145,9 +156,15 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
 
     def process_target(target_obj):
         t = _hydrate_task_target(target_obj)
+        library_name = str(t.get('library_name') or t.get('library_id') or "未知媒体库")
         try:
+            if not t.get('url') or not t.get('key'):
+                return {"success": False, "poster_url": "", "library_name": library_name, "reason": "Emby 服务器地址或 API Key 未配置"}
+            if not t.get('library_id'):
+                return {"success": False, "poster_url": "", "library_name": library_name, "reason": "媒体库 ID 为空"}
+
             run_config = copy.deepcopy(base_config)
-            run_config['title'] = t.get('library_name', 'Unknown')
+            run_config['title'] = library_name
 
             if 'subtitle' not in run_config:
                 if run_config['title'] in global_translations:
@@ -162,7 +179,7 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
             assets = client.get_assets(t['library_id'], mode=mode, poster_limit=p_limit, backdrop_limit=b_limit)
 
             if not assets or (not assets.get('posters') and not assets.get('bg_url') and not assets.get('backdrops')):
-                return {"success": False, "poster_url": ""}
+                return {"success": False, "poster_url": "", "library_name": library_name, "reason": "未获取到可用的封面素材"}
 
             img_b64 = engine.draw(run_config, assets)
             img_data = base64.b64decode(img_b64)
@@ -183,14 +200,16 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
                         logger.warning(f"[任务] Webhook封面通知图片为空: base={'已配置' if base else '未配置'}")
                 else:
                     poster_url = ""
-                return {"success": True, "poster_url": poster_url}
+                return {"success": True, "poster_url": poster_url, "library_name": library_name, "reason": ""}
+            return {"success": False, "poster_url": "", "library_name": library_name, "reason": "上传封面到 Emby 失败"}
         except Exception as e:
-            logger.error(f"[任务] {t.get('library_name')}: 执行异常 {e}")
-        return {"success": False, "poster_url": ""}
+            logger.error(f"[任务] {library_name}: 执行异常 {e}")
+            return {"success": False, "poster_url": "", "library_name": library_name, "reason": str(e) or type(e).__name__}
 
     success_count = 0
     fail_count = 0
     webhook_poster_url = ""
+    failed_details = []
 
     futures = [GLOBAL_EXECUTOR.submit(process_target, t) for t in targets]
 
@@ -210,6 +229,10 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
                 webhook_poster_url = result.get("poster_url", "")
         else:
             fail_count += 1
+            failed_details.append({
+                "library_name": result.get("library_name") or "未知媒体库",
+                "reason": result.get("reason") or "未知原因",
+            })
 
         percent = int(((i + 1) / total) * 100)
         update_task_progress(run_id, f"任务: {task_name}", percent, "running")
@@ -228,6 +251,7 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
         generated_count=success_count,
         failed_count=fail_count,
         poster_url=webhook_poster_url,
+        failed_details=failed_details,
     )
     gc.collect()
     return {"status": "ok"}
