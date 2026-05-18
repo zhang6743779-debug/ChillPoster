@@ -6,6 +6,8 @@ import re
 import sys
 import time
 import types
+import json
+import hashlib
 import logging
 import random
 import importlib.util
@@ -20,8 +22,9 @@ import requests
 from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import Response, RedirectResponse, StreamingResponse
 
-from core.configs import global_config
+from core.configs import global_config, MISSING_EPISODE_STATS_CACHE_FILE
 from app.services.emby_library_cache import (
+    build_discover_index,
     discover_tmdb_id_exists,
     get_discover_index_meta,
     get_discover_index_ready,
@@ -1792,6 +1795,7 @@ def _build_missing_episode_libraries_from_entries(entries: list[dict]) -> list[d
 
 _missing_episode_stats_lock = threading.RLock()
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
+MISSING_EPISODE_STATS_CACHE_VERSION = 4
 _missing_episode_stats_state: dict = {
     "cache_key": "",
     "running": False,
@@ -1799,6 +1803,116 @@ _missing_episode_stats_state: dict = {
     "progress": {"current": 0, "total": 0},
     "error": "",
 }
+
+
+def _read_missing_episode_stats_cache_file() -> dict:
+    try:
+        if not os.path.exists(MISSING_EPISODE_STATS_CACHE_FILE):
+            return {}
+        with open(MISSING_EPISODE_STATS_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.debug(f"[Discover] 读取缺集统计缓存失败: {e}")
+        return {}
+
+
+def _write_missing_episode_stats_cache_file(data: dict) -> None:
+    os.makedirs(os.path.dirname(MISSING_EPISODE_STATS_CACHE_FILE), exist_ok=True)
+    tmp = MISSING_EPISODE_STATS_CACHE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, MISSING_EPISODE_STATS_CACHE_FILE)
+
+
+def _normalize_missing_episode_entry_for_cache(entry: dict) -> dict:
+    seasons = {}
+    for season, episodes in (entry.get("seasons") or {}).items():
+        try:
+            season_key = str(int(season))
+        except Exception:
+            continue
+        episode_nums = set()
+        for ep in episodes or []:
+            try:
+                ep_num = int(ep)
+            except Exception:
+                continue
+            if ep_num > 0:
+                episode_nums.add(ep_num)
+        seasons[season_key] = sorted(episode_nums)
+    return {
+        "tmdb_id": str(entry.get("tmdb_id") or ""),
+        "library_id": str(entry.get("library_id") or ""),
+        "seasons": seasons,
+    }
+
+
+def _build_missing_episode_cache_key(entries: list[dict]) -> str:
+    normalized = [_normalize_missing_episode_entry_for_cache(entry) for entry in entries or []]
+    normalized.sort(key=lambda item: (item.get("tmdb_id") or "", item.get("library_id") or ""))
+    raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"library_missing_episode_stats_v{MISSING_EPISODE_STATS_CACHE_VERSION}_{digest}"
+
+
+def _missing_episode_result_key(item: dict) -> tuple[str, str]:
+    return str(item.get("tmdbId") or item.get("tmdb_id") or ""), str(item.get("libraryId") or "")
+
+
+def _missing_episode_entry_key(entry: dict) -> tuple[str, str]:
+    return str(entry.get("tmdb_id") or ""), str(entry.get("library_id") or "")
+
+
+def _decorate_missing_episode_payload(payload: dict, cache_key: str, entries: list[dict], meta: dict, message: str = "") -> dict:
+    payload = dict(payload or {})
+    payload_meta = dict(meta or {})
+    payload_meta.update({
+        "missing_stats_cache_version": MISSING_EPISODE_STATS_CACHE_VERSION,
+        "missing_stats_cache_key": cache_key,
+        "missing_stats_entry_count": len(entries or []),
+        "missing_stats_updated_at": int(time.time()),
+    })
+    payload["meta"] = payload_meta
+    if message:
+        payload["message"] = message
+    payload.setdefault("ready", True)
+    payload.setdefault("running", False)
+    return payload
+
+
+def _save_missing_episode_stats_cache(payload: dict, cache_key: str, entries: list[dict]) -> None:
+    if not isinstance(payload, dict) or payload.get("running"):
+        return
+    data = {
+        "_meta": {
+            "version": MISSING_EPISODE_STATS_CACHE_VERSION,
+            "cache_key": cache_key,
+            "saved_at": int(time.time()),
+            "entry_count": len(entries or []),
+        },
+        "payload": payload,
+    }
+    try:
+        _write_missing_episode_stats_cache_file(data)
+    except Exception as e:
+        logger.warning(f"[Discover] 缺集统计缓存落盘失败: {e}")
+
+
+def _load_missing_episode_stats_cache(cache_key: str | None = None) -> dict | None:
+    data = _read_missing_episode_stats_cache_file()
+    meta = data.get("_meta") if isinstance(data, dict) else {}
+    if not isinstance(meta, dict) or meta.get("version") != MISSING_EPISODE_STATS_CACHE_VERSION:
+        return None
+    if cache_key and meta.get("cache_key") != cache_key:
+        return None
+    payload = data.get("payload")
+    if not isinstance(payload, dict) or payload.get("running"):
+        return None
+    payload = dict(payload)
+    payload["running"] = False
+    payload.setdefault("message", "统计完成")
+    return payload
 
 
 def _sort_missing_episode_results(results: list[dict]) -> list[dict]:
@@ -1832,12 +1946,32 @@ def _store_missing_episode_progress(payload: dict, cache_key: str) -> None:
         _missing_episode_stats_state["progress"] = payload.get("progress") or {"current": 0, "total": 0}
 
 
-def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict, cache_key: str) -> None:
+def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict, cache_key: str, full_calibration: bool = False) -> None:
     results: list[dict] = []
     total = len(entries)
     payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
     _store_missing_episode_progress(payload, cache_key)
     try:
+        if full_calibration:
+            calibration_payload = _build_missing_episode_progress_payload(
+                entries,
+                meta,
+                running=True,
+                message="正在校准 Emby 剧集索引...",
+            )
+            _store_missing_episode_progress(calibration_payload, cache_key)
+            build_discover_index(
+                server_idx=int((meta or {}).get("server_idx", 0) or 0),
+                reason="missing_episode_stats:manual_calibration",
+                force=True,
+            )
+            meta = get_discover_index_meta()
+            entries = get_discover_series_entries()
+            cache_key = _build_missing_episode_cache_key(entries)
+            total = len(entries)
+            payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
+            _store_missing_episode_progress(payload, cache_key)
+
         max_workers = min(MISSING_EPISODE_TMDB_MAX_WORKERS, max(1, total))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(_build_missing_episode_stat, entry, api_key) for entry in entries]
@@ -1878,7 +2012,9 @@ def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict
             "progress": {"current": len(results), "total": total},
             "message": "统计完成",
         }
-        _cache_set(cache_key, final_payload, ttl=3600)
+        final_payload = _decorate_missing_episode_payload(final_payload, cache_key, entries, meta, message="统计完成")
+        _cache_set(cache_key, final_payload, ttl=24 * 60 * 60)
+        _save_missing_episode_stats_cache(final_payload, cache_key, entries)
         _store_missing_episode_progress(final_payload, cache_key)
     except Exception as e:
         logger.warning(f"[Discover] 缺集统计后台任务失败: {e}")
@@ -1953,6 +2089,65 @@ def _build_missing_episode_stats_payload(entries: list[dict], api_key: str, meta
     }
 
 
+def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = False, tmdb_id: str = "", library_id: str = "") -> bool:
+    """Patch the persisted missing-episode statistics for one Series."""
+    cached_payload = _load_missing_episode_stats_cache()
+    if not cached_payload:
+        with _missing_episode_stats_lock:
+            cached_payload = _missing_episode_stats_state.get("payload")
+    if not isinstance(cached_payload, dict) or cached_payload.get("running"):
+        return False
+
+    entries = get_discover_series_entries()
+    entry_keys = {_missing_episode_entry_key(item) for item in entries}
+    target_key = _missing_episode_entry_key(entry or {"tmdb_id": tmdb_id, "library_id": library_id})
+    if target_key == ("", ""):
+        return False
+    target_tmdb_id, target_library_id = target_key
+
+    results = []
+    for item in cached_payload.get("items") or []:
+        item_key = _missing_episode_result_key(item)
+        is_target = item_key[0] == target_tmdb_id and (not target_library_id or item_key[1] == target_library_id)
+        if is_target:
+            continue
+        if item_key in entry_keys:
+            results.append(item)
+
+    if not remove:
+        if not entry:
+            entry = next((item for item in entries if _missing_episode_entry_key(item) == target_key), None)
+        if not entry:
+            return False
+        api_key = _get_tmdb_key()
+        if not api_key:
+            return False
+        results.append(_build_missing_episode_stat(entry, api_key))
+
+    results = _sort_missing_episode_results(results)
+    summary = _empty_missing_episode_summary()
+    for item in results:
+        _accumulate_missing_episode_summary(summary, item)
+    summary["tvCount"] = len(entries)
+    meta = get_discover_index_meta()
+    cache_key = _build_missing_episode_cache_key(entries)
+    final_payload = {
+        "ready": True,
+        "running": False,
+        "meta": meta,
+        "summary": summary,
+        "items": results,
+        "libraries": _merge_missing_episode_libraries(entries, results),
+        "progress": {"current": len(entries), "total": len(entries)},
+        "message": "统计完成",
+    }
+    final_payload = _decorate_missing_episode_payload(final_payload, cache_key, entries, meta, message="统计完成")
+    _cache_set(cache_key, final_payload, ttl=24 * 60 * 60)
+    _save_missing_episode_stats_cache(final_payload, cache_key, entries)
+    _store_missing_episode_progress(final_payload, cache_key)
+    return True
+
+
 @router.get("/library/missing-episode-stats")
 def library_missing_episode_stats(
     refresh: int = Query(0, ge=0, le=1),
@@ -1960,6 +2155,9 @@ def library_missing_episode_stats(
 ):
     meta = get_discover_index_meta()
     if not get_discover_index_ready():
+        cached = _load_missing_episode_stats_cache()
+        if cached:
+            return cached
         return {
             "ready": False,
             "meta": meta,
@@ -1972,17 +2170,14 @@ def library_missing_episode_stats(
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
     entries = get_discover_series_entries()
-    cache_key = f"library_missing_episode_stats_v3_{meta.get('updated_at', 0)}"
+    cache_key = _build_missing_episode_cache_key(entries)
     with _missing_episode_stats_lock:
-        if (
-            _missing_episode_stats_state.get("cache_key") == cache_key
-            and _missing_episode_stats_state.get("payload")
-            and _missing_episode_stats_state.get("running")
-        ):
+        if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
             return _missing_episode_stats_state["payload"]
 
     if start or refresh:
-        initial_payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
+        message = "正在校准 Emby 剧集索引..." if refresh else "正在统计剧集缺集..."
+        initial_payload = _build_missing_episode_progress_payload(entries, meta, running=True, message=message)
         with _missing_episode_stats_lock:
             _missing_episode_stats_state.update({
                 "cache_key": cache_key,
@@ -1993,7 +2188,7 @@ def library_missing_episode_stats(
             })
         worker = threading.Thread(
             target=_run_missing_episode_stats_job,
-            args=(entries, api_key, meta, cache_key),
+            args=(entries, api_key, meta, cache_key, bool(refresh)),
             daemon=True,
         )
         worker.start()
@@ -2002,6 +2197,20 @@ def library_missing_episode_stats(
     if not refresh:
         cached = _cache_get(cache_key)
         if cached:
+            return cached
+        cached = _load_missing_episode_stats_cache(cache_key) or _load_missing_episode_stats_cache()
+        if cached:
+            cached_key = (cached.get("meta") or {}).get("missing_stats_cache_key") or cache_key
+            if cached_key == cache_key:
+                _cache_set(cache_key, cached, ttl=24 * 60 * 60)
+            with _missing_episode_stats_lock:
+                _missing_episode_stats_state.update({
+                    "cache_key": cached_key,
+                    "running": False,
+                    "payload": cached,
+                    "progress": cached.get("progress") or {"current": 0, "total": 0},
+                    "error": "",
+                })
             return cached
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("cache_key") == cache_key and _missing_episode_stats_state.get("payload"):

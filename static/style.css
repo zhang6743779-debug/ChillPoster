@@ -13279,6 +13279,38 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
         padding-bottom: var(--mobile-dock-clearance) !important;
     }
 
+    html.standalone-webapp .dashboard-playback-card,
+    html.standalone-webapp .dashboard-media-stats-card {
+        color: #f8fafc !important;
+        border-color: rgba(148, 163, 184, 0.14) !important;
+        background:
+            radial-gradient(circle at 16% 0%, rgba(56, 189, 248, 0.12), transparent 34%),
+            linear-gradient(180deg, rgba(15, 23, 42, 0.76), rgba(2, 6, 23, 0.82)) !important;
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+    }
+
+    html.standalone-webapp .dashboard-playback-card .dashboard-section-title,
+    html.standalone-webapp .dashboard-media-stats-card .dashboard-section-title,
+    html.standalone-webapp .dashboard-media-stats-card .dashboard-stats-total,
+    html.standalone-webapp .dashboard-media-stats-card .media-library-name,
+    html.standalone-webapp .dashboard-media-stats-card .media-library-count {
+        color: #f8fafc !important;
+    }
+
+    html.standalone-webapp .dashboard-playback-card .dashboard-section-sub,
+    html.standalone-webapp .dashboard-media-stats-card .dashboard-section-sub,
+    html.standalone-webapp .dashboard-media-stats-card .media-library-type {
+        color: rgba(226, 232, 240, 0.72) !important;
+    }
+
+    html.standalone-webapp .dashboard-media-stats-card .media-stat-chip,
+    html.standalone-webapp .dashboard-media-stats-card .media-library-row {
+        color: rgba(241, 245, 249, 0.84) !important;
+        background: rgba(255, 255, 255, 0.065) !important;
+        border-color: rgba(255, 255, 255, 0.095) !important;
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.16) !important;
+    }
+
     html.standalone-webapp .scroll-view .card,
     html.standalone-webapp .scroll-view .module-card,
     html.standalone-webapp .scroll-view .inner-panel,

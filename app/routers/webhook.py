@@ -1,6 +1,7 @@
 # app/routers/webhook.py
 import os
 import json
+import re
 from fastapi import APIRouter, Request, HTTPException
 
 from app.schemas import WebhookConfigModel
@@ -13,6 +14,85 @@ from core.emby_client import EmbyClient
 from core.logger import logger
 
 router = APIRouter(tags=["Webhook"])
+
+
+def _extract_tmdb_id_from_webhook_item(item_data: dict) -> str:
+    provider_ids = item_data.get("ProviderIds") or {}
+    for key in ("Tmdb", "TMDb", "TheMovieDb", "themoviedb"):
+        if provider_ids.get(key):
+            return str(provider_ids.get(key))
+    for item in item_data.get("ExternalUrls") or []:
+        url = str(item.get("Url") or "")
+        match = re.search(r"themoviedb\.org/(?:tv|movie)/(\d+)", url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _sync_missing_episode_stats_for_series(client: EmbyClient, matched_lib: dict, server_idx: int, series_id: str, series_info: dict | None = None) -> bool:
+    if not series_id:
+        return False
+    try:
+        series_info = series_info or client.get_item_info(series_id)
+        if not series_info:
+            return False
+        tmdb_id = str(series_info.get("tmdb_id") or "").strip()
+        if not tmdb_id:
+            return False
+        seasons = client.get_series_episode_counts_by_id(series_id)
+        from app.services.emby_library_cache import upsert_discover_series_entry
+        entry = upsert_discover_series_entry(
+            server_idx=server_idx,
+            library_id=str(matched_lib.get("id") or ""),
+            library_name=str(matched_lib.get("name") or ""),
+            emby_id=str(series_id or ""),
+            tmdb_id=tmdb_id,
+            title=series_info.get("name") or "",
+            original_title=series_info.get("original_title") or "",
+            year=str(series_info.get("year") or series_info.get("series_year") or ""),
+            seasons=seasons,
+        )
+        if not entry:
+            return False
+        from app.routers.discover import sync_missing_episode_stats_entry
+        return sync_missing_episode_stats_entry(entry)
+    except Exception as e:
+        logger.debug(f"[Webhook] 缺集统计单剧增量更新失败: {e}")
+        return False
+
+
+def _sync_missing_episode_stats_for_removed_item(client: EmbyClient, matched_lib: dict | None, server_idx: int, item_data: dict, target_item_id: str) -> bool:
+    item_type = item_data.get("Type", "")
+    series_id = str(item_data.get("SeriesId") or (target_item_id if item_type == "Series" else "") or "")
+    season = item_data.get("ParentIndexNumber")
+    episode = item_data.get("IndexNumber")
+
+    if item_type == "Episode" and series_id:
+        try:
+            series_info = client.get_item_info(series_id)
+            if series_info and matched_lib and _sync_missing_episode_stats_for_series(client, matched_lib, server_idx, series_id, series_info=series_info):
+                return True
+        except Exception:
+            pass
+        if season is not None and episode is not None:
+            from app.services.emby_library_cache import patch_discover_series_episode
+            entry = patch_discover_series_episode(emby_id=series_id, season=season, episode=episode, present=False)
+            if entry:
+                from app.routers.discover import sync_missing_episode_stats_entry
+                return sync_missing_episode_stats_entry(entry)
+
+    if item_type == "Series":
+        tmdb_id = _extract_tmdb_id_from_webhook_item(item_data)
+        if tmdb_id:
+            from app.services.emby_library_cache import remove_discover_series_entry
+            removed = remove_discover_series_entry(
+                tmdb_id=tmdb_id,
+                library_id=str((matched_lib or {}).get("id") or ""),
+            )
+            if removed:
+                from app.routers.discover import sync_missing_episode_stats_entry
+                return sync_missing_episode_stats_entry(remove=True, tmdb_id=tmdb_id, library_id=str((matched_lib or {}).get("id") or ""))
+    return False
 
 @router.get("/api/webhook/config")
 def get_webhook_config():
@@ -66,14 +146,31 @@ async def emby_webhook_trigger(request: Request):
     if event_type not in allowed_events and event_type not in delete_events:
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
 
-    if event_type in delete_events:
-        from app.services.emby_library_cache import schedule_discover_index_refresh
-        schedule_discover_index_refresh(reason="webhook:delete", delay_sec=30, force=True)
-        return {"status": "ok", "action": "ignored_delete_event"}
-
     item_data = data.get("Item", {})
     target_item_id = item_data.get("Id")
     item_path = item_data.get("Path") 
+
+    if event_type in delete_events:
+        patched = False
+        servers = get_emby_configs_sync()
+        for svr_idx, svr in enumerate(servers):
+            try:
+                if not svr.get('enabled', True):
+                    continue
+                client = EmbyClient(svr['url'], svr['key'], svr.get('public_host'))
+                matched_lib = None
+                if item_path:
+                    norm_item_path = item_path.replace('\\', '/')
+                    server_libs = client.get_libraries()
+                    matched_lib = next(
+                        (lib for lib in server_libs if lib.get('paths') and
+                         any(norm_item_path.startswith(loc.replace('\\', '/')) for loc in lib.get('paths'))),
+                        None
+                    )
+                patched = _sync_missing_episode_stats_for_removed_item(client, matched_lib, svr_idx, item_data, target_item_id) or patched
+            except Exception as e:
+                logger.debug(f"[Webhook] 删除事件缺集统计增量处理失败: {e}")
+        return {"status": "ok", "action": "missing_episode_incremental_delete", "patched": patched}
     
     if not item_path and target_item_id:
         logger.debug(f"[Webhook] payload缺少路径，准备回查: {target_item_id}")
@@ -88,10 +185,9 @@ async def emby_webhook_trigger(request: Request):
 
     targets = []
     servers = get_emby_configs_sync()
+    stats_patched_count = 0
 
     preset_name = wh_config.get("preset")
-    if not preset_name:
-        return {"status": "error", "reason": "No Preset Selected"}
 
     # 遍历服务器，查找该 Webhook 属于哪个库
     for svr_idx, svr in enumerate(servers):
@@ -129,6 +225,7 @@ async def emby_webhook_trigger(request: Request):
                 except: pass
 
             if matched_lib:
+                item_type_for_stats = item_data.get("Type", "")
                 # 发送入库通知
                 try:
                     item_name = item_data.get("Name", "未知媒体")
@@ -323,6 +420,20 @@ async def emby_webhook_trigger(request: Request):
                 except Exception as notify_err:
                     logger.debug(f"[Webhook] 发送入库通知失败: {notify_err}")
 
+                try:
+                    series_id_for_stats = ""
+                    if item_type_for_stats == "Episode":
+                        series_id_for_stats = str(item_data.get("SeriesId") or "")
+                    elif item_type_for_stats == "Series":
+                        series_id_for_stats = str(target_item_id or "")
+                    if series_id_for_stats:
+                        patched = _sync_missing_episode_stats_for_series(client, matched_lib, svr_idx, series_id_for_stats)
+                        if patched:
+                            stats_patched_count += 1
+                            logger.info(f"[Webhook] 缺集统计已增量更新: Series={series_id_for_stats}")
+                except Exception as stats_err:
+                    logger.debug(f"[Webhook] 缺集统计增量更新失败: {stats_err}")
+
                 targets.append({
                     "url": svr['url'],
                     "key": svr['key'],
@@ -340,6 +451,15 @@ async def emby_webhook_trigger(request: Request):
     if not targets:
         return {"status": "ignored", "reason": f"Item not resolved to any library"}
 
+    if not preset_name:
+        return {
+            "status": "ok",
+            "action": "missing_episode_incremental_update",
+            "targets_matched": len(targets),
+            "stats_patched": stats_patched_count,
+            "reason": "No Preset Selected",
+        }
+
     mode = wh_config.get("mode", "random")
     triggered_count = 0
     
@@ -356,6 +476,4 @@ async def emby_webhook_trigger(request: Request):
         )
         triggered_count += 1
 
-    from app.services.emby_library_cache import schedule_discover_index_refresh
-    schedule_discover_index_refresh(reason="webhook:update", delay_sec=60)
     return {"status": "queued", "targets_debounced": triggered_count}

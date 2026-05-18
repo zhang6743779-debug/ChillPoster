@@ -837,6 +837,30 @@ def _deserialize_discover_series_index(raw: dict) -> dict[str, dict[int, set[int
     return result
 
 
+def _normalize_episode_counts_for_discover(seasons: dict | None) -> dict[int, set[int]]:
+    result: dict[int, set[int]] = {}
+    if not isinstance(seasons, dict):
+        return result
+    for season, episodes in seasons.items():
+        try:
+            season_num = int(season)
+        except Exception:
+            continue
+        if season_num <= 0:
+            continue
+        episode_set = set()
+        for ep in episodes or []:
+            try:
+                ep_num = int(ep)
+            except Exception:
+                continue
+            if ep_num > 0:
+                episode_set.add(ep_num)
+        if episode_set:
+            result[season_num] = episode_set
+    return result
+
+
 def _load_discover_index_file() -> dict:
     if not os.path.exists(EMBY_DISCOVER_INDEX_FILE):
         return {}
@@ -932,6 +956,202 @@ def get_discover_series_entries() -> list[dict]:
                 "seasons": normalized_seasons,
             })
         return entries
+
+
+def _build_discover_series_entry_from_item(key: str, item: dict) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    parts = key.split(":")
+    if len(parts) < 2 or parts[1] != "tv":
+        return None
+    tmdb_id = parts[0]
+    seasons = _discover_series_index.get(key) or _discover_series_index.get(tmdb_id, {})
+    normalized_seasons = {}
+    for season, episodes in (seasons or {}).items():
+        try:
+            normalized_seasons[str(int(season))] = sorted({int(ep) for ep in episodes})
+        except Exception:
+            continue
+    return {
+        "tmdb_id": str(tmdb_id),
+        "emby_id": item.get("emby_id", ""),
+        "title": item.get("title", ""),
+        "original_title": item.get("original_title", ""),
+        "year": item.get("year", ""),
+        "library_id": item.get("library_id", ""),
+        "library_name": item.get("library_name", "") or "未分类媒体库",
+        "media_type": "tv",
+        "seasons": normalized_seasons,
+    }
+
+
+def upsert_discover_series_entry(
+    *,
+    server_idx: int = 0,
+    library_id: str = "",
+    library_name: str = "",
+    emby_id: str = "",
+    tmdb_id: str = "",
+    title: str = "",
+    original_title: str = "",
+    year: str = "",
+    seasons: dict | None = None,
+) -> dict | None:
+    """Incrementally update one Series in the persisted discover index."""
+    tmdb_id = str(tmdb_id or "").strip()
+    if not tmdb_id:
+        return None
+    library_id = str(library_id or "").strip()
+    discover_key = f"{tmdb_id}:tv:{library_id}" if library_id else f"{tmdb_id}:tv"
+    item = {
+        "emby_id": str(emby_id or ""),
+        "tmdb_id": tmdb_id,
+        "media_type": "tv",
+        "title": str(title or ""),
+        "original_title": str(original_title or ""),
+        "year": str(year or "")[:4],
+        "library_id": library_id,
+        "library_name": str(library_name or "") or "未分类媒体库",
+    }
+    season_map = _normalize_episode_counts_for_discover(seasons)
+    now = _now_ts()
+    with _discover_index_lock:
+        _discover_items[discover_key] = item
+        _discover_series_index[discover_key] = season_map
+        _discover_series_index[tmdb_id] = season_map
+        _discover_index[f"tmdb:{tmdb_id}:tv"] = tmdb_id
+        for field in ("title", "original_title"):
+            norm = _normalize_for_discover(item.get(field, "") or "")
+            if not norm:
+                continue
+            if item.get("year"):
+                _discover_index[f"title:{norm}:{item['year']}:tv"] = tmdb_id
+            _discover_index.setdefault(f"title:{norm}:tv", tmdb_id)
+        _discover_index_meta.update({
+            "version": DISCOVER_INDEX_VERSION,
+            "updated_at": now,
+            "server_idx": int(server_idx or 0),
+            "item_count": len(_discover_items),
+            "index_key_count": len(_discover_index),
+            "series_count": len(_discover_series_index),
+            "reason": "webhook:incremental_series",
+        })
+        payload = {
+            "_meta": dict(_discover_index_meta),
+            "discover_index": dict(_discover_index),
+            "series_index": _serialize_discover_series_index(_discover_series_index),
+            "items": dict(_discover_items),
+        }
+        entry = _build_discover_series_entry_from_item(discover_key, item)
+    try:
+        _save_discover_index_file(payload)
+    except Exception as e:
+        logger.warning(f"[EmbyLibCache] Emby 可用性索引增量落盘失败: {e}")
+    return entry
+
+
+def remove_discover_series_entry(*, tmdb_id: str = "", library_id: str = "") -> bool:
+    """Remove one Series from the discover index when webhook has enough identity data."""
+    tmdb_id = str(tmdb_id or "").strip()
+    if not tmdb_id:
+        return False
+    library_id = str(library_id or "").strip()
+    removed = False
+    now = _now_ts()
+    with _discover_index_lock:
+        if library_id:
+            candidates = [f"{tmdb_id}:tv:{library_id}", f"{tmdb_id}:tv"]
+        else:
+            candidates = [
+                key for key in _discover_items
+                if str(key) == f"{tmdb_id}:tv" or str(key).startswith(f"{tmdb_id}:tv:")
+            ]
+        for key in candidates:
+            if key in _discover_items:
+                removed = True
+                _discover_items.pop(key, None)
+                _discover_series_index.pop(key, None)
+        if not any(str(key).startswith(f"{tmdb_id}:tv:") or str(key) == f"{tmdb_id}:tv" for key in _discover_items):
+            _discover_series_index.pop(tmdb_id, None)
+            _discover_index.pop(f"tmdb:{tmdb_id}:tv", None)
+        if not removed:
+            return False
+        _discover_index_meta.update({
+            "version": DISCOVER_INDEX_VERSION,
+            "updated_at": now,
+            "item_count": len(_discover_items),
+            "index_key_count": len(_discover_index),
+            "series_count": len(_discover_series_index),
+            "reason": "webhook:remove_series",
+        })
+        payload = {
+            "_meta": dict(_discover_index_meta),
+            "discover_index": dict(_discover_index),
+            "series_index": _serialize_discover_series_index(_discover_series_index),
+            "items": dict(_discover_items),
+        }
+    try:
+        _save_discover_index_file(payload)
+    except Exception as e:
+        logger.warning(f"[EmbyLibCache] Emby 可用性索引删除落盘失败: {e}")
+    return True
+
+
+def patch_discover_series_episode(*, emby_id: str = "", season: int | str | None = None, episode: int | str | None = None, present: bool = True) -> dict | None:
+    """Patch one episode in one cached Series when webhook payload lacks full series metadata."""
+    emby_id = str(emby_id or "").strip()
+    if not emby_id:
+        return None
+    try:
+        season_num = int(season)
+        episode_num = int(episode)
+    except Exception:
+        return None
+    if season_num <= 0 or episode_num <= 0:
+        return None
+    now = _now_ts()
+    with _discover_index_lock:
+        hit_key = ""
+        hit_item = None
+        for key, item in _discover_items.items():
+            if isinstance(item, dict) and item.get("media_type") == "tv" and str(item.get("emby_id") or "") == emby_id:
+                hit_key = key
+                hit_item = item
+                break
+        if not hit_key or not hit_item:
+            return None
+        tmdb_id = str(hit_item.get("tmdb_id") or hit_key.split(":")[0])
+        season_map = _discover_series_index.get(hit_key) or _discover_series_index.get(tmdb_id, {})
+        season_map = {int(s): set(eps or []) for s, eps in (season_map or {}).items()}
+        episodes = season_map.setdefault(season_num, set())
+        if present:
+            episodes.add(episode_num)
+        else:
+            episodes.discard(episode_num)
+            if not episodes:
+                season_map.pop(season_num, None)
+        _discover_series_index[hit_key] = season_map
+        _discover_series_index[tmdb_id] = season_map
+        _discover_index_meta.update({
+            "version": DISCOVER_INDEX_VERSION,
+            "updated_at": now,
+            "item_count": len(_discover_items),
+            "index_key_count": len(_discover_index),
+            "series_count": len(_discover_series_index),
+            "reason": "webhook:patch_episode",
+        })
+        payload = {
+            "_meta": dict(_discover_index_meta),
+            "discover_index": dict(_discover_index),
+            "series_index": _serialize_discover_series_index(_discover_series_index),
+            "items": dict(_discover_items),
+        }
+        entry = _build_discover_series_entry_from_item(hit_key, hit_item)
+    try:
+        _save_discover_index_file(payload)
+    except Exception as e:
+        logger.warning(f"[EmbyLibCache] Emby 可用性索引单集落盘失败: {e}")
+    return entry
 
 
 def schedule_discover_index_refresh(server_idx: int = 0, reason: str = "manual", delay_sec: float = 30, force: bool = False) -> None:

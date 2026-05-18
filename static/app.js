@@ -453,6 +453,8 @@ createApp({
                 message: '',
                 logs: [],
                 polling: false,
+                image: '',
+                originalImage: '',
             },
             versionDialog: {
                 visible: false,
@@ -460,6 +462,8 @@ createApp({
                 value: '',
             },
         });
+        const DOCKER_UPDATE_CACHE_KEY = 'chillposter-docker-update-cache';
+        const DOCKER_UPDATE_CACHE_TTL_MS = 30 * 60 * 1000;
         let dockerSilentRefreshTimer = null;
         let dockerUpdatePollTimer = null;
 
@@ -615,6 +619,66 @@ createApp({
             dockerManager.imageDrafts = next;
         };
 
+        const saveDockerUpdateCache = () => {
+            try {
+                localStorage.setItem(DOCKER_UPDATE_CACHE_KEY, JSON.stringify({
+                    updatedAt: dockerManager.lastUpdateCheckAt || Date.now(),
+                    updateMap: dockerManager.updateMap || {},
+                }));
+            } catch (e) {}
+        };
+
+        const restoreDockerUpdateCache = () => {
+            try {
+                const raw = localStorage.getItem(DOCKER_UPDATE_CACHE_KEY);
+                if (!raw) return false;
+                const payload = JSON.parse(raw);
+                const updatedAt = Number(payload?.updatedAt || 0);
+                const updateMap = payload?.updateMap;
+                if (!updatedAt || !updateMap || typeof updateMap !== 'object') {
+                    localStorage.removeItem(DOCKER_UPDATE_CACHE_KEY);
+                    return false;
+                }
+                dockerManager.updateMap = updateMap;
+                dockerManager.lastUpdateCheckAt = updatedAt;
+                return true;
+            } catch (e) {
+                try { localStorage.removeItem(DOCKER_UPDATE_CACHE_KEY); } catch (_) {}
+                return false;
+            }
+        };
+
+        const pruneDockerUpdateCacheForContainers = () => {
+            const images = new Set(dockerManager.containers.map(item => item.image).filter(Boolean));
+            if (!images.size || !dockerManager.updateMap || typeof dockerManager.updateMap !== 'object') return;
+            const next = {};
+            for (const [image, info] of Object.entries(dockerManager.updateMap)) {
+                if (images.has(image)) next[image] = info;
+            }
+            if (Object.keys(next).length !== Object.keys(dockerManager.updateMap).length) {
+                dockerManager.updateMap = next;
+                saveDockerUpdateCache();
+            }
+        };
+
+        const clearDockerUpdateForImages = (images = []) => {
+            const targets = [...new Set((images || []).map(item => String(item || '').trim()).filter(Boolean))];
+            if (!targets.length || !dockerManager.updateMap || typeof dockerManager.updateMap !== 'object') return;
+            let changed = false;
+            const next = { ...dockerManager.updateMap };
+            for (const image of targets) {
+                if (Object.prototype.hasOwnProperty.call(next, image)) {
+                    delete next[image];
+                    changed = true;
+                }
+            }
+            if (changed) {
+                dockerManager.updateMap = next;
+                dockerManager.lastUpdateCheckAt = Date.now();
+                saveDockerUpdateCache();
+            }
+        };
+
         const fetchDockerStatus = async () => {
             try {
                 const res = await axios.get('/api/docker/status');
@@ -632,8 +696,9 @@ createApp({
                 const res = await axios.get('/api/docker/containers');
                 dockerManager.containers = res.data?.containers || [];
                 syncDockerImageDrafts();
+                pruneDockerUpdateCacheForContainers();
                 dockerManager.lastRefreshAt = Date.now();
-                if (options.checkUpdates || (!dockerManager.lastUpdateCheckAt || Date.now() - dockerManager.lastUpdateCheckAt > 30 * 60 * 1000)) {
+                if (!options.skipAutoCheck && (options.checkUpdates || (!dockerManager.lastUpdateCheckAt || Date.now() - dockerManager.lastUpdateCheckAt > DOCKER_UPDATE_CACHE_TTL_MS))) {
                     checkDockerUpdates({ silent: true });
                 }
             } catch (e) {
@@ -660,6 +725,7 @@ createApp({
             if (dockerManager.activeTab === 'images') {
                 await fetchDockerImages();
             } else {
+                if (!dockerManager.lastUpdateCheckAt) restoreDockerUpdateCache();
                 await fetchDockerContainers();
             }
         };
@@ -673,6 +739,7 @@ createApp({
                 const res = await axios.post('/api/docker/containers/check_updates', { images });
                 dockerManager.updateMap = res.data?.images || {};
                 dockerManager.lastUpdateCheckAt = Date.now();
+                saveDockerUpdateCache();
                 if (!silent) {
                     const failedCount = Object.values(dockerManager.updateMap).filter(item => item?.message).length;
                     const updateCount = dockerUpdateCount.value;
@@ -737,7 +804,13 @@ createApp({
                 if (['finished', 'error'].includes(task.status)) {
                     stopDockerUpdatePolling();
                     if (task.status === 'finished') {
-                        await fetchDockerContainers({ checkUpdates: true });
+                        clearDockerUpdateForImages([
+                            task.image,
+                            task.result?.image,
+                            dockerManager.updateDialog.image,
+                            dockerManager.updateDialog.originalImage,
+                        ]);
+                        await fetchDockerContainers({ skipAutoCheck: true });
                     }
                 }
             } catch (e) {
@@ -763,6 +836,8 @@ createApp({
                 stepNo: 0,
                 totalSteps: 6,
                 message: '更新任务已启动',
+                image,
+                originalImage: container.image || '',
                 logs: [{
                     time: new Date().toLocaleTimeString(),
                     level: 'info',
