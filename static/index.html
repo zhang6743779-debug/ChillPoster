@@ -3519,8 +3519,11 @@
                                 <div v-if="dockerManager.loading" class="empty-state-card">正在加载容器...</div>
                                 <div v-else-if="filteredDockerContainers.length === 0" class="empty-state-card">暂无容器</div>
                                 <div v-else class="docker-container-grid">
-                                    <div v-for="container in filteredDockerContainers" :key="container.id" class="docker-container-card" :class="{running: container.state === 'running', stopped: container.state !== 'running'}">
+                                    <div v-for="container in filteredDockerContainers" :key="container.id" class="docker-container-card" :class="{running: container.state === 'running', stopped: container.state !== 'running', updatable: dockerManager.updateMap[container.image]?.update_available}">
                                         <div class="docker-card-status-rail"></div>
+                                        <div v-if="dockerManager.updateMap[container.image]?.update_available" class="docker-update-corner">
+                                            <i class="fa-solid fa-arrow-up"></i><span>NEW</span>
+                                        </div>
                                         <div class="docker-card-head">
                                             <div class="docker-title-wrap">
                                                 <div class="docker-container-icon" :class="container.state === 'running' ? 'running' : 'stopped'">
