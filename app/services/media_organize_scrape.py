@@ -397,14 +397,20 @@ def _generate_strm_on_organize(result: dict, media_type: str, config_data: dict,
         return 0
 
 
-def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict) -> int:
+def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict, cancel_event: Optional[threading.Event] = None) -> int:
     """整理完成后，批量调用 strm 服务增量生成 strm，并下载字幕文件到本地。"""
     try:
         from app.services.strm_service import strm_service
 
+        if cancel_event and cancel_event.is_set():
+            return 0
+
         items: list[dict] = []
         remote_file_paths: list[str] = []
         for payload in payloads or []:
+            if cancel_event and cancel_event.is_set():
+                logger.info("[MediaOrganize] STRM 批量生成收到取消信号，停止构建载荷")
+                return 0
             batch_items, remote_file_path = _build_strm_items_on_organize(
                 payload.get("result", {}),
                 payload.get("media_type", ""),
@@ -421,11 +427,13 @@ def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict) ->
         if not items:
             return 0
 
-        inc_result = strm_service.process_incremental_items(items)
-        if not inc_result.get("matched_tasks"):
-            return 0
-
+        inc_result = strm_service.process_incremental_items(items, cancel_event=cancel_event)
         generated_count = int(inc_result.get("generated", 0) or 0)
+        if inc_result.get("status") == "cancelled":
+            logger.info(f"[MediaOrganize] STRM 批量生成已取消，已生成: {generated_count}")
+        if not inc_result.get("matched_tasks"):
+            return generated_count
+
         if generated_count == 0:
             skip_reasons = inc_result.get("skip_reasons") or {}
             if skip_reasons:

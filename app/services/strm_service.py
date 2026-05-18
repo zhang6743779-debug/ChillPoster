@@ -1711,7 +1711,14 @@ class StrmService:
                     matched_len = len(task_remote)
         return matched
 
-    def _process_incremental_task_items(self, task_config: dict, items: list, client: P115Client, cookie: str = "") -> dict:
+    def _process_incremental_task_items(
+        self,
+        task_config: dict,
+        items: list,
+        client: P115Client,
+        cookie: str = "",
+        cancel_event: Optional[Event] = None,
+    ) -> dict:
         task_name = task_config.get("name", "增量同步")
         remote_path = str(task_config.get("remote_path", "") or "").rstrip("/")
         local_path = task_config.get("local_path", "")
@@ -1733,7 +1740,7 @@ class StrmService:
         stats = self._build_incremental_stats()
         folder_counter = _build_folder_counter()
         completed_dl_futures: set = set()
-        cancel_event = Event()
+        cancel_event = cancel_event or Event()
         write_queue: Queue = Queue(maxsize=WRITE_QUEUE_MAX)
         result_queue: Queue = Queue()
         io_threads: List[Thread] = []
@@ -1814,6 +1821,9 @@ class StrmService:
         tmdb_plans = []
         try:
             for item in items:
+                if cancel_event and cancel_event.is_set():
+                    logger.info(f"[STRM] 增量任务收到取消信号: {task_name}")
+                    break
                 if item.get("is_dir"):
                     continue
                 stats["matched_items"] += 1
@@ -1841,6 +1851,9 @@ class StrmService:
                 )
                 if result and result.status == "fail":
                     stats["failed"] += 1
+                elif result and result.status == "cancelled":
+                    logger.info(f"[STRM] 增量任务取消中: {task_name}")
+                    break
                 elif result and result.status == "skip":
                     stats["skipped"] += 1
                     _record_skip(result.message)
@@ -1857,10 +1870,14 @@ class StrmService:
             result_queue.join()
             collector_thread.join(timeout=5)
 
-            _collect_finished_downloads(block=True)
-            dl_executor.shutdown(wait=True, cancel_futures=False)
+            if cancel_event and cancel_event.is_set():
+                _collect_finished_downloads(block=False)
+                dl_executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                _collect_finished_downloads(block=True)
+                dl_executor.shutdown(wait=True, cancel_futures=False)
 
-            if dl_retry_items:
+            if dl_retry_items and not (cancel_event and cancel_event.is_set()):
                 logger.info(f"[STRM] 增量附属重试开始，共 {len(dl_retry_items)} 项")
                 retry_ok, retry_fail = _batch_download_aux(
                     client,
@@ -1876,23 +1893,26 @@ class StrmService:
                 stats["retry_success"] += retry_ok
                 stats["retry_failed"] += retry_fail
 
-            if download_tmdb_metadata and tmdb_plans:
+            if download_tmdb_metadata and tmdb_plans and not (cancel_event and cancel_event.is_set()):
                 _apply_tmdb_fallbacks(tmdb_plans, scraping_config, tmdb_api_key, stats, "增量", cancel_event)
         finally:
             dl_executor.shutdown(wait=False, cancel_futures=True)
 
+        was_cancelled = bool(cancel_event and cancel_event.is_set())
         logger.info(
-            f"[STRM] 增量任务完成: {task_name} | 生成:{stats['generated']} 下载:{stats['downloaded']} "
+            f"[STRM] 增量任务{'已取消' if was_cancelled else '完成'}: {task_name} | 生成:{stats['generated']} 下载:{stats['downloaded']} "
             f"TMDb补齐:{stats['tmdb_generated']} TMDb跳过:{stats['tmdb_skipped']} TMDb失败:{stats['tmdb_failed']} "
             f"跳过:{stats['skipped']} 失败:{stats['failed']} 重试成功:{stats['retry_success']} 重试失败:{stats['retry_failed']}"
         )
         return {
-            "status": "error" if stats["failed"] else "ok",
+            "status": "cancelled" if was_cancelled else ("error" if stats["failed"] else "ok"),
             "task": task_name,
             **stats,
         }
 
-    def process_incremental_items(self, items: list) -> dict:
+    def process_incremental_items(self, items: list, cancel_event: Optional[Event] = None) -> dict:
+        if cancel_event and cancel_event.is_set():
+            return {"status": "cancelled", "matched_tasks": 0, "matched_items": 0, "results": []}
         if not items:
             return {"status": "skip", "matched_tasks": 0, "matched_items": 0, "results": []}
 
@@ -1902,6 +1922,14 @@ class StrmService:
         unmatched_items = 0
 
         for item in items:
+            if cancel_event and cancel_event.is_set():
+                return {
+                    "status": "cancelled",
+                    "matched_tasks": 0,
+                    "matched_items": 0,
+                    "unmatched_items": unmatched_items,
+                    "results": [],
+                }
             remote_item_path = str(item.get("path", "") or "")
             match = self._match_task_for_path(remote_item_path, tasks)
             if not match:
@@ -1923,21 +1951,38 @@ class StrmService:
 
         results = []
         summary = self._build_incremental_stats()
+        cancelled = False
         for data in grouped.values():
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
             task = data["task"]
             task_items = data["items"]
             drive_index = task.get("drive_index", 0)
             client = self._get_client(drive_index)
             cookie = self._get_cookie(drive_index)
-            task_result = self._process_incremental_task_items(task, task_items, client, cookie)
+            task_result = self._process_incremental_task_items(
+                task,
+                task_items,
+                client,
+                cookie,
+                cancel_event=cancel_event,
+            )
             results.append(task_result)
             for key in ("generated", "generated_dirs", "downloaded", "downloaded_dirs", "download_failed", "failed", "skipped", "retry_success", "retry_failed", "matched_items"):
                 summary[key] += int(task_result.get(key, 0) or 0)
             for reason, count in (task_result.get("skip_reasons") or {}).items():
                 summary["skip_reasons"][reason] = int(summary["skip_reasons"].get(reason, 0) or 0) + int(count or 0)
+            if task_result.get("status") == "cancelled":
+                cancelled = True
+                break
 
         return {
-            "status": "error" if summary["failed"] else "ok",
+            "status": (
+                "cancelled"
+                if cancelled or (cancel_event and cancel_event.is_set())
+                else ("error" if summary["failed"] else "ok")
+            ),
             "matched_tasks": len(results),
             "matched_items": summary["matched_items"],
             "unmatched_items": unmatched_items,

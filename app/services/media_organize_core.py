@@ -81,6 +81,8 @@ def _read_positive_int_env(name: str, default: int) -> int:
 
 _MEDIA_METADATA_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_METADATA_WORKERS", 20)
 _MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 20)
+_MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
+_MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 
 
 _WASH_CODEC_MULTIPLIERS = {
@@ -1168,12 +1170,17 @@ async def _run_organize_async(run_id: str, req):
     strm_generated_count = 0
     metadata_executor = None
     pending_library_cache_items: dict[str, dict] = {}
-    pending_strm_payloads: list[dict] = []
-    pending_emby_library_checks: list[dict] = []
     pending_refresh_payloads: list[dict] = []
     pending_duplicate_moves: list[dict] = []
     pending_wash_reject_moves: list[dict] = []
     duplicate_batch_size = 50000
+    organize_cancel_event = threading.Event()
+    _raise_cancel_if_requested = globals()["_raise_if_organize_cancelled"]
+
+    def _raise_if_organize_cancelled(current_run_id: str):
+        if _is_organize_cancel_requested(current_run_id):
+            organize_cancel_event.set()
+        _raise_cancel_if_requested(current_run_id)
 
     def _flush_pending_library_cache_updates():
         nonlocal pending_library_cache_items
@@ -1236,28 +1243,33 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
-    def _flush_pending_media_server_refreshes(immediate: bool = False):
+    def _flush_pending_media_server_refreshes(immediate: bool = False, payloads: Optional[list[dict]] = None):
         nonlocal pending_refresh_payloads
-        if not pending_refresh_payloads:
-            return 0
-        payloads = pending_refresh_payloads
-        pending_refresh_payloads = []
+        if payloads is None:
+            if not pending_refresh_payloads:
+                return 0
+            payloads_to_flush = pending_refresh_payloads
+            pending_refresh_payloads = []
+        else:
+            payloads_to_flush = list(payloads or [])
+            if not payloads_to_flush:
+                return 0
         log_prefix = "分组完成后立即触发媒体库刷新" if immediate else "元数据任务完成后触发媒体库刷新"
-        logger.info(f"[MediaOrganize] {log_prefix}: {len(payloads)} 个路径")
+        logger.info(f"[MediaOrganize] {log_prefix}: {len(payloads_to_flush)} 个路径")
         if immediate:
             threading.Thread(
                 target=media_server_refresh.refresh_immediately,
-                args=(payloads,),
+                args=(payloads_to_flush,),
                 daemon=True,
             ).start()
-            return len(payloads)
-        for refresh_payload in payloads:
+            return len(payloads_to_flush)
+        for refresh_payload in payloads_to_flush:
             threading.Thread(
                 target=media_server_refresh.refresh,
                 args=(refresh_payload,),
                 daemon=True,
             ).start()
-        return len(payloads)
+        return len(payloads_to_flush)
 
     try:
         config_data = await _load_config_data()
@@ -1281,7 +1293,7 @@ async def _run_organize_async(run_id: str, req):
 
         # 3. 缓存已识别的 TMDb 数据（同名文件不用重复查）
         tmdb_cache = {}  # key: (tmdb_id, media_type) → tmdb_data
-        _tmdb_fetch_locks: dict[int, asyncio.Lock] = {}  # 防止并发组对同一部剧重复聚合
+        _tmdb_fetch_locks: dict[tuple, asyncio.Lock] = {}  # 防止并发组对同一部剧重复聚合
 
         # 4. 本次任务的搜索失败缓存
         failed_cache = set()
@@ -1338,6 +1350,61 @@ async def _run_organize_async(run_id: str, req):
                 logger.info(f"[MediaOrganize] TMDb失败: key={key} 标题={first_parsed.get('title','')}")
             return key, result
 
+        async def _fetch_tmdb_data_for_group(search_result: Optional[dict], group: list[tuple]) -> Optional[dict]:
+            if not search_result or not group:
+                return None
+            _, first_parsed, _ = group[0]
+            tmdb_id = search_result["tmdb_id"]
+            media_type = first_parsed["media_type"]
+            season_num = search_result.get("season", first_parsed["season"])
+            cache_key = (tmdb_id, media_type)
+            if cache_key in tmdb_cache:
+                return tmdb_cache[cache_key]
+            if cache_key not in _tmdb_fetch_locks:
+                _tmdb_fetch_locks[cache_key] = asyncio.Lock()
+            async with _tmdb_fetch_locks[cache_key]:
+                if cache_key not in tmdb_cache:
+                    tmdb_cache[cache_key] = await _fetch_tmdb_data(tmdb_id, media_type, season_num, first_parsed)
+                return tmdb_cache[cache_key]
+
+        async def _identify_group(key, group):
+            try:
+                _, search_result = await _search_group(key, group)
+                search_cache[key] = search_result
+            except _OrganizeCancelledError:
+                raise
+            except asyncio.CancelledError:
+                raise _OrganizeCancelledError("用户取消")
+            except Exception as e:
+                logger.error(f"[MediaOrganize] 搜索异常: {e}")
+                search_result = None
+                search_cache[key] = None
+
+            tmdb_data = None
+            error_message = ""
+            if search_result:
+                try:
+                    tmdb_data = await _fetch_tmdb_data_for_group(search_result, group)
+                    if not tmdb_data:
+                        error_message = f"无法获取 TMDb 数据 (ID: {search_result.get('tmdb_id', '')})"
+                except _OrganizeCancelledError:
+                    raise
+                except asyncio.CancelledError:
+                    raise _OrganizeCancelledError("用户取消")
+                except Exception as e:
+                    logger.error(f"[MediaOrganize] TMDb详情获取异常: {e}")
+                    error_message = f"无法获取 TMDb 数据: {e}"
+            else:
+                error_message = "无法识别媒体信息"
+
+            return {
+                "key": key,
+                "group": group,
+                "search_result": search_result,
+                "tmdb_data": tmdb_data,
+                "error_message": error_message,
+            }
+
         logger.debug("[MediaOrganize] 阶段1/4: 加载源目录快照并前置SHA1排重")
         _update_streaming_progress(
             run_id,
@@ -1350,26 +1417,22 @@ async def _run_organize_async(run_id: str, req):
         )
 
         # === Phase 2+3：SHA1 排重完成后按媒体分组整理 ===
-        async def _search_and_organize(key, group):
+        async def _organize_identified_group(key, group, identified: Optional[dict] = None):
             nonlocal success_count, strm_generated_count
             group_started_at = _time.time()
             loop = asyncio.get_event_loop()
-            try:
-                sr = await _search_group(key, group)
-                _, result = sr
-                search_cache[key] = result
-            except _OrganizeCancelledError:
-                raise
-            except asyncio.CancelledError:
-                raise _OrganizeCancelledError("用户取消")
-            except Exception as e:
-                logger.error(f"[MediaOrganize] 搜索异常: {e}")
-                search_cache[key] = None
-
+            identified = identified or {}
+            identified_search_result = identified.get("search_result")
+            identified_tmdb_data = identified.get("tmdb_data")
+            identified_error_message = str(identified.get("error_message", "") or "")
+            search_cache[key] = identified_search_result
             group_failed = []
             tv_root_scraped = set()
             season_scraped = set()
             pending_tv_batches = {}
+            group_pending_strm_payloads: list[dict] = []
+            group_pending_emby_library_checks: list[dict] = []
+            group_pending_refresh_payloads: list[dict] = []
             ffprobe_batch_profiles: dict = {}
             ffprobe_batch_sizes: dict = {}
             ffprobe_batch_segment_samples: dict = {}
@@ -1448,10 +1511,10 @@ async def _run_organize_async(run_id: str, req):
                 file_item = vf
 
                 try:
-                    search_result = search_cache.get(key)
+                    search_result = identified_search_result
 
                     if not search_result:
-                        results.append({"file": file_name, "status": "error", "message": "无法识别媒体信息"})
+                        results.append({"file": file_name, "status": "error", "message": identified_error_message or "无法识别媒体信息"})
                         group_failed.append(file_item)
                         continue
 
@@ -1460,22 +1523,10 @@ async def _run_organize_async(run_id: str, req):
                     season_num = search_result.get("season", parsed["season"])
                     episode_num = search_result.get("episode", parsed["episode"])
 
-                    # 获取 TMDb 数据（带缓存 + 并发锁，防止同一部剧被多个组重复聚合）
-                    cache_key = (tmdb_id, media_type)
-                    if cache_key not in tmdb_cache:
-                        if tmdb_id not in _tmdb_fetch_locks:
-                            _tmdb_fetch_locks[tmdb_id] = asyncio.Lock()
-                        async with _tmdb_fetch_locks[tmdb_id]:
-                            if cache_key not in tmdb_cache:
-                                tmdb_data = await _fetch_tmdb_data(tmdb_id, media_type, season_num, parsed)
-                                tmdb_cache[cache_key] = tmdb_data
-                            else:
-                                tmdb_data = tmdb_cache[cache_key]
-                    else:
-                        tmdb_data = tmdb_cache[cache_key]
+                    tmdb_data = identified_tmdb_data
                     if not tmdb_data:
                         results.append({"file": file_name, "status": "error",
-                                       "message": f"无法获取 TMDb 数据 (ID: {tmdb_id})"})
+                                       "message": identified_error_message or f"无法获取 TMDb 数据 (ID: {tmdb_id})"})
                         group_failed.append(file_item)
                         continue
 
@@ -1803,13 +1854,13 @@ async def _run_organize_async(run_id: str, req):
                                 category_path=category_path,
                                 effective_target_cid=str(effective_target_cid),
                                 library_task_key=library_task_key,
-                                        library_index=library_index,
+                                library_index=library_index,
                                 config_data=config_data,
                                 metadata_executor=metadata_executor,
                                 pending_library_cache_items=pending_library_cache_items,
-                                pending_strm_payloads=pending_strm_payloads,
-                                pending_emby_library_checks=pending_emby_library_checks,
-                                pending_refresh_payloads=pending_refresh_payloads,
+                                pending_strm_payloads=group_pending_strm_payloads,
+                                pending_emby_library_checks=group_pending_emby_library_checks,
+                                pending_refresh_payloads=group_pending_refresh_payloads,
                             )
                         else:
                             group_failed.append(file_item)
@@ -1998,13 +2049,13 @@ async def _run_organize_async(run_id: str, req):
                             category_path=plan_item.get("category_path", ""),
                             effective_target_cid=plan_item.get("effective_target_cid", ""),
                             library_task_key=library_task_key,
-                                library_index=library_index,
+                            library_index=library_index,
                             config_data=config_data,
                             metadata_executor=metadata_executor,
                             pending_library_cache_items=pending_library_cache_items,
-                            pending_strm_payloads=pending_strm_payloads,
-                            pending_emby_library_checks=pending_emby_library_checks,
-                            pending_refresh_payloads=pending_refresh_payloads,
+                            pending_strm_payloads=group_pending_strm_payloads,
+                            pending_emby_library_checks=group_pending_emby_library_checks,
+                            pending_refresh_payloads=group_pending_refresh_payloads,
                         )
                     else:
                         group_failed.append(plan_item.get("vf") or {})
@@ -2047,18 +2098,71 @@ async def _run_organize_async(run_id: str, req):
                 )
 
             # === 本组 STRM + 媒体库刷新 ===
-            # 直接生成 STRM（组内完成，不提交到外部线程池）
-            if pending_strm_payloads and config_data.get("auto_sync_strm", False):
+            # 放入后处理队列，释放整理并发槽继续处理下一组。
+            if group_pending_strm_payloads or group_pending_emby_library_checks or group_pending_refresh_payloads:
+                await postprocess_queue.put({
+                    "strm_payloads": list(group_pending_strm_payloads),
+                    "emby_library_checks": list(group_pending_emby_library_checks),
+                    "refresh_payloads": list(group_pending_refresh_payloads),
+                })
+
+        prefetched_source_tree_entries = getattr(req, "_prefetched_source_tree_entries", None)
+        has_prefetched_source_tree = prefetched_source_tree_entries is not None
+        if has_prefetched_source_tree:
+            prefetched_source_tree_entries = list(prefetched_source_tree_entries or [])
+            logger.info(f"[MediaOrganize] 复用源目录稳定快照: 条目={len(prefetched_source_tree_entries)}")
+
+        logger.debug("[MediaOrganize] 阶段4/4: 执行识别/整理/后处理流水线")
+        grouped_items_by_key = {}
+        identify_queue = asyncio.Queue()
+        organize_queue = asyncio.Queue()
+        postprocess_queue = asyncio.Queue()
+        postprocess_batch_queue = asyncio.Queue()
+        identify_worker_tasks = []
+        organize_worker_tasks = []
+        postprocess_batcher_tasks = []
+        postprocess_worker_tasks = []
+        postprocess_seen_emby_checks: set[tuple[str, str]] = set()
+
+        def _merge_postprocess_batches(batch_items: list[dict]) -> dict:
+            merged = {
+                "group_count": len(batch_items),
+                "strm_payloads": [],
+                "emby_library_checks": [],
+                "refresh_payloads": [],
+            }
+            for batch_item in batch_items:
+                if not batch_item:
+                    continue
+                merged["strm_payloads"].extend(list(batch_item.get("strm_payloads") or []))
+                merged["emby_library_checks"].extend(list(batch_item.get("emby_library_checks") or []))
+                merged["refresh_payloads"].extend(list(batch_item.get("refresh_payloads") or []))
+            return merged
+
+        async def _run_postprocess_batch(batch: dict):
+            nonlocal strm_generated_count
+            group_count = int((batch or {}).get("group_count", 1) or 1)
+            strm_payloads = list((batch or {}).get("strm_payloads") or [])
+            emby_checks = list((batch or {}).get("emby_library_checks") or [])
+            refresh_payloads = list((batch or {}).get("refresh_payloads") or [])
+            if group_count > 1:
+                logger.info(
+                    f"[MediaOrganize] 后处理合批: 分组={group_count}, "
+                    f"STRM载荷={len(strm_payloads)}, 刷新路径={len(refresh_payloads)}"
+                )
+
+            if strm_payloads and config_data.get("auto_sync_strm", False):
+                _raise_if_organize_cancelled(run_id)
                 _flush_pending_library_cache_updates()
                 strm_count = await loop.run_in_executor(
-                    None, _generate_strm_batch_on_organize, list(pending_strm_payloads), config_data
+                    None, _generate_strm_batch_on_organize, strm_payloads, config_data, organize_cancel_event
                 )
+                _raise_if_organize_cancelled(run_id)
                 strm_generated_count += strm_count
-                logger.info(f"[MediaOrganize] 本组 STRM 生成完成: {strm_count} 个")
+                logger.info(f"[MediaOrganize] 后处理 STRM 生成完成: {strm_count} 个")
 
-                # Emby 建库检查
                 seen_checks = set()
-                for payload in pending_emby_library_checks:
+                for payload in emby_checks:
                     cp = str(payload.get("category_path", "") or "")
                     mt = str(payload.get("media_type", "") or "")
                     if not cp or cp == "其他":
@@ -2067,71 +2171,151 @@ async def _run_organize_async(run_id: str, req):
                     if dk in seen_checks:
                         continue
                     seen_checks.add(dk)
+                    if dk in postprocess_seen_emby_checks:
+                        continue
+                    postprocess_seen_emby_checks.add(dk)
                     try:
                         from app.services.emby_library_cache import ensure_library_if_needed
                         ensure_library_if_needed(cp, media_type=mt or None)
                     except Exception as e:
                         logger.debug(f"[EmbyLib] 建库检查失败: {e}")
 
-            pending_strm_payloads.clear()
-            pending_emby_library_checks.clear()
+            _flush_pending_media_server_refreshes(immediate=True, payloads=refresh_payloads)
+            _update_streaming_progress(
+                run_id,
+                scanned_video_count=scanned_video_count,
+                processed_result_count=len(results),
+                success_count=success_count,
+                error_count=_count_error_results(results),
+                strm_generated_count=strm_generated_count,
+                scan_complete=scan_complete,
+            )
 
-            _flush_pending_media_server_refreshes(immediate=True)
-
-        prefetched_source_tree_entries = getattr(req, "_prefetched_source_tree_entries", None)
-        has_prefetched_source_tree = prefetched_source_tree_entries is not None
-        if has_prefetched_source_tree:
-            prefetched_source_tree_entries = list(prefetched_source_tree_entries or [])
-            logger.info(f"[MediaOrganize] 复用源目录稳定快照: 条目={len(prefetched_source_tree_entries)}")
-
-        logger.debug("[MediaOrganize] 阶段4/4: 执行整理与刮削")
-        _semaphore = asyncio.Semaphore(_MEDIA_ORGANIZE_CONCURRENCY)
-        in_flight_group_tasks = []
-        max_in_flight_group_tasks = 40
-        grouped_items_by_key = {}
-
-        async def _sem_search_and_organize(key, group):
-            async with _semaphore:
-                await _search_and_organize(key, group)
-
-        def _submit_ready_group(group_key, group_items):
-            if not group_key or not group_items:
-                return False
-            in_flight_group_tasks.append(asyncio.create_task(_sem_search_and_organize(group_key, list(group_items))))
-            return True
-
-        def _drain_finished_group_tasks():
-            finished = [task for task in in_flight_group_tasks if task.done()]
-            for task in finished:
-                in_flight_group_tasks.remove(task)
+        async def _identify_worker(worker_id: int):
+            while True:
+                item = await identify_queue.get()
                 try:
-                    task.result()
+                    if item is None:
+                        return
+                    key, group = item
+                    identified = await _identify_group(key, group)
+                    await organize_queue.put(identified)
                 except _OrganizeCancelledError:
                     raise
                 except asyncio.CancelledError:
-                    raise _OrganizeCancelledError("用户取消")
-                except Exception as gather_result:
-                    logger.error(f"[MediaOrganize] 分组整理协程异常: {type(gather_result).__name__}: {gather_result}", exc_info=gather_result)
+                    raise
+                except Exception as e:
+                    logger.error(f"[MediaOrganize] 识别工作线程异常 worker={worker_id}: {e}", exc_info=True)
+                    try:
+                        if item is not None:
+                            key, group = item
+                            await organize_queue.put({
+                                "key": key,
+                                "group": group,
+                                "search_result": None,
+                                "tmdb_data": None,
+                                "error_message": f"识别异常: {e}",
+                            })
+                    except Exception:
+                        pass
+                finally:
+                    identify_queue.task_done()
 
-        async def _yield_to_group_tasks(force_wait: bool = False):
-            if not in_flight_group_tasks:
+        async def _organize_worker(worker_id: int):
+            while True:
+                item = await organize_queue.get()
+                try:
+                    if item is None:
+                        return
+                    await _organize_identified_group(item["key"], item["group"], item)
+                except _OrganizeCancelledError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[MediaOrganize] 整理工作线程异常 worker={worker_id}: {e}", exc_info=True)
+                finally:
+                    organize_queue.task_done()
+
+        async def _postprocess_batcher():
+            while True:
+                item = await postprocess_queue.get()
+                batch_items = [item]
+                try:
+                    if item is None:
+                        return
+                    deadline = loop.time() + _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS
+                    while len(batch_items) < _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS:
+                        timeout = deadline - loop.time()
+                        if timeout <= 0:
+                            break
+                        try:
+                            next_item = await asyncio.wait_for(postprocess_queue.get(), timeout=timeout)
+                        except asyncio.TimeoutError:
+                            break
+                        if next_item is None:
+                            postprocess_queue.task_done()
+                            postprocess_queue.put_nowait(None)
+                            break
+                        batch_items.append(next_item)
+                    await postprocess_batch_queue.put(_merge_postprocess_batches(batch_items))
+                except _OrganizeCancelledError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[MediaOrganize] 后处理合批器异常: {e}", exc_info=True)
+                finally:
+                    for _ in batch_items:
+                        postprocess_queue.task_done()
+
+        async def _postprocess_worker(worker_id: int):
+            while True:
+                item = await postprocess_batch_queue.get()
+                try:
+                    if item is None:
+                        return
+                    await _run_postprocess_batch(item)
+                except _OrganizeCancelledError:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"[MediaOrganize] 后处理工作线程异常 worker={worker_id}: {e}", exc_info=True)
+                finally:
+                    postprocess_batch_queue.task_done()
+
+        async def _wait_queue_drained_or_cancel(queue: asyncio.Queue, label: str):
+            join_task = asyncio.create_task(queue.join())
+            try:
+                while not join_task.done():
+                    _raise_if_organize_cancelled(run_id)
+                    await asyncio.wait({join_task}, timeout=0.5)
+                await join_task
+            finally:
+                if not join_task.done():
+                    join_task.cancel()
+                    try:
+                        await join_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        pass
+            logger.debug(f"[MediaOrganize] {label}队列已处理完成")
+
+        async def _stop_queue_workers(queue: asyncio.Queue, worker_tasks: list, label: str):
+            if not worker_tasks:
                 return
-            _raise_if_organize_cancelled(run_id)
-            if force_wait or len(in_flight_group_tasks) >= max_in_flight_group_tasks:
-                done, _ = await asyncio.wait(in_flight_group_tasks, timeout=0.5, return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    return
-            else:
-                await asyncio.sleep(0)
-            _drain_finished_group_tasks()
-
-        async def _wait_group_tasks_until_complete_or_cancel():
-            while in_flight_group_tasks:
-                _raise_if_organize_cancelled(run_id)
-                done, _ = await asyncio.wait(in_flight_group_tasks, timeout=0.5, return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    continue
-                _drain_finished_group_tasks()
+            for _ in worker_tasks:
+                queue.put_nowait(None)
+            worker_results = await asyncio.gather(*worker_tasks, return_exceptions=True)
+            for worker_result in worker_results:
+                if isinstance(worker_result, _OrganizeCancelledError):
+                    raise worker_result
+                if isinstance(worker_result, asyncio.CancelledError):
+                    raise _OrganizeCancelledError("用户取消")
+                if isinstance(worker_result, Exception):
+                    logger.error(f"[MediaOrganize] {label}工作线程退出异常: {worker_result}", exc_info=worker_result)
 
         if not has_prefetched_source_tree:
             logger.debug("[MediaOrganize] 加载源目录完整快照")
@@ -2278,12 +2462,37 @@ async def _run_organize_async(run_id: str, req):
         scan_complete = True
         total_files = scanned_video_count
         logger.info(f"[MediaOrganize] 扫描完成，按媒体聚合为 {len(grouped_items_by_key)} 组")
-        for group_key, group_items in grouped_items_by_key.items():
-            submitted = _submit_ready_group(group_key, group_items)
-            if submitted:
-                await _yield_to_group_tasks()
-        if in_flight_group_tasks:
-            await _wait_group_tasks_until_complete_or_cancel()
+        if grouped_items_by_key:
+            for group_key, group_items in grouped_items_by_key.items():
+                identify_queue.put_nowait((group_key, list(group_items)))
+            logger.info(
+                f"[MediaOrganize] 流水线启动: TMDb识别并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
+                f"整理并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
+                f"后处理并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
+                f"后处理合批窗口={_MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS:.2f}s"
+            )
+            identify_worker_tasks = [
+                asyncio.create_task(_identify_worker(idx + 1))
+                for idx in range(_MEDIA_ORGANIZE_CONCURRENCY)
+            ]
+            organize_worker_tasks = [
+                asyncio.create_task(_organize_worker(idx + 1))
+                for idx in range(_MEDIA_ORGANIZE_CONCURRENCY)
+            ]
+            postprocess_batcher_tasks = [asyncio.create_task(_postprocess_batcher())]
+            postprocess_worker_tasks = [
+                asyncio.create_task(_postprocess_worker(idx + 1))
+                for idx in range(_MEDIA_ORGANIZE_CONCURRENCY)
+            ]
+
+            await _wait_queue_drained_or_cancel(identify_queue, "TMDb识别")
+            await _stop_queue_workers(identify_queue, identify_worker_tasks, "TMDb识别")
+            await _wait_queue_drained_or_cancel(organize_queue, "整理")
+            await _stop_queue_workers(organize_queue, organize_worker_tasks, "整理")
+            await _wait_queue_drained_or_cancel(postprocess_queue, "后处理合批")
+            await _stop_queue_workers(postprocess_queue, postprocess_batcher_tasks, "后处理合批")
+            await _wait_queue_drained_or_cancel(postprocess_batch_queue, "后处理")
+            await _stop_queue_workers(postprocess_batch_queue, postprocess_worker_tasks, "后处理")
 
         _raise_if_organize_cancelled(run_id)
         if pending_wash_reject_moves:
@@ -2376,7 +2585,11 @@ async def _run_organize_async(run_id: str, req):
         }
 
     except _OrganizeCancelledError:
-        for task in list(locals().get("in_flight_group_tasks", []) or []):
+        organize_cancel_event.set()
+        pending_async_tasks = []
+        for task_name in ("in_flight_group_tasks", "identify_worker_tasks", "organize_worker_tasks", "postprocess_batcher_tasks", "postprocess_worker_tasks"):
+            pending_async_tasks.extend(list(locals().get(task_name, []) or []))
+        for task in pending_async_tasks:
             if not task.done():
                 task.cancel()
         try:
@@ -2393,6 +2606,13 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
 
     except Exception as e:
+        organize_cancel_event.set()
+        pending_async_tasks = []
+        for task_name in ("in_flight_group_tasks", "identify_worker_tasks", "organize_worker_tasks", "postprocess_batcher_tasks", "postprocess_worker_tasks"):
+            pending_async_tasks.extend(list(locals().get(task_name, []) or []))
+        for task in pending_async_tasks:
+            if not task.done():
+                task.cancel()
         try:
             _flush_pending_library_cache_updates()
         except Exception as flush_err:

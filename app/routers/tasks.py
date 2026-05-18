@@ -406,8 +406,19 @@ def clear_task_progress(payload: dict = Body(...)):
 @router.post("/api/stop_task")
 def stop_task(payload: dict = Body(...)):
     run_id = payload.get("run_id")
-    if run_id in ACTIVE_TASKS: 
-        ACTIVE_TASKS[run_id]['cancel_requested'] = True
+    if not run_id:
+        return {"status": "not_found", "message": "任务不存在或已结束"}
+
+    task = ACTIVE_TASKS.get(run_id)
+    if not task:
+        logger.warning(f"[Tasks] 取消任务失败，任务不存在: run_id={run_id}")
+        return {"status": "not_found", "message": "任务不存在或已结束"}
+
+    if task.get("status") in ("finished", "error", "stopped"):
+        return {"status": "not_found", "message": "任务已结束"}
+
+    task["cancel_requested"] = True
+    logger.info(f"[Tasks] 已请求取消任务: run_id={run_id}, name={task.get('name', '')}")
     return {"status": "ok"}
 
 @router.get("/api/tasks")

@@ -3779,13 +3779,45 @@ createApp({
             }
         };
 
+        const requestStopOrganizeRun = async (runId) => {
+            if (!runId) return { status: 'not_found', message: '任务不存在或已结束' };
+            const res = await axios.post('/api/stop_task', { run_id: runId });
+            return res.data || {};
+        };
+
         const cancelOrganize = async () => {
-            if (!organizeRunId.value) return;
             try {
-                await axios.post('/api/stop_task', { run_id: organizeRunId.value });
-                showToast('已发送取消请求', 'info');
+                let runId = organizeRunId.value;
+                if (!runId) {
+                    const progressRes = await axios.get('/api/progress');
+                    syncOrganizeTaskFromTaskMap(progressRes.data || {}, { adoptRunning: true });
+                    runId = organizeRunId.value;
+                }
+                if (!runId) {
+                    showToast('未找到正在运行的整理任务', 'warning');
+                    return;
+                }
+
+                let stopResult = await requestStopOrganizeRun(runId);
+                if (stopResult.status !== 'ok') {
+                    const oldRunId = runId;
+                    const progressRes = await axios.get('/api/progress');
+                    const task = syncOrganizeTaskFromTaskMap(progressRes.data || {}, { adoptRunning: true });
+                    runId = organizeRunId.value;
+                    if (task && runId && runId !== oldRunId) {
+                        stopResult = await requestStopOrganizeRun(runId);
+                    }
+                }
+
+                if (stopResult.status === 'ok') {
+                    organizeProgress.status_text = '正在取消...';
+                    showToast('已发送取消请求', 'info');
+                    startOrganizePolling();
+                } else {
+                    showToast(stopResult.message || '未找到正在运行的整理任务', 'warning');
+                }
             } catch (e) {
-                showToast('取消失败: ' + e.message, 'error');
+                showToast('取消失败: ' + (e.response?.data?.detail || e.message), 'error');
             }
         };
 
