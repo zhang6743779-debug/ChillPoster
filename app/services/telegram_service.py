@@ -453,38 +453,12 @@ class TelegramNotifyService:
         path = os.path.join(TELEGRAM_AVATAR_DIR, filename)
         if os.path.exists(path) and os.path.getsize(path) > 0:
             return f"/api/telegram-notify/avatar/{filename}"
-        if getattr(entity, "photo", None):
-            return f"/api/telegram-notify/avatar/{filename}"
         return ""
 
     async def avatar_path_async(self, filename: str) -> str | None:
-        path = self.avatar_path(filename)
-        if path:
-            return path
-        if self.is_monitor_running():
-            return None
-
-        safe_name = os.path.basename(str(filename or ""))
-        if not safe_name.endswith(".jpg"):
-            return None
-        dialog_id = safe_name[:-4]
-        if not dialog_id.lstrip("-").isdigit():
-            return None
-
-        await self._acquire_account_session_lock()
-        client = self._create_account_client()
-        try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                return None
-            entity = await client.get_entity(int(dialog_id))
-            return await self._download_dialog_avatar(client, entity, dialog_id)
-        except Exception as e:
-            logger.debug(f"[Telegram账号] 读取会话头像失败 dialog={dialog_id}: {e}")
-            return None
-        finally:
-            await self._disconnect_account_client(client)
-            self._account_session_lock.release()
+        # 头像请求来自浏览器图片加载，不能为每张图片打开 Telethon session。
+        # 否则会和账号监听共用的 SQLite session 文件抢锁，导致消息监听延迟或漏处理。
+        return self.avatar_path(filename)
 
     async def _download_dialog_avatar(self, client, entity, dialog_id: str) -> str | None:
         if not getattr(entity, "photo", None):
@@ -502,41 +476,55 @@ class TelegramNotifyService:
             logger.debug(f"[Telegram账号] 下载会话头像失败 dialog={dialog_id}: {e}")
         return None
 
+    async def _list_dialogs_with_client(self, client) -> dict:
+        dialogs = []
+        selected_ids = self._selected_dialog_ids()
+        if not await client.is_user_authorized():
+            return {"status": "unauthorized", "message": "请先完成 Telegram 登录", "dialogs": []}
+
+        async for dialog in client.iter_dialogs():
+            if not (dialog.is_group or dialog.is_channel):
+                continue
+            entity = dialog.entity
+            dialog_type = "群组" if dialog.is_group else "频道"
+            dialog_id = str(dialog.id)
+            avatar_url = self._dialog_avatar_url(entity, dialog_id)
+            dialogs.append({
+                "id": dialog_id,
+                "title": dialog.name or "",
+                "type": dialog_type,
+                "username": getattr(entity, "username", "") or "",
+                "avatar_url": avatar_url,
+                "selected": dialog_id in selected_ids,
+            })
+        return {"status": "ok", "dialogs": dialogs}
+
+    async def _list_dialogs_from_monitor_client(self) -> dict | None:
+        loop = self._monitor_loop
+        client = self._monitor_client
+        if not (self.is_monitor_running() and loop and client and loop.is_running()):
+            return None
+        future = asyncio.run_coroutine_threadsafe(self._list_dialogs_with_client(client), loop)
+        try:
+            return await asyncio.wait_for(asyncio.wrap_future(future), timeout=20)
+        except Exception as e:
+            future.cancel()
+            logger.warning(f"[Telegram账号] 通过监听客户端读取列表失败: {e}")
+            return {"status": "error", "message": "监听运行中，读取列表失败，请稍后重试", "dialogs": []}
+
     async def list_dialogs_async(self) -> dict:
-        should_restart_monitor = bool(self._monitor_thread and self._monitor_thread.is_alive())
-        if should_restart_monitor:
-            self.stop_monitor()
+        monitor_result = await self._list_dialogs_from_monitor_client()
+        if monitor_result is not None:
+            return monitor_result
 
         await self._acquire_account_session_lock()
         client = self._create_account_client()
-        dialogs = []
-        selected_ids = self._selected_dialog_ids()
         try:
             await client.connect()
-            if not await client.is_user_authorized():
-                return {"status": "unauthorized", "message": "请先完成 Telegram 登录", "dialogs": []}
-
-            async for dialog in client.iter_dialogs():
-                if not (dialog.is_group or dialog.is_channel):
-                    continue
-                entity = dialog.entity
-                dialog_type = "群组" if dialog.is_group else "频道"
-                dialog_id = str(dialog.id)
-                avatar_url = self._dialog_avatar_url(entity, dialog_id)
-                dialogs.append({
-                    "id": dialog_id,
-                    "title": dialog.name or "",
-                    "type": dialog_type,
-                    "username": getattr(entity, "username", "") or "",
-                    "avatar_url": avatar_url,
-                    "selected": dialog_id in selected_ids,
-                })
+            return await self._list_dialogs_with_client(client)
         finally:
             await self._disconnect_account_client(client)
             self._account_session_lock.release()
-            if should_restart_monitor and self.should_poll():
-                self.start_monitor()
-        return {"status": "ok", "dialogs": dialogs}
 
     def update_selected_dialogs(self, selected_dialogs: list[dict]) -> dict:
         self.config["selected_dialogs"] = self._normalize_selected_dialogs(selected_dialogs)

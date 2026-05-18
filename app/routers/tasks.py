@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from apscheduler.triggers.cron import CronTrigger
 
 from app.schemas import CreateTaskRequest, UpdateTaskRequest, RunTaskRequest, RunSavedTaskRequest, ToggleTaskRequest
-from app.dependencies import ACTIVE_TASKS, update_task_progress
+from app.dependencies import ACTIVE_TASKS, update_task_progress, cleanup_stale_tasks
 from app.services.task_service import execute_task_logic, task_service_instance
 from core.configs import TASKS_FILE, APP_LOG_FILE, TEMPLATES_DIR
 from core.logger import logger, should_hide_console_log_line
@@ -18,6 +18,8 @@ from core.logger import logger, should_hide_console_log_line
 router = APIRouter(tags=["Tasks"])
 
 MAX_LOG_LINES = 5000
+DEFAULT_LOG_RESPONSE_LIMIT = 1000
+MAX_LOG_RESPONSE_LIMIT = 1000
 VALID_LOG_LEVELS = {"ALL", "INFO", "DEBUG", "WARNING", "ERROR"}
 LOG_CATEGORY_KEYWORDS = {
     "PLAYBACK_302": (
@@ -153,6 +155,13 @@ def is_keyword_match(line: str, keyword: str) -> bool:
         return True
     return keyword.lower() in line.lower()
 
+def normalize_log_limit(limit: int | None) -> int:
+    try:
+        value = int(limit or DEFAULT_LOG_RESPONSE_LIMIT)
+    except Exception:
+        value = DEFAULT_LOG_RESPONSE_LIMIT
+    return max(50, min(MAX_LOG_RESPONSE_LIMIT, value))
+
 def parse_event_id(value) -> int | None:
     if value is None or value == "":
         return None
@@ -210,19 +219,21 @@ def publish_log_line(line: str):
         with LOG_STREAM_LOCK:
             LOG_SUBSCRIBERS[:] = [s for s in LOG_SUBSCRIBERS if s["id"] not in dead_ids]
 
-def snapshot_recent_logs(level: str = "ALL", keyword: str = "", category: str = "ALL") -> str:
+def snapshot_recent_logs(level: str = "ALL", keyword: str = "", category: str = "ALL", limit: int | None = None) -> str:
     filter_level = parse_filter_level(level)
     filter_keyword = normalize_keyword(keyword)
     filter_category = parse_filter_category(category)
+    limit_value = normalize_log_limit(limit)
     with LOG_STREAM_LOCK:
-        return "".join(
+        matched = [
             entry["line"]
-            for entry in LOG_BUFFER
+            for entry in reversed(LOG_BUFFER)
             if is_level_match(entry["level"], filter_level)
             and not should_hide_console_log_line(entry["line"])
             and is_category_match(entry["line"], filter_category)
             and is_keyword_match(entry["line"], filter_keyword)
-        )
+        ][:limit_value]
+    return "".join(reversed(matched))
 
 def get_log_id_bounds() -> tuple[int, int]:
     with LOG_STREAM_LOCK:
@@ -270,17 +281,19 @@ def add_job_to_scheduler(task):
 
 @router.get("/api/progress")
 def get_progress(): 
+    cleanup_stale_tasks()
     return ACTIVE_TASKS
 
 @router.get("/api/system_logs")
-def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL"):
+def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL", limit: int = DEFAULT_LOG_RESPONSE_LIMIT):
     filter_level = parse_filter_level(level)
     filter_keyword = normalize_keyword(keyword)
     filter_category = parse_filter_category(category)
-    logs = snapshot_recent_logs(filter_level, filter_keyword, filter_category)
+    limit_value = normalize_log_limit(limit)
+    logs = snapshot_recent_logs(filter_level, filter_keyword, filter_category, limit_value)
     _, latest_id = get_log_id_bounds()
     if logs:
-        return {"logs": logs, "latest_id": latest_id, "level": filter_level, "keyword": filter_keyword, "category": filter_category}
+        return {"logs": logs, "latest_id": latest_id, "level": filter_level, "keyword": filter_keyword, "category": filter_category, "limit": limit_value}
 
     if os.path.exists(APP_LOG_FILE):
         try:
@@ -297,13 +310,13 @@ def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL"
                     and is_keyword_match(line, filter_keyword)
                 ):
                     filtered_lines.append(line)
-            logs = "".join(filtered_lines)
+            logs = "".join(filtered_lines[-limit_value:])
         except Exception:
             logs = "Read logs failed."
     else:
         logs = "No log file found."
 
-    return {"logs": logs, "latest_id": latest_id, "level": filter_level, "keyword": filter_keyword, "category": filter_category}
+    return {"logs": logs, "latest_id": latest_id, "level": filter_level, "keyword": filter_keyword, "category": filter_category, "limit": limit_value}
 
 @router.get("/api/system_logs/stream")
 async def stream_system_logs(request: Request, level: str = "ALL", keyword: str = "", category: str = "ALL", last_event_id: int | None = None):
@@ -364,6 +377,7 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
                 ]
 
             if replay_entries:
+                replay_entries = replay_entries[-MAX_LOG_RESPONSE_LIMIT:]
                 init_chunk = "".join(e["line"] for e in replay_entries)
                 yield format_sse_event({"chunk": init_chunk, "level": filter_level, "keyword": filter_keyword, "category": filter_category}, event="init")
 

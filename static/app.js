@@ -457,6 +457,9 @@ createApp({
                 polling: false,
                 image: '',
                 originalImage: '',
+                selfUpdate: false,
+                restartSeen: false,
+                restartStartedAt: 0,
             },
             versionDialog: {
                 visible: false,
@@ -576,6 +579,16 @@ createApp({
             return new Date(ts * 1000).toLocaleString();
         };
 
+        const isDockerImageUntagged = (image) => {
+            return image?.name === '<none>:<none>' || !(image?.tags || []).length;
+        };
+
+        const dockerImageTagLabel = (image) => {
+            if (isDockerImageUntagged(image)) return '无 Tag';
+            const tag = (image?.tags || [])[0] || '';
+            return tag.split(':').pop() || '无 Tag';
+        };
+
         const filteredDockerContainers = computed(() => {
             const q = dockerManager.search.trim().toLowerCase();
             if (!q) return dockerManager.containers;
@@ -588,7 +601,7 @@ createApp({
             const filter = dockerManager.imageFilter || 'all';
             return dockerManager.images.filter(item => {
                 const containers = Number(item.containers);
-                const untagged = item.name === '<none>:<none>' || !(item.tags || []).length;
+                const untagged = isDockerImageUntagged(item);
                 if (filter === 'used') return containers > 0;
                 if (filter === 'unused') return containers === 0;
                 if (filter === 'untagged') return untagged;
@@ -604,7 +617,7 @@ createApp({
         const dockerImageStats = computed(() => {
             const total = dockerManager.images.length;
             const unused = dockerManager.images.filter(item => Number(item.containers) === 0).length;
-            const untagged = dockerManager.images.filter(item => item.name === '<none>:<none>' || !(item.tags || []).length).length;
+            const untagged = dockerManager.images.filter(item => isDockerImageUntagged(item)).length;
             const used = Math.max(0, total - unused);
             return { total, used, unused, untagged };
         });
@@ -784,6 +797,11 @@ createApp({
             dockerManager.updateDialog.totalSteps = Number(task.total_steps || 6);
             dockerManager.updateDialog.message = task.message || '';
             dockerManager.updateDialog.logs = Array.isArray(task.logs) ? task.logs : [];
+            dockerManager.updateDialog.selfUpdate = !!task.self_update;
+            if (task.status === 'restarting' || task.step === 'helper' || task.percent >= 85) {
+                dockerManager.updateDialog.restartSeen = true;
+                if (!dockerManager.updateDialog.restartStartedAt) dockerManager.updateDialog.restartStartedAt = Date.now();
+            }
             if (task.container_name) {
                 dockerManager.updateDialog.title = `更新容器 ${task.container_name}`;
             }
@@ -816,6 +834,35 @@ createApp({
                     }
                 }
             } catch (e) {
+                if (dockerManager.updateDialog.selfUpdate) {
+                    const status = e.response?.status;
+                    const restartStartedAt = dockerManager.updateDialog.restartStartedAt || Date.now();
+                    dockerManager.updateDialog.restartStartedAt = restartStartedAt;
+                    dockerManager.updateDialog.restartSeen = true;
+                    if (status === 404 && Date.now() - restartStartedAt > 5000) {
+                        dockerManager.updateDialog.status = 'finished';
+                        dockerManager.updateDialog.percent = 100;
+                        dockerManager.updateDialog.message = '服务已恢复，容器更新完成';
+                        dockerManager.updateDialog.logs.push({
+                            time: new Date().toLocaleTimeString(),
+                            level: 'success',
+                            message: '服务已恢复，容器更新完成',
+                        });
+                        stopDockerUpdatePolling();
+                        clearDockerUpdateForImages([
+                            dockerManager.updateDialog.image,
+                            dockerManager.updateDialog.originalImage,
+                        ]);
+                        await fetchDockerContainers({ skipAutoCheck: true });
+                        return;
+                    }
+                    if (Date.now() - restartStartedAt < 10 * 60 * 1000) {
+                        dockerManager.updateDialog.status = 'restarting';
+                        dockerManager.updateDialog.percent = Math.max(dockerManager.updateDialog.percent || 0, 90);
+                        dockerManager.updateDialog.message = '服务正在重启，等待恢复连接';
+                        return;
+                    }
+                }
                 dockerManager.updateDialog.status = 'error';
                 dockerManager.updateDialog.message = e.response?.data?.detail || e.message || '更新任务状态获取失败';
                 dockerManager.updateDialog.logs.push({
@@ -846,6 +893,9 @@ createApp({
                     message: `准备使用镜像 ${image} 更新 ${container.name}`,
                 }],
                 polling: true,
+                selfUpdate: false,
+                restartSeen: false,
+                restartStartedAt: 0,
             });
             pollDockerUpdateTask(runId);
             dockerUpdatePollTimer = setInterval(() => pollDockerUpdateTask(runId), 1500);
@@ -1353,10 +1403,13 @@ createApp({
                     if (isFirstPoll) {
                         for (const id in activeMap) {
                             const task = activeMap[id];
+                            if (task.status === 'running') running = true;
                             if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
                                 processedTaskIds.add(id);
+                                setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
                             }
                         }
+                        tasksState.hasRunning = running;
                         isFirstPoll = false;
                         return;
                     }
@@ -1984,6 +2037,9 @@ createApp({
             if (!chunk) return;
 
             consoleLogState.content = (consoleLogState.content || '') + chunk;
+            if (consoleLogState.content.length > 1024 * 1024) {
+                consoleLogState.content = consoleLogState.content.split('\n').slice(-consoleLogState.maxLines).join('\n');
+            }
             consoleLogState.partialLineBuffer += chunk;
 
             const lines = consoleLogState.partialLineBuffer.split('\n');
@@ -2019,7 +2075,8 @@ createApp({
                     params: {
                         level: consoleLogState.levelFilter,
                         keyword: (consoleLogState.keywordFilter || '').trim(),
-                        category: consoleLogState.categoryFilter || 'ALL'
+                        category: consoleLogState.categoryFilter || 'ALL',
+                        limit: consoleLogState.maxLines
                     }
                 });
                 consoleLogState.content = res.data.logs || '';
@@ -5338,6 +5395,18 @@ createApp({
 
         const formatDevicePercent = (value) => `${Math.round(Number(value || 0))}%`;
         const formatDeviceMemory = (used, total) => `${Number(used || 0).toFixed(1)} / ${Number(total || 0).toFixed(1)} GB`;
+        const truncateDashboardText = (value, maxLength = 80) => {
+            const text = String(value || '').trim();
+            if (text.length <= maxLength) return text;
+            return text.slice(0, Math.max(0, maxLength - 3)).trimEnd() + '...';
+        };
+        const getDashboardRecentSubtitle = (item) => {
+            const year = item?.year || '未知年份';
+            const detail = item?.media_type === 'tv'
+                ? truncateDashboardText(item?.episode_label || '剧集', 84)
+                : '电影';
+            return `${year} · ${detail}`;
+        };
 
         const splitMetricDisplay = (valueText, options = {}) => {
             const fallback = options.fallback || '--';
@@ -6453,6 +6522,8 @@ createApp({
         const telegramNotifyTesting = ref(false);
         const telegramNotifySending = ref(false);
         const telegramNotifySaving = ref(false);
+        const telegramDialogsSaving = ref(false);
+        const telegramSavedDialogsKey = ref('');
         const telegramCodeSending = ref(false);
         const telegramSigningIn = ref(false);
         const telegramLoggingOut = ref(false);
@@ -6466,9 +6537,19 @@ createApp({
             dirs: []
         });
 
+        const telegramDialogsSelectionKey = (dialogs = []) => {
+            if (!Array.isArray(dialogs)) return '[]';
+            return JSON.stringify(dialogs.map(item => String(item?.id || '')).filter(Boolean).sort());
+        };
+
+        const markTelegramDialogsSaved = () => {
+            telegramSavedDialogsKey.value = telegramDialogsSelectionKey(telegramNotifyConfig.selected_dialogs);
+        };
+
         const fetchTelegramNotifyConfig = async () => {
             await fetchNotifyConfig('/api/telegram-notify/config', telegramNotifyConfig, telegramNotifyFields, '获取Telegram通知配置失败');
             if (!Array.isArray(telegramNotifyConfig.selected_dialogs)) telegramNotifyConfig.selected_dialogs = [];
+            markTelegramDialogsSaved();
             await fetchTelegramStatus();
             if (telegramStatus.authorized) await fetchTelegramDialogs();
         };
@@ -6478,13 +6559,14 @@ createApp({
         };
 
         const saveTelegramNotifyConfig = async () => {
-            await saveNotifyConfig({
+            const saved = await saveNotifyConfig({
                 savingRef: telegramNotifySaving,
                 endpoint: '/api/telegram-notify/config',
                 config: telegramNotifyConfig,
                 fields: telegramNotifyFields,
                 successMessage: 'Telegram配置已保存'
             });
+            if (saved) markTelegramDialogsSaved();
             await fetchTelegramStatus();
         };
 
@@ -6496,13 +6578,14 @@ createApp({
             if (telegramNotifyConfig.transfer_dir_mode !== 'custom') {
                 telegramNotifyConfig.transfer_dir = '';
             }
-            await saveNotifyConfig({
+            const saved = await saveNotifyConfig({
                 savingRef: telegramNotifySaving,
                 endpoint: '/api/telegram-notify/config',
                 config: telegramNotifyConfig,
                 fields: telegramNotifyFields,
                 successMessage: 'Telegram转存目录设置已保存'
             });
+            if (saved) markTelegramDialogsSaved();
             await fetchTelegramStatus();
         };
 
@@ -6661,18 +6744,25 @@ createApp({
         };
 
         const saveTelegramDialogs = async (successMessage = '') => {
+            telegramDialogsSaving.value = true;
             try {
-                await axios.post('/api/telegram-notify/dialogs', {
+                const res = await axios.post('/api/telegram-notify/dialogs', {
                     selected_dialogs: telegramNotifyConfig.selected_dialogs
                 });
+                if (Array.isArray(res.data?.selected_dialogs)) {
+                    telegramNotifyConfig.selected_dialogs = res.data.selected_dialogs;
+                }
+                markTelegramDialogsSaved();
                 await fetchTelegramStatus();
                 if (successMessage) showToast(successMessage, 'success');
             } catch (e) {
                 showToast('监听目标保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                telegramDialogsSaving.value = false;
             }
         };
 
-        const toggleTelegramDialog = async (dialog, event) => {
+        const toggleTelegramDialog = (dialog, event) => {
             const checked = !!event.target.checked;
             const id = String(dialog.id);
             if (checked && !isTelegramDialogSelected(dialog)) {
@@ -6686,7 +6776,6 @@ createApp({
             } else if (!checked) {
                 telegramNotifyConfig.selected_dialogs = telegramNotifyConfig.selected_dialogs.filter(item => String(item.id) !== id);
             }
-            await saveTelegramDialogs(checked ? '监听目标已保存' : '监听目标已移除');
         };
 
         const selectedTelegramDialogs = computed(() => {
@@ -6703,11 +6792,14 @@ createApp({
             });
         });
 
-        const removeTelegramSelectedDialog = async (dialog) => {
+        const removeTelegramSelectedDialog = (dialog) => {
             const id = String(dialog.id);
             telegramNotifyConfig.selected_dialogs = telegramNotifyConfig.selected_dialogs.filter(item => String(item.id) !== id);
-            await saveTelegramDialogs('监听目标已移除');
         };
+
+        const telegramDialogsDirty = computed(() => {
+            return telegramDialogsSelectionKey(telegramNotifyConfig.selected_dialogs) !== telegramSavedDialogsKey.value;
+        });
 
         const filteredTelegramDialogs = computed(() => {
             const query = telegramDialogSearch.value.trim().toLowerCase();
@@ -8722,7 +8814,7 @@ createApp({
             onDashboardLazyScroll,
             dashboardDeviceMetrics, dashboardDeviceMetricsLoaded, dashboardDeviceMetricsPulse, dashboardDeviceMetricCards,
             dashboard115Account, dashboard115Loaded, handleDashboard115CardClick,
-            dashboardCovers, wallRows, wallReady, dashboardOverviewLoading, initDashboard, fetchDashboardOverview, formatDashboardPlayedAt, getDeviceMetricState, formatDevicePercent, formatDeviceMemory, openDashboardLibrary, openDashboardItem, ensureDashboardServerId,
+            dashboardCovers, wallRows, wallReady, dashboardOverviewLoading, initDashboard, fetchDashboardOverview, formatDashboardPlayedAt, getDeviceMetricState, formatDevicePercent, formatDeviceMemory, getDashboardRecentSubtitle, openDashboardLibrary, openDashboardItem, ensureDashboardServerId,
             toasts, showToast,
             confirmState, handleConfirm,
             selectState, handleSelect, closeSelectDialog,
@@ -8733,7 +8825,7 @@ createApp({
             fetchDockerStatus, fetchDockerContainers, fetchDockerImages, checkDockerUpdates,
             refreshDockerManager, runDockerContainerAction, openDockerLogs, closeDockerLogs, pullDockerImage, deleteDockerImage, pruneUnusedDockerImages, pruneUntaggedDockerImages, setDockerImageFilter,
             closeDockerUpdateDialog, openDockerVersionDialog, closeDockerVersionDialog, saveDockerVersionDialog,
-            formatDockerBytes, formatDockerDate,
+            formatDockerBytes, formatDockerDate, isDockerImageUntagged, dockerImageTagLabel,
             cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,
             fetch115CleanupTasks, openCreate115Cleanup, reset115CleanupForm, save115CleanupTask, edit115CleanupTask,
             delete115CleanupTask, toggle115CleanupTask, run115CleanupTask, open115CleanupBrowser, select115CleanupDir,
@@ -8785,10 +8877,10 @@ createApp({
             // [新增] Telegram通知配置
             telegramNotifyConfig, telegramStatus, telegramLoginForm, telegramDialogs, telegramDialogSearch, selectedTelegramDialogs, filteredTelegramDialogs, telegramTransferDirBrowser,
             telegramNotifyTesting, telegramNotifySending, telegramNotifySaving, telegramTemplateTesting,
-            telegramCodeSending, telegramSigningIn, telegramLoggingOut, telegramDialogsLoading,
+            telegramCodeSending, telegramSigningIn, telegramLoggingOut, telegramDialogsLoading, telegramDialogsSaving, telegramDialogsDirty,
             fetchTelegramNotifyConfig, saveTelegramNotifyConfig, testTelegramNotify, sendTelegramTestMsg, testTelegramTemplate,
             sendTelegramLoginCode, signInTelegramAccount, logoutTelegramAccount, fetchTelegramDialogs,
-            isTelegramDialogSelected, toggleTelegramDialog, removeTelegramSelectedDialog, toggleTelegramNotifyType,
+            isTelegramDialogSelected, toggleTelegramDialog, removeTelegramSelectedDialog, saveTelegramDialogs, toggleTelegramNotifyType,
             browseTelegramTransferDir, selectTelegramTransferDir, telegramTransferDirUp, applyTelegramTransferDir, saveTelegramTransferSettings,
             
             // 新增移动端变量

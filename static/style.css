@@ -1449,6 +1449,11 @@ body.login-page-body {
     margin-top: 4px;
     font-size: 11px;
     color: var(--color-text-muted);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
 }
 
 .dashboard-task-card {
@@ -4295,6 +4300,16 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px
 .telegram-selected-remove {
     color: rgba(255, 255, 255, 0.52);
     font-size: 12px;
+}
+.telegram-target-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.text-warning {
+    color: #f59e0b !important;
 }
 .telegram-dialog-item {
     position: relative;

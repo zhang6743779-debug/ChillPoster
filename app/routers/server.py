@@ -24,6 +24,8 @@ _DEVICE_METRICS_SAMPLE = {
 _DASHBOARD_OVERVIEW_CACHE_LOCK = threading.Lock()
 _DASHBOARD_OVERVIEW_CACHE_TTL = 300
 _DASHBOARD_OVERVIEW_CACHE = {}
+DASHBOARD_RECENT_ITEM_LIMIT = 48
+DASHBOARD_RECENT_PLAYBACK_LIMIT = 30
 
 psutil.cpu_percent(interval=None)
 
@@ -191,6 +193,27 @@ def _set_dashboard_overview_cached(req: ConnectionRequest, data: dict):
         }
 
 
+def _truncate_dashboard_text(value, max_length: int) -> str:
+    text = _safe_str(value)
+    if len(text) <= max_length:
+        return text
+    return text[:max(0, max_length - 3)].rstrip() + "..."
+
+
+def _compact_dashboard_recent_items(items: list) -> list:
+    compacted = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        next_item = dict(item)
+        next_item.pop("episode_groups", None)
+        next_item["overview"] = _truncate_dashboard_text(next_item.get("overview", ""), 240)
+        if next_item.get("media_type") == "tv":
+            next_item["episode_label"] = _truncate_dashboard_text(next_item.get("episode_label") or "剧集", 120)
+        compacted.append(next_item)
+    return compacted
+
+
 def _extract_115_storage(login_data, space_data, storage_data):
     login_space = ((login_data or {}).get("sapce") or {}).get("1") or {}
     space_payload = space_data or {}
@@ -337,8 +360,8 @@ def get_dashboard_emby_overview(req: ConnectionRequest):
     client = EmbyClient(req.url, req.key, req.public_host)
     try:
         data = {
-            "recent_items": client.get_recently_added_items(limit=100),
-            "recent_playbacks": client.get_recent_playbacks(limit=100),
+            "recent_items": _compact_dashboard_recent_items(client.get_recently_added_items(limit=DASHBOARD_RECENT_ITEM_LIMIT)),
+            "recent_playbacks": client.get_recent_playbacks(limit=DASHBOARD_RECENT_PLAYBACK_LIMIT),
             "media_stats": client.get_dashboard_media_stats()
         }
         _set_dashboard_overview_cached(req, data)

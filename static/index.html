@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260518mobile-dashboard-card-fix">
+    <link rel="stylesheet" href="/static/style.css?v=20260518telegram-target-save">
 
 </head>
 
@@ -399,7 +399,7 @@
                                         </div>
                                         <div class="recent-media-meta">
                                             <div class="recent-media-title">{{ item.title }}</div>
-                                            <div class="recent-media-sub">{{ item.year || '未知年份' }} · {{ item.media_type === 'tv' ? (item.episode_label || '剧集') : '电影' }}</div>
+                                            <div class="recent-media-sub" :title="item.media_type === 'tv' ? (item.episode_label || '剧集') : '电影'">{{ getDashboardRecentSubtitle(item) }}</div>
                                         </div>
                                     </div>
                                 </div>
@@ -2928,8 +2928,18 @@
 
                             <div class="card">
                                 <div class="card-header">
-                                    <div class="card-title-l"><i class="fa-solid fa-satellite-dish icon-brand-telegram-alt"></i> 监听目标</div>
-                                    <span class="hint">勾选后自动保存 · 已选择 {{ telegramNotifyConfig.selected_dialogs.length }} 个目标</span>
+                                    <div>
+                                        <div class="card-title-l"><i class="fa-solid fa-satellite-dish icon-brand-telegram-alt"></i> 监听目标</div>
+                                        <div class="hint">勾选目标后点击保存，重新进入 UI 会按已保存配置恢复</div>
+                                    </div>
+                                    <div class="telegram-target-actions">
+                                        <span class="hint" :class="{ 'text-warning': telegramDialogsDirty }">
+                                            {{ telegramDialogsDirty ? '有未保存更改' : '已保存' }} · 已选择 {{ telegramNotifyConfig.selected_dialogs.length }} 个目标
+                                        </span>
+                                        <button class="btn btn-primary btn-sm" @click="saveTelegramDialogs('监听目标已保存')" :disabled="telegramDialogsSaving">
+                                            <i class="fa-solid" :class="telegramDialogsSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存监听目标
+                                        </button>
+                                    </div>
                                 </div>
                                 <div class="card-body">
                                     <div class="notify-form-grid">
@@ -3839,14 +3849,14 @@
                                 <div v-if="dockerManager.loading" class="empty-state-card">正在加载镜像...</div>
                                 <div v-else-if="filteredDockerImages.length === 0" class="empty-state-card">暂无镜像</div>
                                 <div v-else class="docker-image-card-grid">
-                                    <div v-for="image in filteredDockerImages" :key="image.id" class="docker-image-card" :class="{ unused: Number(image.containers) === 0, untagged: image.name === '<none>:<none>' || !(image.tags || []).length }">
+                                    <div v-for="image in filteredDockerImages" :key="image.id" class="docker-image-card" :class="{ unused: Number(image.containers) === 0, untagged: isDockerImageUntagged(image) }">
                                         <div class="docker-image-card-head">
                                             <div class="docker-image-icon">
                                                 <i class="fa-solid fa-hard-drive"></i>
                                             </div>
                                             <div class="docker-image-title">
                                                 <strong :title="image.name">{{ image.name }}</strong>
-                                                <span>{{ (image.tags || [])[0] && image.name !== '<none>:<none>' ? (image.tags || [])[0].split(':').pop() : '无 Tag' }}</span>
+                                                <span>{{ dockerImageTagLabel(image) }}</span>
                                             </div>
                                             <span class="docker-image-use-pill" :class="Number(image.containers) > 0 ? 'ok' : 'muted'">
                                                 {{ Number(image.containers) > 0 ? '使用中' : '未使用' }}
@@ -4848,6 +4858,6 @@
 
         <!-- 移动端抽屉菜单 (已替换为主入口 + 更多菜单) -->
 
-    </div> <script src="/static/app.js?v=20260518docker-update-cache-v2"></script>
+    </div> <script src="/static/app.js?v=20260518telegram-target-save"></script>
 </body>
 </html>

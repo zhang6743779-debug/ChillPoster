@@ -10,7 +10,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.services.docker_api import DockerAPI, DockerApiError, build_replacement_container_payload
+from app.services.docker_api import DockerAPI, DockerApiError, build_replacement_container_payload, get_current_container_id
 from core.configs import global_config
 from core.logger import logger
 
@@ -322,6 +322,40 @@ def _recreate_container(api: DockerAPI, container_id: str, image: str, skip_pull
         raise
 
 
+def _start_self_update_helper(api: DockerAPI, container_id: str, image: str) -> str:
+    image = _require_image_ref(image)
+    if not image.startswith("chillne/chillposter"):
+        raise RuntimeError("当前 ChillPoster 容器只能使用 chillne/chillposter 镜像更新")
+
+    helper_name = f"chillposter-docker-update-{uuid.uuid4().hex[:8]}"
+    helper_code = (
+        "import sys, time; "
+        "from app.services.self_upgrade_helper import replace_container; "
+        "time.sleep(2); "
+        "replace_container(sys.argv[1], sys.argv[2], skip_pull=True)"
+    )
+    payload = {
+        "Image": image,
+        "Cmd": ["python", "-c", helper_code, container_id, image],
+        "Env": ["PYTHONUNBUFFERED=1"],
+        "HostConfig": {
+            "Binds": ["/var/run/docker.sock:/var/run/docker.sock"],
+            "AutoRemove": True,
+            "NetworkMode": "bridge",
+        },
+        "Labels": {
+            "chillposter.docker_update.helper": "true",
+            "chillposter.docker_update.target": container_id,
+        },
+    }
+    created = api.create_container(helper_name, payload)
+    helper_id = str((created or {}).get("Id") or "")
+    if not helper_id:
+        raise RuntimeError(f"更新助手创建失败: {created}")
+    api.start_container(helper_id)
+    return helper_id
+
+
 def _task_log(run_id: str, message: str, level: str = "info"):
     with _UPDATE_TASK_LOCK:
         task = _UPDATE_TASKS.setdefault(run_id, {})
@@ -386,6 +420,21 @@ def _run_update_task(run_id: str, container_id: str, image: str):
 
         def progress(step_no: int, step_key: str, message: str):
             _update_progress(run_id, step_no, step_key, message)
+
+        current_container_id = get_current_container_id(api)
+        if current_container_id and current_container_id == str(info.get("Id") or container_id):
+            _set_update_task(run_id, self_update=True)
+            _update_progress(run_id, 4, "helper", "正在启动更新助手，当前服务会短暂断开")
+            helper_id = _start_self_update_helper(api, current_container_id, image)
+            _set_update_task(
+                run_id,
+                status="restarting",
+                percent=90,
+                helper_id=helper_id,
+                message="更新助手已启动，等待服务重启",
+            )
+            _task_log(run_id, f"更新助手已启动: {helper_id[:12]}，服务即将重启")
+            return
 
         result = _recreate_container(api, container_id, image, skip_pull=True, progress=progress)
         _set_update_task(run_id, status="finished", percent=100, result=result, message="容器更新完成")

@@ -20,6 +20,7 @@ GLOBAL_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 # 任务状态存储
 ACTIVE_TASKS = {}
+TERMINAL_TASK_RETENTION_SECONDS = 300
 
 # RSS 任务队列
 RSS_JOB_QUEUE = queue.Queue()
@@ -86,7 +87,7 @@ def cleanup_stale_tasks():
     now = time.time()
     to_remove = [
         k for k, v in ACTIVE_TASKS.items() 
-        if (v['status'] in ['finished', 'error', 'stopped'] and (now - v.get('updated_at', 0)) > 1800) 
+        if (v['status'] in ['finished', 'error', 'stopped'] and (now - v.get('updated_at', 0)) > TERMINAL_TASK_RETENTION_SECONDS)
         or (now - v.get('updated_at', 0)) > 86400
     ]
     for k in to_remove:
