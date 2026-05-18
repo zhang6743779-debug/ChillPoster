@@ -3536,9 +3536,9 @@
                                                 <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
                                             </div>
                                         </div>
-                                        <div class="docker-image-editor">
-                                            <label>修改版本</label>
-                                            <input v-model="dockerManager.imageDrafts[container.id]" :placeholder="container.image">
+                                        <div class="docker-image-display" :class="{ changed: dockerManager.imageDrafts[container.id] && dockerManager.imageDrafts[container.id] !== container.image }">
+                                            <span>镜像版本</span>
+                                            <strong :title="dockerManager.imageDrafts[container.id] || container.image">{{ dockerManager.imageDrafts[container.id] || container.image }}</strong>
                                         </div>
                                         <div class="docker-meta-list">
                                             <div><i class="fa-solid fa-network-wired"></i><span>{{ container.ports_text || '未映射端口' }}</span></div>
@@ -3553,6 +3553,7 @@
                                             <button class="docker-action-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i><span>日志</span></button>
                                             <button class="docker-action-btn update" :class="{ hot: dockerManager.updateMap[container.image]?.update_available }" @click="runDockerContainerAction(container, 'update')" title="按当前卡片版本拉取并重建"><i class="fa-solid fa-cloud-arrow-down"></i><span>更新</span></button>
                                             <button class="docker-action-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i><span>删除</span></button>
+                                            <button class="docker-action-btn version" @click="openDockerVersionDialog(container)" title="修改版本"><i class="fa-solid fa-pen-to-square"></i><span>修改版本</span></button>
                                         </div>
                                     </div>
                                 </div>
@@ -3967,6 +3968,37 @@
                         <button class="btn btn-secondary" @click="closeDockerUpdateDialog" :disabled="dockerManager.updateDialog.status === 'running'">
                             {{ dockerManager.updateDialog.status === 'running' ? '更新中...' : '关闭' }}
                         </button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <transition name="fade">
+            <div v-if="dockerManager.versionDialog.visible" class="confirm-mask docker-version-mask">
+                <div class="docker-version-modal">
+                    <div class="docker-version-header">
+                        <div class="docker-version-title">
+                            <div class="docker-version-icon"><i class="fa-solid fa-pen-to-square"></i></div>
+                            <div>
+                                <strong>修改镜像版本</strong>
+                                <span>{{ dockerManager.versionDialog.container?.name || '' }}</span>
+                            </div>
+                        </div>
+                        <button class="settings-drawer-close" @click="closeDockerVersionDialog" title="关闭">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                    <div class="docker-version-current">
+                        <span>当前镜像</span>
+                        <strong>{{ dockerManager.versionDialog.container?.image || '-' }}</strong>
+                    </div>
+                    <label class="docker-version-field">
+                        <span>用于更新的镜像版本</span>
+                        <input v-model="dockerManager.versionDialog.value" placeholder="例如 chillne/chillposter:latest" @keydown.enter="saveDockerVersionDialog">
+                    </label>
+                    <div class="docker-version-actions">
+                        <button class="btn btn-secondary" @click="closeDockerVersionDialog">取消</button>
+                        <button class="btn btn-primary" @click="saveDockerVersionDialog">保存版本</button>
                     </div>
                 </div>
             </div>

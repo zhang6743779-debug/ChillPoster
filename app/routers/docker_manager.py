@@ -4,12 +4,14 @@ import time
 from typing import Literal
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.services.docker_api import DockerAPI, DockerApiError, build_replacement_container_payload
+from core.configs import global_config
 from core.logger import logger
 
 
@@ -182,6 +184,15 @@ def _parse_image_ref(image: str) -> tuple[str, str, str]:
     return registry, repo, tag
 
 
+def _registry_client_kwargs() -> dict:
+    global_config.load()
+    proxy_url = str(global_config.proxy_url or "").strip()
+    kwargs = {"timeout": 12.0, "follow_redirects": True}
+    if proxy_url:
+        kwargs["proxy"] = proxy_url
+    return kwargs
+
+
 def _registry_request_digest(registry: str, repo: str, tag: str, token: str = "") -> tuple[int, str, str]:
     url = f"https://{registry}/v2/{repo}/manifests/{urllib.parse.quote(tag, safe='')}"
     headers = {
@@ -194,7 +205,7 @@ def _registry_request_digest(registry: str, repo: str, tag: str, token: str = ""
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+    with httpx.Client(**_registry_client_kwargs()) as client:
         resp = client.get(url, headers=headers)
     return resp.status_code, resp.headers.get("Docker-Content-Digest", ""), resp.headers.get("WWW-Authenticate", "")
 
@@ -221,7 +232,7 @@ def _remote_manifest_digest(image: str) -> str:
                 "service": params.get("service", registry),
                 "scope": params.get("scope", f"repository:{repo}:pull"),
             }
-            with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+            with httpx.Client(**_registry_client_kwargs()) as client:
                 token_resp = client.get(realm, params=query)
                 token_resp.raise_for_status()
                 token = token_resp.json().get("token") or token_resp.json().get("access_token") or ""
@@ -499,17 +510,30 @@ def check_container_updates(payload: CheckUpdatesPayload):
     try:
         api = _docker()
         result = {}
-        for image in sorted(set(str(item or "").strip() for item in payload.images or [])):
-            if not image or image.startswith("sha256:"):
-                continue
-            try:
-                result[image] = _check_image_update(api, image)
-            except Exception as e:
-                result[image] = {
-                    "image": image,
-                    "update_available": False,
-                    "message": str(e),
-                }
+        images = [
+            image for image in sorted(set(str(item or "").strip() for item in payload.images or []))
+            if image and not image.startswith("sha256:")
+        ]
+        if not images:
+            return {"images": result}
+
+        max_workers = min(8, max(2, len(images)))
+        logger.info(
+            f"[DockerManager] 开始检查 {len(images)} 个镜像更新"
+            f"{'（使用代理）' if str(global_config.proxy_url or '').strip() else '（直连）'}"
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {executor.submit(_check_image_update, api, image): image for image in images}
+            for future in as_completed(future_map):
+                image = future_map[future]
+                try:
+                    result[image] = future.result()
+                except Exception as e:
+                    result[image] = {
+                        "image": image,
+                        "update_available": False,
+                        "message": str(e),
+                    }
         return {"images": result}
     except Exception as e:
         _api_error(e)

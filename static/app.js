@@ -453,6 +453,11 @@ createApp({
                 logs: [],
                 polling: false,
             },
+            versionDialog: {
+                visible: false,
+                container: null,
+                value: '',
+            },
         });
         let dockerSilentRefreshTimer = null;
         let dockerUpdatePollTimer = null;
@@ -660,7 +665,13 @@ createApp({
                 dockerManager.updateMap = res.data?.images || {};
                 dockerManager.lastUpdateCheckAt = Date.now();
                 if (!silent) {
-                    showToast(dockerUpdateCount.value > 0 ? `发现 ${dockerUpdateCount.value} 个容器镜像有更新` : '容器镜像均为最新', dockerUpdateCount.value > 0 ? 'success' : 'info');
+                    const failedCount = Object.values(dockerManager.updateMap).filter(item => item?.message).length;
+                    const updateCount = dockerUpdateCount.value;
+                    if (failedCount) {
+                        showToast(`检查完成：${updateCount} 个有更新，${failedCount} 个检查失败`, updateCount > 0 ? 'warning' : 'error');
+                    } else {
+                        showToast(updateCount > 0 ? `发现 ${updateCount} 个容器镜像有更新` : '容器镜像均为最新', updateCount > 0 ? 'success' : 'info');
+                    }
                 }
             } catch (e) {
                 if (!silent) showToast('检查更新失败: ' + (e.response?.data?.detail || e.message), 'error');
@@ -759,6 +770,31 @@ createApp({
                 dockerManager.updateDialog.visible = false;
                 stopDockerUpdatePolling();
             }
+        };
+
+        const openDockerVersionDialog = (container) => {
+            dockerManager.versionDialog.visible = true;
+            dockerManager.versionDialog.container = container;
+            dockerManager.versionDialog.value = dockerManager.imageDrafts[container.id] || container.image || '';
+        };
+
+        const closeDockerVersionDialog = () => {
+            dockerManager.versionDialog.visible = false;
+            dockerManager.versionDialog.container = null;
+            dockerManager.versionDialog.value = '';
+        };
+
+        const saveDockerVersionDialog = () => {
+            const container = dockerManager.versionDialog.container;
+            const image = (dockerManager.versionDialog.value || '').trim();
+            if (!container) return;
+            if (!image) {
+                showToast('请填写要使用的镜像版本', 'warning');
+                return;
+            }
+            dockerManager.imageDrafts[container.id] = image;
+            closeDockerVersionDialog();
+            showToast(`已保存 ${container.name} 的镜像版本`, 'success');
         };
 
         const runDockerContainerAction = async (container, action) => {
@@ -8245,7 +8281,7 @@ createApp({
             dockerManager, filteredDockerContainers, filteredDockerImages, dockerUpdateCount, dockerImageStats,
             fetchDockerStatus, fetchDockerContainers, fetchDockerImages, checkDockerUpdates,
             refreshDockerManager, runDockerContainerAction, openDockerLogs, closeDockerLogs, pullDockerImage, deleteDockerImage, pruneUnusedDockerImages,
-            closeDockerUpdateDialog,
+            closeDockerUpdateDialog, openDockerVersionDialog, closeDockerVersionDialog, saveDockerVersionDialog,
             formatDockerBytes, formatDockerDate,
             cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,
             fetch115CleanupTasks, openCreate115Cleanup, reset115CleanupForm, save115CleanupTask, edit115CleanupTask,
