@@ -52,6 +52,7 @@ from app.routers import transfer
 from app.routers import strm
 from app.routers import media_organize
 from app.routers import upgrade
+from app.routers import docker_manager
 from app.routers import drive115_cleanup
 from app.routers import drive115_upload
 
@@ -316,6 +317,7 @@ app.include_router(transfer.router)
 app.include_router(strm.router)
 app.include_router(media_organize.router)
 app.include_router(upgrade.router)
+app.include_router(docker_manager.router)
 app.include_router(drive115_cleanup.router)
 app.include_router(drive115_upload.router)
 

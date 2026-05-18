@@ -75,6 +75,24 @@ class DockerAPI:
             return _loads_docker_json(text)
         return text
 
+    def request_raw(self, method: str, path: str, body=None, headers: dict | None = None) -> bytes:
+        payload = None
+        req_headers = headers.copy() if headers else {}
+        if body is not None:
+            payload = json.dumps(body).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
+        conn = UnixHTTPConnection(self.socket_path, timeout=self.timeout)
+        try:
+            conn.request(method, path, body=payload, headers=req_headers)
+            resp = conn.getresponse()
+            raw = resp.read()
+        finally:
+            conn.close()
+        if resp.status >= 400:
+            text = raw.decode("utf-8", errors="replace") if raw else ""
+            raise DockerApiError(resp.status, text.strip() or resp.reason)
+        return raw
+
     def ping(self):
         return self.request("GET", "/_ping")
 
@@ -84,6 +102,25 @@ class DockerAPI:
     def inspect_container(self, container_id: str):
         quoted = urllib.parse.quote(str(container_id), safe="")
         return self.request("GET", f"/containers/{quoted}/json")
+
+    def list_containers(self, all_containers: bool = True):
+        query = urllib.parse.urlencode({"all": "1" if all_containers else "0"})
+        return self.request("GET", f"/containers/json?{query}")
+
+    def container_stats(self, container_id: str):
+        quoted = urllib.parse.quote(str(container_id), safe="")
+        query = urllib.parse.urlencode({"stream": "false", "one-shot": "true"})
+        return self.request("GET", f"/containers/{quoted}/stats?{query}")
+
+    def container_logs(self, container_id: str, tail: int = 200):
+        quoted = urllib.parse.quote(str(container_id), safe="")
+        query = urllib.parse.urlencode({
+            "stdout": "1",
+            "stderr": "1",
+            "timestamps": "1",
+            "tail": max(1, min(int(tail or 200), 2000)),
+        })
+        return self.request_raw("GET", f"/containers/{quoted}/logs?{query}")
 
     def pull_image(self, image: str):
         repo, tag = split_image_ref(image)
@@ -111,10 +148,38 @@ class DockerAPI:
         query = urllib.parse.urlencode({"t": int(timeout)})
         return self.request("POST", f"/containers/{quoted}/stop?{query}")
 
+    def restart_container(self, container_id: str, timeout: int = 20):
+        quoted = urllib.parse.quote(str(container_id), safe="")
+        query = urllib.parse.urlencode({"t": int(timeout)})
+        return self.request("POST", f"/containers/{quoted}/restart?{query}")
+
+    def rename_container(self, container_id: str, name: str):
+        quoted = urllib.parse.quote(str(container_id), safe="")
+        query = urllib.parse.urlencode({"name": name})
+        return self.request("POST", f"/containers/{quoted}/rename?{query}")
+
     def delete_container(self, container_id: str, force: bool = False):
         quoted = urllib.parse.quote(str(container_id), safe="")
         query = urllib.parse.urlencode({"force": "1" if force else "0"})
         return self.request("DELETE", f"/containers/{quoted}?{query}")
+
+    def list_images(self):
+        return self.request("GET", "/images/json?all=0")
+
+    def inspect_image(self, image: str):
+        quoted = urllib.parse.quote(str(image), safe="")
+        return self.request("GET", f"/images/{quoted}/json")
+
+    def delete_image(self, image: str, force: bool = False):
+        quoted = urllib.parse.quote(str(image), safe="")
+        query = urllib.parse.urlencode({"force": "1" if force else "0"})
+        return self.request("DELETE", f"/images/{quoted}?{query}")
+
+    def prune_images(self):
+        return self.request("POST", "/images/prune")
+
+    def system_df(self):
+        return self.request("GET", "/system/df")
 
 
 def split_image_ref(image: str) -> tuple[str, str]:

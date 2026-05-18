@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260518performance-grid">
+    <link rel="stylesheet" href="/static/style.css?v=20260518docker-manager">
 
 </head>
 
@@ -66,6 +66,9 @@
                     </div>
                     <div class="nav-item" :class="{active: tab === 'rss'}" @click="tab = 'rss'">
                         <i class="fa-solid fa-rss"></i> RSS真实库
+                    </div>
+                    <div class="nav-item" :class="{active: tab === 'docker_manager'}" @click="tab = 'docker_manager'">
+                        <i class="fa-solid fa-cubes"></i> Docker 管理
                     </div>
                     <div class="nav-item" :class="{active: tab === 'webhook'}" @click="tab = 'webhook'">
                         <i class="fa-solid fa-bolt-lightning"></i> Webhook
@@ -3462,6 +3465,148 @@
                         </div>
                     </div>
 
+                    <div v-else-if="tab === 'docker_manager'" key="docker_manager" class="scroll-view">
+                        <div class="content-shell shell-xl">
+                            <div class="server-toolbar mb-20">
+                                <h2><i class="fa-solid fa-cubes icon-brand-docker"></i> Docker 管理</h2>
+                                <button class="btn btn-ghost" @click="refreshDockerManager" :disabled="dockerManager.loading">
+                                    <i class="fa-solid" :class="dockerManager.loading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新
+                                </button>
+                            </div>
+
+                            <div class="docker-manager-tabs">
+                                <button :class="{active: dockerManager.activeTab === 'containers'}" @click="dockerManager.activeTab='containers'; fetchDockerContainers()">
+                                    <i class="fa-solid fa-cube"></i> 容器管理
+                                </button>
+                                <button :class="{active: dockerManager.activeTab === 'images'}" @click="dockerManager.activeTab='images'; fetchDockerImages()">
+                                    <i class="fa-solid fa-layer-group"></i> 镜像管理
+                                </button>
+                                <button :class="{active: dockerManager.activeTab === 'logs'}" @click="dockerManager.activeTab='logs'">
+                                    <i class="fa-solid fa-file-lines"></i> 容器日志
+                                </button>
+                                <button :class="{active: dockerManager.activeTab === 'settings'}" @click="dockerManager.activeTab='settings'; fetchDockerStatus()">
+                                    <i class="fa-solid fa-gear"></i> 设置
+                                </button>
+                            </div>
+
+                            <div v-if="!dockerManager.status.available" class="info-alert-box mb-20">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <div class="info-content">
+                                    <div class="info-alert-box-title">Docker 不可用</div>
+                                    {{ dockerManager.status.message || '需要在容器中挂载 /var/run/docker.sock 才能管理 Docker。' }}
+                                </div>
+                            </div>
+
+                            <div v-if="dockerManager.activeTab === 'containers'" class="docker-panel">
+                                <div class="docker-toolbar">
+                                    <div class="docker-search">
+                                        <i class="fa-solid fa-magnifying-glass"></i>
+                                        <input v-model="dockerManager.search" placeholder="搜索容器名称、镜像、状态">
+                                    </div>
+                                    <div class="upgrade-mode-row docker-summary">
+                                        <span class="upgrade-badge ok">全部 {{ dockerManager.containers.length }}</span>
+                                        <span class="upgrade-badge ok">运行中 {{ dockerManager.containers.filter(c => c.state === 'running').length }}</span>
+                                        <span class="upgrade-badge muted">已停止 {{ dockerManager.containers.filter(c => c.state !== 'running').length }}</span>
+                                    </div>
+                                </div>
+
+                                <div v-if="dockerManager.loading" class="empty-state-card">正在加载容器...</div>
+                                <div v-else-if="filteredDockerContainers.length === 0" class="empty-state-card">暂无容器</div>
+                                <div v-else class="docker-container-grid">
+                                    <div v-for="container in filteredDockerContainers" :key="container.id" class="docker-container-card" :class="{running: container.state === 'running', stopped: container.state !== 'running'}">
+                                        <div class="docker-card-head">
+                                            <div class="docker-title-wrap">
+                                                <i class="fa-solid" :class="container.state === 'running' ? 'fa-circle-play docker-state-running' : 'fa-circle-stop docker-state-stopped'"></i>
+                                                <div>
+                                                    <strong>{{ container.name }}</strong>
+                                                    <span>{{ container.short_id }}</span>
+                                                </div>
+                                            </div>
+                                            <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
+                                        </div>
+                                        <div class="docker-meta-list">
+                                            <div><i class="fa-solid fa-layer-group"></i><span>{{ container.image }}</span></div>
+                                            <div><i class="fa-solid fa-network-wired"></i><span>{{ container.ports_text || '未映射端口' }}</span></div>
+                                            <div><i class="fa-solid fa-microchip"></i><span>CPU {{ container.cpu_percent || 0 }}%</span></div>
+                                            <div><i class="fa-solid fa-memory"></i><span>{{ formatDockerBytes(container.memory_usage) }} / {{ formatDockerBytes(container.memory_limit) }}</span></div>
+                                            <div><i class="fa-solid fa-clock"></i><span>{{ container.status }}</span></div>
+                                        </div>
+                                        <div class="docker-card-actions">
+                                            <button v-if="container.state !== 'running'" class="icon-btn icon-btn-success" @click="runDockerContainerAction(container, 'start')" title="启动"><i class="fa-solid fa-play"></i></button>
+                                            <button v-if="container.state === 'running'" class="icon-btn icon-btn-amber" @click="runDockerContainerAction(container, 'stop')" title="停止"><i class="fa-solid fa-stop"></i></button>
+                                            <button class="icon-btn icon-btn-blue" @click="runDockerContainerAction(container, 'restart')" title="重启"><i class="fa-solid fa-rotate-right"></i></button>
+                                            <button class="icon-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i></button>
+                                            <button class="icon-btn icon-btn-green" @click="runDockerContainerAction(container, 'update')" title="拉取镜像并重建"><i class="fa-solid fa-cloud-arrow-down"></i></button>
+                                            <button class="icon-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div v-else-if="dockerManager.activeTab === 'images'" class="docker-panel">
+                                <div class="docker-toolbar docker-toolbar-images">
+                                    <div class="docker-search">
+                                        <i class="fa-solid fa-magnifying-glass"></i>
+                                        <input v-model="dockerManager.imageSearch" placeholder="搜索镜像">
+                                    </div>
+                                    <div class="docker-pull-row">
+                                        <input v-model="dockerManager.pullImage" placeholder="例如：chillne/chillposter:latest" @keydown.enter="pullDockerImage">
+                                        <button class="btn btn-primary" @click="pullDockerImage" :disabled="dockerManager.imagePulling">
+                                            <i class="fa-solid" :class="dockerManager.imagePulling ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i> 拉取镜像
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div v-if="dockerManager.loading" class="empty-state-card">正在加载镜像...</div>
+                                <div v-else-if="filteredDockerImages.length === 0" class="empty-state-card">暂无镜像</div>
+                                <div v-else class="docker-image-table">
+                                    <div class="docker-image-row docker-image-row-head">
+                                        <span>镜像</span><span>大小</span><span>容器</span><span>创建时间</span><span>操作</span>
+                                    </div>
+                                    <div v-for="image in filteredDockerImages" :key="image.id" class="docker-image-row">
+                                        <span class="docker-image-name">{{ image.name }}</span>
+                                        <span>{{ formatDockerBytes(image.size) }}</span>
+                                        <span>{{ image.containers >= 0 ? image.containers : '-' }}</span>
+                                        <span>{{ formatDockerDate(image.created) }}</span>
+                                        <span><button class="icon-btn danger" @click="deleteDockerImage(image)" title="删除镜像"><i class="fa-solid fa-trash"></i></button></span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div v-else-if="dockerManager.activeTab === 'logs'" class="docker-panel">
+                                <div class="docker-toolbar">
+                                    <div class="docker-search">
+                                        <i class="fa-solid fa-file-lines"></i>
+                                        <input :value="dockerManager.selectedContainer ? dockerManager.selectedContainer.name : ''" placeholder="请从容器卡片打开日志" readonly>
+                                    </div>
+                                    <div class="docker-pull-row docker-log-tail">
+                                        <input type="number" v-model.number="dockerManager.logsTail" min="20" max="2000">
+                                        <button class="btn btn-ghost" @click="dockerManager.selectedContainer && openDockerLogs(dockerManager.selectedContainer)" :disabled="!dockerManager.selectedContainer || dockerManager.logsLoading">
+                                            <i class="fa-solid" :class="dockerManager.logsLoading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 重新加载
+                                        </button>
+                                    </div>
+                                </div>
+                                <pre class="docker-log-view">{{ dockerManager.logsLoading ? '日志加载中...' : (dockerManager.logs || '暂无日志') }}</pre>
+                            </div>
+
+                            <div v-else class="docker-panel">
+                                <div class="upgrade-status-grid">
+                                    <div class="upgrade-meta-item"><span>Docker 状态</span><strong>{{ dockerManager.status.available ? '可用' : '不可用' }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>Server Version</span><strong>{{ dockerManager.status.server_version || '--' }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>API Version</span><strong>{{ dockerManager.status.api_version || '--' }}</strong></div>
+                                    <div class="upgrade-meta-item"><span>系统</span><strong>{{ dockerManager.status.os || '--' }} / {{ dockerManager.status.arch || '--' }}</strong></div>
+                                </div>
+                                <div class="info-alert-box">
+                                    <i class="fa-solid fa-shield-halved"></i>
+                                    <div class="info-content">
+                                        <div class="info-alert-box-title">权限提醒</div>
+                                        Docker 管理依赖宿主机 Docker Socket。停止、删除、更新容器都是宿主机级操作，请只对确认无误的容器执行。
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'upgrade'" key="upgrade" class="scroll-view">
                         <div class="content-shell shell-sm">
                             <div class="server-toolbar mb-20">
@@ -4280,6 +4425,7 @@
                         <div class="mobile-more-section-title">网盘与自动化</div>
                         <div class="mobile-more-grid">
                             <button class="mobile-more-item" :class="{active: tab === 'rss'}" @click="selectMobileTab('rss')"><i class="fa-solid fa-rss"></i><span>RSS</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')"><i class="fa-solid fa-list-check"></i><span>缺集</span></button>

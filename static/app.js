@@ -112,6 +112,7 @@ createApp({
 
         const toolboxItems = [
             { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
+            { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' },
             { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
             { id: 'drive115_upload', icon: 'fa-cloud-arrow-up', label: '115秒传/上传', group: '工具箱' },
             { id: 'config_yingchao', icon: 'fa-film', label: '影巢配置', group: '工具箱' },
@@ -150,6 +151,7 @@ createApp({
             'templates',
             'translations',
             'rss',
+            'docker_manager',
             'drive115_cleanup',
             'drive115_upload',
             'webhook',
@@ -418,6 +420,22 @@ createApp({
             container_id: '',
             message: ''
         });
+        const dockerManager = reactive({
+            activeTab: 'containers',
+            loading: false,
+            actionLoading: '',
+            logsLoading: false,
+            imagePulling: false,
+            status: { available: false, message: '' },
+            containers: [],
+            images: [],
+            search: '',
+            imageSearch: '',
+            pullImage: '',
+            selectedContainer: null,
+            logs: '',
+            logsTail: 200,
+        });
 
         const loadProjectVersion = async () => {
             try {
@@ -509,6 +527,153 @@ createApp({
             } catch (e) {
                 upgradeStatus.upgrading = false;
                 showToast('升级启动失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const formatDockerBytes = (size) => {
+            const value = Number(size || 0);
+            if (value < 1024) return `${value} B`;
+            if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+            if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+            return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+        };
+
+        const formatDockerDate = (value) => {
+            const ts = Number(value || 0);
+            if (!ts) return '--';
+            return new Date(ts * 1000).toLocaleString();
+        };
+
+        const filteredDockerContainers = computed(() => {
+            const q = dockerManager.search.trim().toLowerCase();
+            if (!q) return dockerManager.containers;
+            return dockerManager.containers.filter(item =>
+                [item.name, item.image, item.short_id, item.state, item.status].some(v => String(v || '').toLowerCase().includes(q))
+            );
+        });
+
+        const filteredDockerImages = computed(() => {
+            const q = dockerManager.imageSearch.trim().toLowerCase();
+            if (!q) return dockerManager.images;
+            return dockerManager.images.filter(item =>
+                [item.name, item.short_id, ...(item.tags || [])].some(v => String(v || '').toLowerCase().includes(q))
+            );
+        });
+
+        const fetchDockerStatus = async () => {
+            try {
+                const res = await axios.get('/api/docker/status');
+                dockerManager.status = res.data || { available: false, message: '' };
+            } catch (e) {
+                dockerManager.status = { available: false, message: e.response?.data?.detail || e.message || 'Docker 状态获取失败' };
+            }
+        };
+
+        const fetchDockerContainers = async () => {
+            dockerManager.loading = true;
+            try {
+                await fetchDockerStatus();
+                const res = await axios.get('/api/docker/containers');
+                dockerManager.containers = res.data?.containers || [];
+            } catch (e) {
+                showToast('获取容器失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.loading = false;
+            }
+        };
+
+        const fetchDockerImages = async () => {
+            dockerManager.loading = true;
+            try {
+                const res = await axios.get('/api/docker/images');
+                dockerManager.images = res.data?.images || [];
+            } catch (e) {
+                showToast('获取镜像失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.loading = false;
+            }
+        };
+
+        const refreshDockerManager = async () => {
+            if (dockerManager.activeTab === 'images') {
+                await fetchDockerImages();
+            } else {
+                await fetchDockerContainers();
+            }
+        };
+
+        const runDockerContainerAction = async (container, action) => {
+            const actionLabel = { start: '启动', stop: '停止', restart: '重启', remove: '删除', update: '更新镜像并重建' }[action] || action;
+            if (['stop', 'restart', 'remove', 'update'].includes(action)) {
+                const ok = await showConfirm('Docker 管理', `确定要${actionLabel}容器「${container.name}」吗？`, action === 'remove' ? 'danger' : 'warning');
+                if (!ok) return;
+            }
+            let image = '';
+            if (action === 'update') {
+                image = window.prompt('请输入要拉取并重建的镜像', container.image || '');
+                if (!image) return;
+            }
+            dockerManager.actionLoading = `${action}:${container.id}`;
+            try {
+                const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/action`, {
+                    action,
+                    force: action === 'remove',
+                    image,
+                });
+                showToast(res.data?.message || `${actionLabel}已完成`, 'success');
+                await fetchDockerContainers();
+            } catch (e) {
+                showToast(`${actionLabel}失败: ` + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.actionLoading = '';
+            }
+        };
+
+        const openDockerLogs = async (container) => {
+            dockerManager.selectedContainer = container;
+            dockerManager.logs = '';
+            dockerManager.activeTab = 'logs';
+            dockerManager.logsLoading = true;
+            try {
+                const res = await axios.get(`/api/docker/containers/${encodeURIComponent(container.id)}/logs`, {
+                    params: { tail: dockerManager.logsTail || 200 }
+                });
+                dockerManager.logs = res.data?.logs || '';
+            } catch (e) {
+                dockerManager.logs = e.response?.data?.detail || e.message || '日志获取失败';
+            } finally {
+                dockerManager.logsLoading = false;
+            }
+        };
+
+        const pullDockerImage = async () => {
+            const image = dockerManager.pullImage.trim();
+            if (!image) return showToast('请填写镜像名称', 'error');
+            dockerManager.imagePulling = true;
+            try {
+                const res = await axios.post('/api/docker/images/pull', { image });
+                showToast(res.data?.message || '镜像拉取完成', 'success');
+                dockerManager.pullImage = '';
+                await fetchDockerImages();
+            } catch (e) {
+                showToast('拉取失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.imagePulling = false;
+            }
+        };
+
+        const deleteDockerImage = async (image) => {
+            const ok = await showConfirm('删除镜像', `确定要删除镜像「${image.name}」吗？若被容器占用会失败。`, 'danger');
+            if (!ok) return;
+            dockerManager.actionLoading = `image:${image.id}`;
+            try {
+                await axios.delete(`/api/docker/images/${encodeURIComponent(image.id)}`);
+                showToast('镜像已删除', 'success');
+                await fetchDockerImages();
+            } catch (e) {
+                showToast('删除镜像失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.actionLoading = '';
             }
         };
 
@@ -4399,6 +4564,7 @@ createApp({
                 'server':'Emby 配置', 'fonts':'字体库', 'templates':'模板管理',
                 'library_preview':'封面备份', 'translations':'翻译配置', 'account':'账户管理',
                 'upgrade': '系统升级',
+                'docker_manager': 'Docker 管理',
                 'media_subscribe': '发现推荐', 'missing_episode_stats': '缺集统计', 'resource_transfer': '资源转存',
                 'media_organize': '媒体整理', 'media_organize_rules': '二级分类规则', 'strm_generate': 'STRM 生成',
                 'drive115_cleanup': '115 定时清空',
@@ -4687,6 +4853,9 @@ createApp({
         watch(tab, (newVal, oldVal) => {
             if (newVal === 'drive115_cleanup') {
                 fetch115CleanupTasks();
+            }
+            if (newVal === 'docker_manager') {
+                refreshDockerManager();
             }
             if (newVal === 'drive115_upload') {
                 fetch115UploadTasks();
@@ -7879,6 +8048,9 @@ createApp({
             numberDialogState, handleNumberDialog, closeNumberDialog,
             projectVersion, currentUsername, stopTask,
             upgradeStatus, fetchUpgradeStatus, checkUpgrade, startUpgrade,
+            dockerManager, filteredDockerContainers, filteredDockerImages, fetchDockerStatus, fetchDockerContainers, fetchDockerImages,
+            refreshDockerManager, runDockerContainerAction, openDockerLogs, pullDockerImage, deleteDockerImage,
+            formatDockerBytes, formatDockerDate,
             cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,
             fetch115CleanupTasks, openCreate115Cleanup, reset115CleanupForm, save115CleanupTask, edit115CleanupTask,
             delete115CleanupTask, toggle115CleanupTask, run115CleanupTask, open115CleanupBrowser, select115CleanupDir,
