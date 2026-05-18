@@ -4,9 +4,15 @@ import asyncio
 import xml.etree.ElementTree as ET
 from functools import partial
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
-from app.schemas import WechatNotifyConfigModel, TelegramNotifyConfigModel
+from app.schemas import (
+    WechatNotifyConfigModel,
+    TelegramNotifyConfigModel,
+    TelegramSendCodeRequest,
+    TelegramSignInRequest,
+    TelegramDialogsRequest,
+)
 from app.services.wechat_service import wechat_notify_service, NOTIFICATION_TYPES as WECHAT_NOTIFICATION_TYPES
 from app.services.telegram_service import telegram_notify_service
 from app.services.transfer_service import transfer_service
@@ -282,9 +288,9 @@ def get_telegram_notify_config():
 
 @router.post("/api/telegram-notify/config")
 def save_telegram_notify_config(cfg: TelegramNotifyConfigModel):
-    """保存 Telegram 通知配置"""
+    """保存 Telegram 账号监听配置"""
     try:
-        telegram_notify_service.update_config(cfg.model_dump())
+        telegram_notify_service.update_config(cfg.model_dump(exclude_unset=True))
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -296,8 +302,52 @@ def test_telegram_notify():
     result = telegram_notify_service.test_connection()
     if result["success"]:
         return {"status": "ok", "message": result["message"]}
-    else:
-        return {"status": "error", "message": result["message"]}
+    return {"status": "error", "message": result["message"]}
+
+
+@router.get("/api/telegram-notify/status")
+async def get_telegram_status():
+    """获取 Telegram 账号登录与监听状态"""
+    return await telegram_notify_service._account_status_payload()
+
+
+@router.post("/api/telegram-notify/send-code")
+async def send_telegram_login_code(req: TelegramSendCodeRequest):
+    """发送 Telegram 登录验证码"""
+    return await telegram_notify_service.send_login_code_async(req.api_id, req.api_hash, req.phone)
+
+
+@router.post("/api/telegram-notify/sign-in")
+async def sign_in_telegram(req: TelegramSignInRequest):
+    """使用验证码/两步验证密码登录 Telegram"""
+    return await telegram_notify_service.sign_in_async(req.code, req.password)
+
+
+@router.post("/api/telegram-notify/logout")
+async def logout_telegram():
+    """退出 Telegram 账号登录并清理本地 session"""
+    return await telegram_notify_service.logout_async()
+
+
+@router.get("/api/telegram-notify/dialogs")
+async def list_telegram_dialogs():
+    """获取 Telegram 群组与频道列表"""
+    return await telegram_notify_service.list_dialogs_async()
+
+
+@router.get("/api/telegram-notify/avatar/{filename}")
+async def get_telegram_avatar(filename: str):
+    """读取已缓存的 Telegram 群组/频道头像"""
+    path = await telegram_notify_service.avatar_path_async(filename)
+    if not path:
+        raise HTTPException(status_code=404, detail="头像不存在")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@router.post("/api/telegram-notify/dialogs")
+def save_telegram_dialogs(req: TelegramDialogsRequest):
+    """保存 Telegram 监听目标"""
+    return telegram_notify_service.update_selected_dialogs(req.selected_dialogs)
 
 
 @router.post("/api/telegram-notify/send")

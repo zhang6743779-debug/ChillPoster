@@ -123,6 +123,7 @@ createApp({
         const settingsItems = [
             { id: 'server', icon: 'fa-server', label: 'Emby 配置', group: '核心配置' },
             { id: 'config_115', icon: 'fa-cloud', label: '115 配置', group: '核心配置' },
+            { id: 'telegram_monitor', icon: 'fa-satellite-dish', label: 'Telegram 监听', group: '核心配置' },
             { id: 'config_notification', icon: 'fa-bell', label: '通知配置', group: '核心配置' },
             { id: 'config_moviepilot', icon: 'fa-plane', label: 'MoviePilot', group: '核心配置' },
             { id: 'config_proxy', icon: 'fa-globe', label: '代理配置', group: '核心配置' },
@@ -163,6 +164,7 @@ createApp({
             'strm_generate',
             'server',
             'config_115',
+            'telegram_monitor',
             'config_notification',
             'config_yingchao',
             'config_moviepilot',
@@ -2238,6 +2240,17 @@ createApp({
             log_level: 'INFO',
             debug_mode: false,
             app_public_base_url: ''
+        });
+        const sensitiveVisibility = reactive({
+            driveRecycleCode: false,
+            embyApiKey: false,
+            mpPassword: false,
+            tmdbKey: false,
+            doubanCookie: false,
+            accountOldPassword: false,
+            accountNewPassword: false,
+            rapidCookie: {},
+            rapidRecycleCode: {}
         });
 
         // ==========================================
@@ -4769,6 +4782,7 @@ createApp({
             if (val === 'library_preview') fetchLibraryCovers();
             if (val === 'config_yingchao') fetchHdhiveConfig();
             if (val === 'config_notification') { fetchWechatNotifyConfig(); fetchTelegramNotifyConfig(); }
+            if (val === 'telegram_monitor') fetchTelegramNotifyConfig();
             if (val === 'config_302') fetch302Config();
             if (val === 'server') {
                 await fetch302Config();
@@ -4923,6 +4937,7 @@ createApp({
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
+                'telegram_monitor': 'Telegram 监听',
                 'config_telegram': '电报配置', 'config_yingchao': '影巢配置',
                 'config_moviepilot': 'MoviePilot 配置', 'config_proxy': '代理配置',
                 'config_tmdb': 'TMDB 配置'
@@ -5040,6 +5055,13 @@ createApp({
             }
             await restoreRunningOrganizeTask();
             fetchHdhiveConfig();
+            if (tab.value === 'config_notification') {
+                fetchWechatNotifyConfig();
+                fetchTelegramNotifyConfig();
+            }
+            if (tab.value === 'telegram_monitor') {
+                fetchTelegramNotifyConfig();
+            }
             startHdhiveEventStream();
             loadDiscoverSources().then(() => {
                 if (tab.value === 'media_subscribe' && !mainGridItems.value.length) loadMainGrid(true);
@@ -6216,7 +6238,13 @@ createApp({
         const mergeNotifyConfig = (targetConfig, data, fields) => {
             targetConfig.enabled = data.enabled || false;
             fields.forEach((field) => {
-                targetConfig[field] = data[field] || '';
+                if (Array.isArray(targetConfig[field])) {
+                    targetConfig[field] = Array.isArray(data[field]) ? data[field] : [];
+                } else if (typeof targetConfig[field] === 'boolean') {
+                    targetConfig[field] = !!data[field];
+                } else {
+                    targetConfig[field] = data[field] || '';
+                }
             });
             targetConfig.notify_types = { ...createDefaultNotifyTypes(), ...(data.notify_types || {}) };
             const mergedTemplates = createDefaultTemplates();
@@ -6268,8 +6296,10 @@ createApp({
             try {
                 await axios.post(endpoint, buildNotifyPayload(config, fields));
                 showToast(successMessage, 'success');
+                return true;
             } catch (e) {
                 showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
             } finally {
                 savingRef.value = false;
             }
@@ -6325,7 +6355,7 @@ createApp({
         };
 
         const wechatNotifyFields = ['name', 'channel_name', 'corp_id', 'app_secret', 'token', 'agent_id', 'proxy_url', 'encoding_aes_key', 'admin_whitelist'];
-        const telegramNotifyFields = ['name', 'bot_token', 'chat_id'];
+        const telegramNotifyFields = ['name', 'bot_token', 'chat_id', 'account_monitor_enabled', 'api_id', 'api_hash', 'phone', 'selected_dialogs', 'monitor_reply_enabled', 'transfer_dir_mode', 'transfer_dir'];
 
         const wechatNotifyConfig = reactive({
             enabled: false,
@@ -6401,16 +6431,46 @@ createApp({
             name: 'Telegram',
             bot_token: '',
             chat_id: '',
+            account_monitor_enabled: false,
+            api_id: '',
+            api_hash: '',
+            phone: '',
+            selected_dialogs: [],
+            monitor_reply_enabled: false,
+            transfer_dir_mode: 'system',
+            transfer_dir: '',
             notify_types: createDefaultNotifyTypes(),
             templates: createDefaultTemplates(),
-            showToken: false
+            showToken: false,
+            showHash: false,
+            showApiId: false,
+            showPhone: false
         });
+        const telegramStatus = reactive({ authorized: false, monitor_running: false, user: null, message: '' });
+        const telegramLoginForm = reactive({ code: '', password: '', showPassword: false });
+        const telegramDialogs = ref([]);
+        const telegramDialogSearch = ref('');
         const telegramNotifyTesting = ref(false);
         const telegramNotifySending = ref(false);
         const telegramNotifySaving = ref(false);
+        const telegramCodeSending = ref(false);
+        const telegramSigningIn = ref(false);
+        const telegramLoggingOut = ref(false);
+        const telegramDialogsLoading = ref(false);
+        const telegramTransferDirBrowser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: []
+        });
 
         const fetchTelegramNotifyConfig = async () => {
             await fetchNotifyConfig('/api/telegram-notify/config', telegramNotifyConfig, telegramNotifyFields, '获取Telegram通知配置失败');
+            if (!Array.isArray(telegramNotifyConfig.selected_dialogs)) telegramNotifyConfig.selected_dialogs = [];
+            await fetchTelegramStatus();
+            if (telegramStatus.authorized) await fetchTelegramDialogs();
         };
 
         const toggleTelegramNotifyType = (typeKey) => {
@@ -6423,8 +6483,27 @@ createApp({
                 endpoint: '/api/telegram-notify/config',
                 config: telegramNotifyConfig,
                 fields: telegramNotifyFields,
-                successMessage: 'Telegram通知配置已保存'
+                successMessage: 'Telegram配置已保存'
             });
+            await fetchTelegramStatus();
+        };
+
+        const saveTelegramTransferSettings = async () => {
+            if (telegramNotifyConfig.transfer_dir_mode === 'custom' && !String(telegramNotifyConfig.transfer_dir || '').trim()) {
+                showToast('请先选择或填写 Telegram 转存目录', 'error');
+                return;
+            }
+            if (telegramNotifyConfig.transfer_dir_mode !== 'custom') {
+                telegramNotifyConfig.transfer_dir = '';
+            }
+            await saveNotifyConfig({
+                savingRef: telegramNotifySaving,
+                endpoint: '/api/telegram-notify/config',
+                config: telegramNotifyConfig,
+                fields: telegramNotifyFields,
+                successMessage: 'Telegram转存目录设置已保存'
+            });
+            await fetchTelegramStatus();
         };
 
         const testTelegramNotify = async () => {
@@ -6432,7 +6511,212 @@ createApp({
                 testingRef: telegramNotifyTesting,
                 endpoint: '/api/telegram-notify/test'
             });
+            await fetchTelegramStatus();
         };
+
+        const applyTelegramStatus = (data) => {
+            telegramStatus.authorized = !!data?.authorized;
+            telegramStatus.monitor_running = !!data?.monitor_running;
+            telegramStatus.user = data?.user || null;
+            telegramStatus.message = data?.message || '';
+        };
+
+        const fetchTelegramStatus = async () => {
+            try {
+                const res = await axios.get('/api/telegram-notify/status');
+                applyTelegramStatus(res.data || {});
+            } catch (e) {
+                applyTelegramStatus({ authorized: false, monitor_running: false, message: e.message });
+            }
+        };
+
+        const sendTelegramLoginCode = async () => {
+            telegramCodeSending.value = true;
+            try {
+                const res = await axios.post('/api/telegram-notify/send-code', {
+                    api_id: telegramNotifyConfig.api_id,
+                    api_hash: telegramNotifyConfig.api_hash,
+                    phone: telegramNotifyConfig.phone
+                });
+                showToast(res.data.message || (res.data.status === 'ok' ? '验证码已发送' : '发送失败'), res.data.status === 'ok' ? 'success' : 'error');
+            } catch (e) {
+                showToast('验证码发送失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                telegramCodeSending.value = false;
+            }
+        };
+
+        const signInTelegramAccount = async () => {
+            telegramSigningIn.value = true;
+            try {
+                const res = await axios.post('/api/telegram-notify/sign-in', {
+                    code: telegramLoginForm.code,
+                    password: telegramLoginForm.password
+                });
+                const status = res.data.status;
+                if (status === 'ok') {
+                    showToast(res.data.message || 'Telegram登录成功', 'success');
+                    telegramLoginForm.code = '';
+                    telegramLoginForm.password = '';
+                    await fetchTelegramStatus();
+                    await fetchTelegramDialogs();
+                } else if (status === 'need_password') {
+                    showToast(res.data.message || '请输入两步验证密码', 'info');
+                } else {
+                    showToast(res.data.message || '登录失败', 'error');
+                }
+            } catch (e) {
+                showToast('登录失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                telegramSigningIn.value = false;
+            }
+        };
+
+        const logoutTelegramAccount = async () => {
+            telegramLoggingOut.value = true;
+            try {
+                const res = await axios.post('/api/telegram-notify/logout');
+                showToast(res.data.message || '已退出Telegram登录', 'success');
+                telegramDialogs.value = [];
+                await fetchTelegramStatus();
+            } catch (e) {
+                showToast('退出失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                telegramLoggingOut.value = false;
+            }
+        };
+
+        const fetchTelegramDialogs = async () => {
+            telegramDialogsLoading.value = true;
+            try {
+                const res = await axios.get('/api/telegram-notify/dialogs');
+                if (res.data.status === 'ok') {
+                    telegramDialogs.value = res.data.dialogs || [];
+                } else {
+                    telegramDialogs.value = [];
+                    showToast(res.data.message || '请先登录Telegram', 'info');
+                }
+            } catch (e) {
+                showToast('加载群组/频道失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                telegramDialogsLoading.value = false;
+            }
+        };
+
+        const loadTelegramTransferDir = async (cid = '0', path = '/') => {
+            telegramTransferDirBrowser.loading = true;
+            try {
+                const res = await axios.post('/api/drive115_upload/browse115', { cid, drive_index: 0 });
+                if (res.data?.status === 'ok') {
+                    telegramTransferDirBrowser.dirs = res.data.dirs || [];
+                    telegramTransferDirBrowser.currentCid = String(cid || '0');
+                    telegramTransferDirBrowser.currentPath = path || '/';
+                } else {
+                    showToast(res.data?.message || '读取目录失败', 'error');
+                }
+            } catch (e) {
+                showToast('浏览失败: ' + e.message, 'error');
+            } finally {
+                telegramTransferDirBrowser.loading = false;
+            }
+        };
+
+        const browseTelegramTransferDir = () => {
+            if (telegramTransferDirBrowser.visible) {
+                telegramTransferDirBrowser.visible = false;
+                return;
+            }
+            telegramTransferDirBrowser.visible = true;
+            telegramTransferDirBrowser.history.splice(0);
+            loadTelegramTransferDir('0', '/');
+        };
+
+        const selectTelegramTransferDir = (dir) => {
+            telegramTransferDirBrowser.history.push({
+                cid: telegramTransferDirBrowser.currentCid,
+                path: telegramTransferDirBrowser.currentPath
+            });
+            const nextPath = telegramTransferDirBrowser.currentPath === '/' ? `/${dir.name}` : `${telegramTransferDirBrowser.currentPath}/${dir.name}`;
+            loadTelegramTransferDir(dir.cid, nextPath);
+        };
+
+        const telegramTransferDirUp = () => {
+            const prev = telegramTransferDirBrowser.history.pop();
+            if (!prev) return;
+            loadTelegramTransferDir(prev.cid, prev.path);
+        };
+
+        const applyTelegramTransferDir = () => {
+            if (!telegramTransferDirBrowser.currentCid || telegramTransferDirBrowser.currentCid === '0') return showToast('不能选择根目录', 'error');
+            telegramNotifyConfig.transfer_dir = telegramTransferDirBrowser.currentPath;
+            telegramNotifyConfig.transfer_dir_mode = 'custom';
+            telegramTransferDirBrowser.visible = false;
+            telegramTransferDirBrowser.dirs = [];
+            telegramTransferDirBrowser.history = [];
+            showToast('已选择 Telegram 转存目录', 'success');
+        };
+
+        const isTelegramDialogSelected = (dialog) => {
+            return telegramNotifyConfig.selected_dialogs.some(item => String(item.id) === String(dialog.id));
+        };
+
+        const saveTelegramDialogs = async (successMessage = '') => {
+            try {
+                await axios.post('/api/telegram-notify/dialogs', {
+                    selected_dialogs: telegramNotifyConfig.selected_dialogs
+                });
+                await fetchTelegramStatus();
+                if (successMessage) showToast(successMessage, 'success');
+            } catch (e) {
+                showToast('监听目标保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const toggleTelegramDialog = async (dialog, event) => {
+            const checked = !!event.target.checked;
+            const id = String(dialog.id);
+            if (checked && !isTelegramDialogSelected(dialog)) {
+                    telegramNotifyConfig.selected_dialogs.push({
+                        id,
+                        title: dialog.title || '',
+                        type: dialog.type || '',
+                        username: dialog.username || '',
+                        avatar_url: dialog.avatar_url || ''
+                    });
+            } else if (!checked) {
+                telegramNotifyConfig.selected_dialogs = telegramNotifyConfig.selected_dialogs.filter(item => String(item.id) !== id);
+            }
+            await saveTelegramDialogs(checked ? '监听目标已保存' : '监听目标已移除');
+        };
+
+        const selectedTelegramDialogs = computed(() => {
+            if (!Array.isArray(telegramNotifyConfig.selected_dialogs)) return [];
+            return telegramNotifyConfig.selected_dialogs.map((item) => {
+                const matched = telegramDialogs.value.find(dialog => String(dialog.id) === String(item.id));
+                return {
+                    ...item,
+                    title: item.title || matched?.title || `ID ${item.id}`,
+                    type: item.type || matched?.type || '',
+                    username: item.username || matched?.username || '',
+                    avatar_url: item.avatar_url || matched?.avatar_url || ''
+                };
+            });
+        });
+
+        const removeTelegramSelectedDialog = async (dialog) => {
+            const id = String(dialog.id);
+            telegramNotifyConfig.selected_dialogs = telegramNotifyConfig.selected_dialogs.filter(item => String(item.id) !== id);
+            await saveTelegramDialogs('监听目标已移除');
+        };
+
+        const filteredTelegramDialogs = computed(() => {
+            const query = telegramDialogSearch.value.trim().toLowerCase();
+            if (!query) return telegramDialogs.value;
+            return telegramDialogs.value.filter(dialog => {
+                const haystack = `${dialog.title || ''} ${dialog.username || ''} ${dialog.type || ''}`.toLowerCase();
+                return haystack.includes(query);
+            });
+        });
 
         const sendTelegramTestMsg = async () => {
             await sendNotifyTestMessage({
@@ -7259,7 +7543,7 @@ createApp({
             libraries: [],
             activeLibraryKey: '',
             filter: 'all',
-            statusFilter: 'all',
+            statusFilter: 'problem',
             sortBy: 'year_desc',
             searchQuery: '',
             meta: {},
@@ -7278,6 +7562,10 @@ createApp({
         const missingEpisodeActiveSummary = computed(() => {
             return missingEpisodeActiveLibrary.value?.summary || missingEpisodeStats.summary || emptyMissingEpisodeSummary();
         });
+        const missingEpisodeActiveErrorCount = computed(() => {
+            const summary = missingEpisodeActiveSummary.value || {};
+            return (Number(summary.errorCount) || 0) + (Number(summary.missingCount) || 0);
+        });
         const missingEpisodeSearchActive = computed(() => !!String(missingEpisodeStats.searchQuery || '').trim());
         const missingEpisodeStatsProblemItems = computed(() => {
             const query = String(missingEpisodeStats.searchQuery || '').trim().toLowerCase();
@@ -7286,8 +7574,10 @@ createApp({
                 : (missingEpisodeActiveLibrary.value?.items || missingEpisodeStats.items || []);
             const filteredItems = sourceItems.filter(item => {
                 if (missingEpisodeStats.statusFilter === 'problem' && item.status !== 'partial') return false;
-                if (missingEpisodeStats.statusFilter !== 'all' && missingEpisodeStats.statusFilter !== 'problem' && item.status !== missingEpisodeStats.statusFilter) return false;
+                if (missingEpisodeStats.statusFilter === 'error' && item.status !== 'error' && item.status !== 'missing') return false;
+                if (missingEpisodeStats.statusFilter && !['all', 'problem', 'error'].includes(missingEpisodeStats.statusFilter) && item.status !== missingEpisodeStats.statusFilter) return false;
                 if (missingEpisodeStats.filter === 'all') return true;
+                if (missingEpisodeStats.filter === 'error') return item.missingCategory === 'error' || item.status === 'error' || item.status === 'missing';
                 return item.missingCategory === missingEpisodeStats.filter;
             }).filter(item => {
                 if (!query) return true;
@@ -7469,7 +7759,7 @@ createApp({
             missingEpisodeStats.libraries = [];
             missingEpisodeStats.activeLibraryKey = '';
             missingEpisodeStats.filter = 'all';
-            missingEpisodeStats.statusFilter = 'all';
+            missingEpisodeStats.statusFilter = 'problem';
             missingEpisodeStats.sortBy = 'year_desc';
             missingEpisodeStats.searchQuery = '';
             missingEpisodeStats.meta = {};
@@ -7573,11 +7863,21 @@ createApp({
 
         const setMissingEpisodeFilter = (filter) => {
             missingEpisodeStats.filter = filter || 'all';
+            if (missingEpisodeStats.filter === 'error') {
+                missingEpisodeStats.statusFilter = 'error';
+            } else if (missingEpisodeStats.statusFilter === 'error') {
+                missingEpisodeStats.statusFilter = 'problem';
+            }
             resetMissingEpisodeRenderedItems();
         };
 
         const setMissingEpisodeStatusFilter = (filter) => {
-            missingEpisodeStats.statusFilter = filter || 'all';
+            missingEpisodeStats.statusFilter = filter || 'problem';
+            if (missingEpisodeStats.statusFilter === 'exists' || missingEpisodeStats.statusFilter === 'all') {
+                missingEpisodeStats.filter = 'all';
+            } else if (missingEpisodeStats.statusFilter === 'error') {
+                missingEpisodeStats.filter = 'error';
+            }
             resetMissingEpisodeRenderedItems();
         };
 
@@ -8274,7 +8574,14 @@ createApp({
         const transferHistory = ref([]);
         const transferConfig = reactive({ dir: '', drive_index: 0 });
         const transferConfigForm = reactive({ dir: '', drive_index: 0 });
-        const transferDirBrowser = reactive({ show: false, dirs: [], path: '', history: [], cid: '0' });
+        const transferDirBrowser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: []
+        });
 
         const loadTransferConfig = () => {
             if (config302.drives && config302.drives.length > 0) {
@@ -8285,41 +8592,53 @@ createApp({
             }
         };
 
-        const browseTransferDir = async (cid = '0') => {
+        const loadTransferDir = async (cid = '0', path = '/') => {
+            transferDirBrowser.loading = true;
             try {
-                const res = await axios.post('/api/strm/browse115', { cid, drive_index: 0 });
-                if (res.data.status === 'ok') {
+                const res = await axios.post('/api/drive115_upload/browse115', { cid, drive_index: 0 });
+                if (res.data?.status === 'ok') {
                     transferDirBrowser.dirs = res.data.dirs || [];
-                    transferDirBrowser.cid = cid;
-                    transferDirBrowser.show = true;
+                    transferDirBrowser.currentCid = String(cid || '0');
+                    transferDirBrowser.currentPath = path || '/';
                 } else {
-                    showToast(res.data.message, 'error');
+                    showToast(res.data?.message || '读取目录失败', 'error');
                 }
             } catch (e) {
                 showToast('浏览失败: ' + e.message, 'error');
+            } finally {
+                transferDirBrowser.loading = false;
             }
         };
 
-        const selectTransferDir = async (dir) => {
-            transferDirBrowser.history.push({ cid: transferDirBrowser.cid, path: transferDirBrowser.path });
-            transferDirBrowser.path = (transferDirBrowser.path ? transferDirBrowser.path + '/' : '/') + dir.name;
-            await browseTransferDir(dir.cid);
+        const browseTransferDir = () => {
+            if (transferDirBrowser.visible) {
+                transferDirBrowser.visible = false;
+                return;
+            }
+            transferDirBrowser.visible = true;
+            transferDirBrowser.history.splice(0);
+            loadTransferDir('0', '/');
         };
 
-        const transferDirUp = async () => {
-            if (transferDirBrowser.history.length > 0) {
-                const prev = transferDirBrowser.history.pop();
-                transferDirBrowser.path = prev.path;
-                await browseTransferDir(prev.cid);
-            }
+        const selectTransferDir = (dir) => {
+            transferDirBrowser.history.push({ cid: transferDirBrowser.currentCid, path: transferDirBrowser.currentPath });
+            const nextPath = transferDirBrowser.currentPath === '/' ? `/${dir.name}` : `${transferDirBrowser.currentPath}/${dir.name}`;
+            loadTransferDir(dir.cid, nextPath);
+        };
+
+        const transferDirUp = () => {
+            const prev = transferDirBrowser.history.pop();
+            if (!prev) return;
+            loadTransferDir(prev.cid, prev.path);
         };
 
         const applyTransferDir = () => {
-            transferConfigForm.dir = transferDirBrowser.path;
-            transferDirBrowser.show = false;
+            if (!transferDirBrowser.currentCid || transferDirBrowser.currentCid === '0') return showToast('不能选择根目录，留空即使用根目录', 'error');
+            transferConfigForm.dir = transferDirBrowser.currentPath;
+            transferDirBrowser.visible = false;
             transferDirBrowser.dirs = [];
-            transferDirBrowser.path = '';
             transferDirBrowser.history = [];
+            showToast('已选择转存目录', 'success');
         };
 
         const saveTransferConfig = async () => {
@@ -8448,7 +8767,7 @@ createApp({
             hasPrimary115Cookie, needs115Setup, open115ConfigPanel,
 
             // [修复] 全局变量及方法
-            globalConfig, saveGlobalSettings, toggleDebugMode,
+            globalConfig, sensitiveVisibility, saveGlobalSettings, toggleDebugMode,
 
             // [新增] 影巢配置
             hdhiveConfig, hdhiveChecking, fetchHdhiveConfig,
@@ -8464,9 +8783,13 @@ createApp({
             notificationTypes, notificationChannels, templateLabels, toggleNotifyType, templateVars, resetWechatTemplate, resetTelegramTemplate, wrapVar,
 
             // [新增] Telegram通知配置
-            telegramNotifyConfig, telegramNotifyTesting, telegramNotifySending, telegramNotifySaving, telegramTemplateTesting,
+            telegramNotifyConfig, telegramStatus, telegramLoginForm, telegramDialogs, telegramDialogSearch, selectedTelegramDialogs, filteredTelegramDialogs, telegramTransferDirBrowser,
+            telegramNotifyTesting, telegramNotifySending, telegramNotifySaving, telegramTemplateTesting,
+            telegramCodeSending, telegramSigningIn, telegramLoggingOut, telegramDialogsLoading,
             fetchTelegramNotifyConfig, saveTelegramNotifyConfig, testTelegramNotify, sendTelegramTestMsg, testTelegramTemplate,
-            toggleTelegramNotifyType,
+            sendTelegramLoginCode, signInTelegramAccount, logoutTelegramAccount, fetchTelegramDialogs,
+            isTelegramDialogSelected, toggleTelegramDialog, removeTelegramSelectedDialog, toggleTelegramNotifyType,
+            browseTelegramTransferDir, selectTelegramTransferDir, telegramTransferDirUp, applyTelegramTransferDir, saveTelegramTransferSettings,
             
             // 新增移动端变量
             mobileMenuVisible, toggleMobileMenu, selectMobileTab,
@@ -8497,7 +8820,7 @@ createApp({
 
             // [新增] 发现推荐页
             detailModal, openMediaDetail, closeDetailModal,
-            missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
+            missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeActiveErrorCount, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
             visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, onMissingEpisodeLazyScroll,
             runMissingEpisodeStats, refreshMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
             setDetailSeason, toggleDetailSeasonExpanded, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,

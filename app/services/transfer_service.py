@@ -70,7 +70,7 @@ class TransferService:
 
         return self._dedupe_links(links)
 
-    async def process_links(self, links: list[str], source: str = "manual") -> list[dict]:
+    async def process_links(self, links: list[str], source: str = "manual", target_dir: str | None = None) -> list[dict]:
         """批量处理资源链接，ed2k 链接会合并为一次 115 离线任务请求。"""
         normalized = self._dedupe_links([str(link or "").strip() for link in links if str(link or "").strip()])
         if not normalized:
@@ -85,16 +85,16 @@ class TransferService:
                 ed2k_links.append(link)
                 ed2k_positions.append(idx)
             else:
-                results[idx] = await self._process_115_share_link(link, source=source)
+                results[idx] = await self._process_115_share_link(link, source=source, target_dir=target_dir)
 
         if ed2k_links:
-            ed2k_results = await self._process_ed2k_links(ed2k_links, source=source)
+            ed2k_results = await self._process_ed2k_links(ed2k_links, source=source, target_dir=target_dir)
             for idx, result in zip(ed2k_positions, ed2k_results):
                 results[idx] = result
 
         return [result for result in results if result is not None]
 
-    async def process_link(self, link: str, source: str = "manual") -> dict:
+    async def process_link(self, link: str, source: str = "manual", target_dir: str | None = None) -> dict:
         """
         处理单条资源链接。
 
@@ -103,11 +103,11 @@ class TransferService:
         """
         link = str(link or "").strip()
         if self._is_ed2k_link(link):
-            results = await self._process_ed2k_links([link], source=source)
+            results = await self._process_ed2k_links([link], source=source, target_dir=target_dir)
             return results[0]
-        return await self._process_115_share_link(link, source=source)
+        return await self._process_115_share_link(link, source=source, target_dir=target_dir)
 
-    async def _process_115_share_link(self, link: str, source: str = "manual") -> dict:
+    async def _process_115_share_link(self, link: str, source: str = "manual", target_dir: str | None = None) -> dict:
         try:
             payload = share_extract_payload(link)
         except ValueError as e:
@@ -126,7 +126,7 @@ class TransferService:
         share_code = payload.get("share_code", "")
         receive_code = payload.get("receive_code") or ""
 
-        client, cid, client_error = await self._get_transfer_context()
+        client, cid, client_error = await self._get_transfer_context(target_dir=target_dir)
         if not client:
             result = {
                 "success": False,
@@ -207,12 +207,12 @@ class TransferService:
         self._add_history(result, source, link)
         return result
 
-    async def _process_ed2k_links(self, links: list[str], source: str = "manual") -> list[dict]:
+    async def _process_ed2k_links(self, links: list[str], source: str = "manual", target_dir: str | None = None) -> list[dict]:
         links = self._dedupe_links([str(link or "").strip() for link in links if str(link or "").strip()])
         if not links:
             return []
 
-        client, cid, client_error = await self._get_transfer_context()
+        client, cid, client_error = await self._get_transfer_context(target_dir=target_dir)
         if not client:
             return self._build_ed2k_results(links, False, "客户端错误", client_error, source)
 
@@ -238,7 +238,7 @@ class TransferService:
         error_msg = self._response_error(resp) or "未知错误"
         return self._build_ed2k_results(links, False, "离线任务添加失败", error_msg, source)
 
-    async def _get_transfer_context(self):
+    async def _get_transfer_context(self, target_dir: str | None = None):
         cfg = await get_config_302()
         drives = cfg.get("drives", [])
         drive_index = 0
@@ -249,13 +249,13 @@ class TransferService:
         if not client:
             return None, 0, "115 客户端未配置"
 
-        cid = await self._resolve_transfer_cid(client, drives)
+        cid = await self._resolve_transfer_cid(client, drives, target_dir=target_dir)
         return client, cid, ""
 
-    async def _resolve_transfer_cid(self, client, drives) -> int:
+    async def _resolve_transfer_cid(self, client, drives, target_dir: str | None = None) -> int:
         cid = 0
-        transfer_dir = ""
-        if isinstance(drives, list) and len(drives) > 0:
+        transfer_dir = str(target_dir or "").strip()
+        if not transfer_dir and isinstance(drives, list) and len(drives) > 0:
             transfer_dir = str(drives[0].get("transfer_dir", "")).strip()
 
         if not transfer_dir:

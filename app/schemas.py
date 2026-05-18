@@ -138,13 +138,35 @@ class TelegramNotifyConfigModel(BaseModel):
     name: str = "Telegram"
     bot_token: str = ""
     chat_id: str = ""
+    account_monitor_enabled: bool = False
+    api_id: str = ""
+    api_hash: str = ""
+    phone: str = ""
+    selected_dialogs: List[Dict[str, Any]] = Field(default_factory=list)
+    monitor_reply_enabled: bool = False
+    transfer_dir_mode: str = "system"
+    transfer_dir: str = ""
     notify_types: dict = {
         "playback": True,
         "media_added": True,
+        "organize_complete": True,
+        "resource_transfer": True,
         "checkin": True,
         "task_complete": True
     }
     templates: dict = {}
+
+class TelegramSendCodeRequest(BaseModel):
+    api_id: str = ""
+    api_hash: str = ""
+    phone: str = ""
+
+class TelegramSignInRequest(BaseModel):
+    code: str = ""
+    password: str = ""
+
+class TelegramDialogsRequest(BaseModel):
+    selected_dialogs: List[Dict[str, Any]] = Field(default_factory=list)
 
 class ToggleTaskRequest(BaseModel):
     id: str

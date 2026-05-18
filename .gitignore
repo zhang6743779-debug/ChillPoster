@@ -3,6 +3,8 @@ config/*.json
 !config/media_organize_category_rules.json
 config/*.log
 config/*.log.*
+config/telegram_user.session*
+config/telegram_avatars/
 backups/
 
 # === 排除系统与缓存文件 ===

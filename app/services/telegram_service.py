@@ -1,11 +1,12 @@
 # app/services/telegram_service.py
 import os
 import json
+import asyncio
 import threading
 import requests
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-from core.configs import WECHAT_NOTIFY_CONFIG_FILE
+from urllib.parse import urlparse, unquote
+from typing import Any
 from core.logger import logger
 from app.services.notification_formatter import render_template, merge_templates
 
@@ -17,15 +18,116 @@ TELEGRAM_NOTIFY_CONFIG_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "config", "telegram_notify.json"
 )
+TELEGRAM_SESSION_NAME = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "config", "telegram_user"
+)
+TELEGRAM_AVATAR_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "config", "telegram_avatars"
+)
 
 
 class TelegramNotifyService:
-    """Telegram 通知服务 - 支持图文消息"""
+    """Telegram 服务 - 账号登录监听资源消息，并保留旧通知发送入口。"""
 
     def __init__(self):
+        self._lock = threading.Lock()
+        self._login_phone = ""
+        self._login_phone_code_hash = ""
+        self._monitor_thread = None
+        self._monitor_loop = None
+        self._monitor_client = None
+        self._monitor_stop_event = threading.Event()
+        self._monitor_running = False
+        self._account_session_lock = asyncio.Lock()
+        self._account_user_cache = None
         self.config = self._load_config()
         self._proxies = None
         self._load_proxies()
+
+    def _default_config(self) -> dict:
+        return {
+            "enabled": False,
+            "name": "Telegram",
+            "bot_token": "",
+            "chat_id": "",
+            "account_monitor_enabled": False,
+            "api_id": "",
+            "api_hash": "",
+            "phone": "",
+            "selected_dialogs": [],
+            "monitor_reply_enabled": False,
+            "transfer_dir_mode": "system",
+            "transfer_dir": "",
+            "notify_types": {
+                "playback": True,
+                "media_added": True,
+                "organize_complete": True,
+                "resource_transfer": True,
+                "checkin": True,
+                "task_complete": True
+            },
+            "templates": {}
+        }
+
+    def _normalize_selected_dialogs(self, dialogs: Any) -> list[dict]:
+        normalized: list[dict] = []
+        if not isinstance(dialogs, list):
+            return normalized
+        seen = set()
+        for item in dialogs:
+            if not isinstance(item, dict):
+                continue
+            dialog_id = str(item.get("id", "") or "").strip()
+            if not dialog_id or dialog_id in seen:
+                continue
+            seen.add(dialog_id)
+            normalized.append({
+                "id": dialog_id,
+                "title": str(item.get("title", "") or "").strip(),
+                "type": str(item.get("type", "") or "").strip(),
+                "username": str(item.get("username", "") or "").strip().lstrip("@"),
+                "avatar_url": str(item.get("avatar_url", "") or "").strip(),
+            })
+        return normalized
+
+    def _normalize_config(self, config: dict | None) -> dict:
+        data = self._default_config()
+        if isinstance(config, dict):
+            data.update(config)
+
+        # Bot Token/Chat ID 只用于通知发送；账号监听走 MTProto session。
+        data["enabled"] = bool(data.get("enabled"))
+        if "account_monitor_enabled" not in data and "monitor_enabled" in data:
+            data["account_monitor_enabled"] = bool(data.get("monitor_enabled"))
+        data.pop("monitor_enabled", None)
+        data.pop("monitor_chat_ids", None)
+
+        data["bot_token"] = str(data.get("bot_token", "") or "").strip()
+        data["chat_id"] = str(data.get("chat_id", "") or "").strip()
+        data["account_monitor_enabled"] = bool(data.get("account_monitor_enabled"))
+        data["api_id"] = str(data.get("api_id", "") or "").strip()
+        data["api_hash"] = str(data.get("api_hash", "") or "").strip()
+        data["phone"] = str(data.get("phone", "") or "").strip()
+        data["selected_dialogs"] = self._normalize_selected_dialogs(data.get("selected_dialogs"))
+        data["monitor_reply_enabled"] = False
+        data["transfer_dir_mode"] = str(data.get("transfer_dir_mode", "system") or "system").strip()
+        if data["transfer_dir_mode"] not in {"system", "custom"}:
+            data["transfer_dir_mode"] = "system"
+        data["transfer_dir"] = str(data.get("transfer_dir", "") or "").strip()
+
+        notify_types = data.setdefault("notify_types", {})
+        notify_types.setdefault("organize_complete", True)
+        notify_types.setdefault("resource_transfer", True)
+        data["templates"] = merge_templates(data.get("templates"))
+        return data
+
+    def _monitor_transfer_dir(self) -> str | None:
+        if self.config.get("transfer_dir_mode") != "custom":
+            return None
+        transfer_dir = str(self.config.get("transfer_dir", "") or "").strip()
+        return transfer_dir or None
 
     def _load_config(self) -> dict:
         """加载配置"""
@@ -36,22 +138,7 @@ class TelegramNotifyService:
                     config = json.load(f)
             except Exception as e:
                 logger.error(f"[Telegram通知] 加载配置失败: {e}")
-        if config is None:
-            config = {
-                "enabled": False,
-                "name": "Telegram",
-                "bot_token": "",
-                "chat_id": "",
-                "notify_types": {
-                    "playback": True,
-                    "media_added": True,
-                    "checkin": True,
-                    "task_complete": True
-                }
-            }
-        # 合并通知模板
-        config["templates"] = merge_templates(config.get("templates"))
-        return config
+        return self._normalize_config(config)
 
     def _load_proxies(self):
         """加载全局代理配置"""
@@ -77,20 +164,387 @@ class TelegramNotifyService:
 
     def update_config(self, new_config: dict):
         """更新配置"""
-        # 合并通知模板，防止前端未传 templates 时丢失默认模板
-        new_config["templates"] = merge_templates(new_config.get("templates"))
-        self.config = new_config
+        merged_config = dict(self.config)
+        if isinstance(new_config, dict):
+            merged_config.update(new_config)
+        self.config = self._normalize_config(merged_config)
         self._save_config()
         # 重新加载代理
         self._load_proxies()
-        if self.config.get("enabled") and self.config.get("bot_token"):
-            self.start_polling()
+        if self.should_poll():
+            self.start_monitor()
         else:
-            self.stop_polling()
+            self.stop_monitor()
 
     def get_config(self) -> dict:
         """获取配置"""
-        return self.config
+        data = dict(self.config)
+        data["monitor_running"] = self.is_monitor_running()
+        return data
+
+    def should_poll(self) -> bool:
+        """是否需要启动 Telegram 资源监听。"""
+        return bool(
+            self.config.get("account_monitor_enabled")
+            and self.config.get("api_id")
+            and self.config.get("api_hash")
+            and self.config.get("phone")
+            and self.config.get("selected_dialogs")
+        )
+
+    def is_monitor_running(self) -> bool:
+        return bool(self._monitor_running and self._monitor_thread and self._monitor_thread.is_alive())
+
+    def _require_telethon(self):
+        try:
+            from telethon import TelegramClient, events
+            from telethon.errors import (
+                SessionPasswordNeededError,
+                PhoneCodeInvalidError,
+                PhoneCodeExpiredError,
+                PasswordHashInvalidError,
+            )
+            return {
+                "TelegramClient": TelegramClient,
+                "events": events,
+                "SessionPasswordNeededError": SessionPasswordNeededError,
+                "PhoneCodeInvalidError": PhoneCodeInvalidError,
+                "PhoneCodeExpiredError": PhoneCodeExpiredError,
+                "PasswordHashInvalidError": PasswordHashInvalidError,
+            }
+        except ImportError as e:
+            raise RuntimeError("缺少 Telethon 依赖，请先执行 pip install -r requirements.txt") from e
+
+    def _parse_api_id(self) -> int:
+        api_id = str(self.config.get("api_id", "") or "").strip()
+        if not api_id.isdigit():
+            raise ValueError("api_id 必须是数字")
+        return int(api_id)
+
+    def _build_telethon_proxy(self):
+        proxy_url = ""
+        try:
+            import config_manager
+            proxy_url = str(config_manager.APP_CONFIG.get("network_http_proxy", "") or "").strip()
+        except Exception:
+            proxy_url = ""
+        if not proxy_url:
+            return None
+
+        parsed = urlparse(proxy_url)
+        if not parsed.scheme or not parsed.hostname:
+            return None
+        try:
+            import socks
+        except ImportError:
+            logger.warning("[Telegram账号] 已配置代理，但缺少 PySocks 依赖")
+            return None
+
+        scheme = parsed.scheme.lower()
+        if scheme in {"socks5", "socks5h"}:
+            proxy_type = socks.SOCKS5
+        elif scheme in {"socks4", "socks4a"}:
+            proxy_type = socks.SOCKS4
+        elif scheme in {"http", "https"}:
+            proxy_type = socks.HTTP
+        else:
+            return None
+
+        default_port = 1080 if scheme.startswith("socks") else 8080
+        username = unquote(parsed.username) if parsed.username else None
+        password = unquote(parsed.password) if parsed.password else None
+        return (proxy_type, parsed.hostname, parsed.port or default_port, True, username, password)
+
+    def _create_account_client(self):
+        telethon = self._require_telethon()
+        api_hash = str(self.config.get("api_hash", "") or "").strip()
+        if not api_hash:
+            raise ValueError("api_hash 不能为空")
+        os.makedirs(os.path.dirname(TELEGRAM_SESSION_NAME), exist_ok=True)
+        return telethon["TelegramClient"](
+            TELEGRAM_SESSION_NAME,
+            self._parse_api_id(),
+            api_hash,
+            proxy=self._build_telethon_proxy(),
+        )
+
+    async def _acquire_account_session_lock(self):
+        await self._account_session_lock.acquire()
+
+    async def _disconnect_account_client(self, client):
+        try:
+            await client.disconnect()
+        except Exception as e:
+            logger.warning(f"[Telegram账号] 断开客户端失败: {e}")
+
+    async def _account_status_payload(self) -> dict:
+        status = {
+            "authorized": False,
+            "monitor_running": self.is_monitor_running(),
+            "user": None,
+            "message": "未登录",
+        }
+        if not self.config.get("api_id") or not self.config.get("api_hash"):
+            status["message"] = "未配置 api_id/api_hash"
+            return status
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            status["authorized"] = True
+            status["monitor_running"] = self.is_monitor_running()
+            status["user"] = self._account_user_cache
+            status["message"] = "已登录"
+            return status
+
+        await self._acquire_account_session_lock()
+        client = self._create_account_client()
+        try:
+            await client.connect()
+            authorized = await client.is_user_authorized()
+            status["authorized"] = bool(authorized)
+            if authorized:
+                me = await client.get_me()
+                self._account_user_cache = self._format_user(me)
+                status["user"] = self._account_user_cache
+                status["message"] = "已登录"
+        finally:
+            await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+        return status
+
+    def get_account_status(self) -> dict:
+        try:
+            return asyncio.run(self._account_status_payload())
+        except Exception as e:
+            logger.error(f"[Telegram账号] 获取登录状态失败: {e}")
+            return {
+                "authorized": False,
+                "monitor_running": self.is_monitor_running(),
+                "user": None,
+                "message": str(e),
+            }
+
+    def _format_user(self, user) -> dict:
+        if not user:
+            return {}
+        name_parts = [getattr(user, "first_name", "") or "", getattr(user, "last_name", "") or ""]
+        return {
+            "id": str(getattr(user, "id", "") or ""),
+            "name": " ".join(part for part in name_parts if part).strip() or str(getattr(user, "id", "") or ""),
+            "username": getattr(user, "username", "") or "",
+            "phone": getattr(user, "phone", "") or "",
+        }
+
+    async def send_login_code_async(self, api_id: str, api_hash: str, phone: str) -> dict:
+        self.stop_monitor()
+        merged = dict(self.config)
+        merged.update({"api_id": str(api_id or "").strip(), "api_hash": str(api_hash or "").strip(), "phone": str(phone or "").strip()})
+        self.config = self._normalize_config(merged)
+        self._save_config()
+
+        if not self.config.get("phone"):
+            return {"status": "error", "message": "手机号不能为空"}
+
+        await self._acquire_account_session_lock()
+        client = self._create_account_client()
+        try:
+            await client.connect()
+            sent = await client.send_code_request(self.config["phone"])
+            self._login_phone = self.config["phone"]
+            self._login_phone_code_hash = getattr(sent, "phone_code_hash", "") or ""
+            return {"status": "ok", "message": "验证码已发送，请在 Telegram 中查看"}
+        except Exception as e:
+            logger.error(f"[Telegram账号] 发送验证码失败: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+
+    async def sign_in_async(self, code: str, password: str = "") -> dict:
+        code = str(code or "").strip()
+        password = str(password or "")
+        if not code and not password:
+            return {"status": "error", "message": "请输入验证码"}
+
+        telethon = self._require_telethon()
+        await self._acquire_account_session_lock()
+        client = self._create_account_client()
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                try:
+                    if password and not code:
+                        await client.sign_in(password=password)
+                    else:
+                        await client.sign_in(
+                            phone=self._login_phone or self.config.get("phone"),
+                            code=code,
+                            phone_code_hash=self._login_phone_code_hash or None,
+                        )
+                except telethon["SessionPasswordNeededError"]:
+                    if not password:
+                        return {"status": "need_password", "message": "账号已开启两步验证，请输入密码"}
+                    await client.sign_in(password=password)
+
+            me = await client.get_me()
+            self._account_user_cache = self._format_user(me)
+            if self.should_poll():
+                self.start_monitor()
+            return {"status": "ok", "message": "Telegram 登录成功", "user": self._account_user_cache}
+        except telethon["PhoneCodeInvalidError"]:
+            return {"status": "error", "message": "验证码错误"}
+        except telethon["PhoneCodeExpiredError"]:
+            return {"status": "error", "message": "验证码已过期，请重新发送"}
+        except telethon["PasswordHashInvalidError"]:
+            return {"status": "error", "message": "两步验证密码错误"}
+        except Exception as e:
+            logger.error(f"[Telegram账号] 登录失败: {e}")
+            return {"status": "error", "message": str(e)}
+        finally:
+            await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+
+    async def logout_async(self) -> dict:
+        self.stop_monitor()
+        if not self.config.get("api_id") or not self.config.get("api_hash"):
+            self._remove_session_files()
+            return {"status": "ok", "message": "已清除本地 session"}
+
+        await self._acquire_account_session_lock()
+        try:
+            client = self._create_account_client()
+            await client.connect()
+            if await client.is_user_authorized():
+                await client.log_out()
+        except Exception as e:
+            logger.warning(f"[Telegram账号] 登出时清理远端 session 失败: {e}")
+        finally:
+            if "client" in locals():
+                await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+        self._remove_session_files()
+        self._account_user_cache = None
+        return {"status": "ok", "message": "已退出 Telegram 登录"}
+
+    def _remove_session_files(self):
+        for suffix in (".session", ".session-journal"):
+            path = TELEGRAM_SESSION_NAME + suffix
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning(f"[Telegram账号] 删除 session 文件失败: {path}: {e}")
+
+    def _avatar_filename(self, dialog_id: str) -> str:
+        safe_id = "".join(ch for ch in str(dialog_id or "") if ch.isalnum() or ch in {"-", "_"})
+        return f"{safe_id or 'unknown'}.jpg"
+
+    def avatar_path(self, filename: str) -> str | None:
+        safe_name = os.path.basename(str(filename or ""))
+        if not safe_name.endswith(".jpg"):
+            return None
+        path = os.path.join(TELEGRAM_AVATAR_DIR, safe_name)
+        if not os.path.exists(path):
+            return None
+        return path
+
+    def _dialog_avatar_url(self, entity, dialog_id: str) -> str:
+        filename = self._avatar_filename(dialog_id)
+        path = os.path.join(TELEGRAM_AVATAR_DIR, filename)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return f"/api/telegram-notify/avatar/{filename}"
+        if getattr(entity, "photo", None):
+            return f"/api/telegram-notify/avatar/{filename}"
+        return ""
+
+    async def avatar_path_async(self, filename: str) -> str | None:
+        path = self.avatar_path(filename)
+        if path:
+            return path
+
+        safe_name = os.path.basename(str(filename or ""))
+        if not safe_name.endswith(".jpg"):
+            return None
+        dialog_id = safe_name[:-4]
+        if not dialog_id.lstrip("-").isdigit():
+            return None
+
+        await self._acquire_account_session_lock()
+        client = self._create_account_client()
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                return None
+            entity = await client.get_entity(int(dialog_id))
+            return await self._download_dialog_avatar(client, entity, dialog_id)
+        except Exception as e:
+            logger.debug(f"[Telegram账号] 读取会话头像失败 dialog={dialog_id}: {e}")
+            return None
+        finally:
+            await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+
+    async def _download_dialog_avatar(self, client, entity, dialog_id: str) -> str | None:
+        if not getattr(entity, "photo", None):
+            return None
+        os.makedirs(TELEGRAM_AVATAR_DIR, exist_ok=True)
+        filename = self._avatar_filename(dialog_id)
+        path = os.path.join(TELEGRAM_AVATAR_DIR, filename)
+        try:
+            downloaded = await client.download_profile_photo(entity, file=path)
+            if downloaded and os.path.exists(path) and os.path.getsize(path) > 0:
+                return path
+            if os.path.exists(path) and os.path.getsize(path) == 0:
+                os.remove(path)
+        except Exception as e:
+            logger.debug(f"[Telegram账号] 下载会话头像失败 dialog={dialog_id}: {e}")
+        return None
+
+    async def list_dialogs_async(self) -> dict:
+        should_restart_monitor = bool(self._monitor_thread and self._monitor_thread.is_alive())
+        if should_restart_monitor:
+            self.stop_monitor()
+
+        await self._acquire_account_session_lock()
+        client = self._create_account_client()
+        dialogs = []
+        selected_ids = self._selected_dialog_ids()
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                return {"status": "unauthorized", "message": "请先完成 Telegram 登录", "dialogs": []}
+
+            async for dialog in client.iter_dialogs():
+                if not (dialog.is_group or dialog.is_channel):
+                    continue
+                entity = dialog.entity
+                dialog_type = "群组" if dialog.is_group else "频道"
+                dialog_id = str(dialog.id)
+                avatar_url = self._dialog_avatar_url(entity, dialog_id)
+                dialogs.append({
+                    "id": dialog_id,
+                    "title": dialog.name or "",
+                    "type": dialog_type,
+                    "username": getattr(entity, "username", "") or "",
+                    "avatar_url": avatar_url,
+                    "selected": dialog_id in selected_ids,
+                })
+        finally:
+            await self._disconnect_account_client(client)
+            self._account_session_lock.release()
+            if should_restart_monitor and self.should_poll():
+                self.start_monitor()
+        return {"status": "ok", "dialogs": dialogs}
+
+    def update_selected_dialogs(self, selected_dialogs: list[dict]) -> dict:
+        self.config["selected_dialogs"] = self._normalize_selected_dialogs(selected_dialogs)
+        self._save_config()
+        if self.should_poll():
+            self.start_monitor()
+        else:
+            self.stop_monitor()
+        return {"status": "ok", "selected_dialogs": self.config["selected_dialogs"]}
+
+    def _selected_dialog_ids(self) -> set[str]:
+        return {str(item.get("id", "") or "").strip() for item in self.config.get("selected_dialogs", []) if str(item.get("id", "") or "").strip()}
 
     def _send_request(self, method: str, payload: dict) -> bool:
         """发送请求到 Telegram API"""
@@ -264,7 +718,7 @@ class TelegramNotifyService:
 
     def is_notify_type_enabled(self, notify_type: str) -> bool:
         """检查特定类型的通知是否启用"""
-        if not self.config.get("enabled"):
+        if not (self.config.get("enabled") and self.config.get("bot_token") and self.config.get("chat_id")):
             return False
         notify_types = self.config.get("notify_types", {})
         return notify_types.get(notify_type, False)
@@ -530,142 +984,145 @@ class TelegramNotifyService:
         return self.send_message_with_image(title, description, poster_url)
 
     # ==========================================
-    # Long Polling 接收消息（用于资源转存）
+    # Telegram 账号监听（MTProto / Telethon）
     # ==========================================
 
+    def start_monitor(self):
+        """启动 Telegram 用户账号消息监听。"""
+        if not self.should_poll():
+            logger.debug("[Telegram账号] 未启用、未登录配置或未选择监听目标，跳过启动")
+            return
+        with self._lock:
+            if self.is_monitor_running():
+                return
+            self._monitor_stop_event = threading.Event()
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_thread_main,
+                daemon=True,
+                name="telegram-account-monitor",
+            )
+            self._monitor_thread.start()
+        logger.info("[Telegram账号] 监听线程已启动")
+
+    def stop_monitor(self):
+        """停止 Telegram 用户账号消息监听。"""
+        self._monitor_stop_event.set()
+        loop = self._monitor_loop
+        client = self._monitor_client
+        if loop and client and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(client.disconnect(), loop)
+            except Exception:
+                pass
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=5)
+        self._monitor_running = False
+
+    # 兼容 main.py 以及旧调用名称；这里已经不是 Bot polling。
     def start_polling(self):
-        """启动 Telegram long polling 后台线程"""
-        if not self.config.get("enabled") or not self.config.get("bot_token"):
-            logger.debug("[Telegram通知] 未启用或未配置 token，跳过 polling 启动")
-            return
-        if getattr(self, '_polling', False):
-            return
-        self._polling = True
-        self._offset = 0
-        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True, name="tg-poll")
-        self._poll_thread.start()
-        logger.info("[Telegram通知] Long polling 已启动")
+        self.start_monitor()
 
     def stop_polling(self):
-        """停止 long polling"""
-        self._polling = False
-        # 等待 polling 线程退出（最多等3秒）
-        if getattr(self, '_poll_thread', None) and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=3)
-        logger.info("[Telegram通知] Long polling 已停止")
+        self.stop_monitor()
 
-    def _api_request(self, method: str, payload: dict = None, use_get: bool = False) -> dict:
-        """调用 Telegram Bot API"""
-        bot_token = self.config.get("bot_token", "")
-        url = f"https://api.telegram.org/bot{bot_token}/{method}"
-        # getUpdates 使用 GET 请求 + 长超时（客户端 timeout 要大于服务端 long polling timeout）
-        timeout = 60 if method == "getUpdates" else 30
+    def _monitor_thread_main(self):
+        loop = asyncio.new_event_loop()
+        self._monitor_loop = loop
         try:
-            if use_get or method == "getUpdates":
-                resp = requests.get(url, params=payload or {}, proxies=self._proxies, timeout=timeout)
-            else:
-                resp = requests.post(url, json=payload or {}, proxies=self._proxies, timeout=timeout)
-            return resp.json()
+            loop.run_until_complete(self._monitor_runner())
+        finally:
+            self._monitor_running = False
+            self._monitor_client = None
+            self._monitor_loop = None
+            loop.close()
+
+    async def _monitor_runner(self):
+        telethon = self._require_telethon()
+        client = self._create_account_client()
+        self._monitor_client = client
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.warning("[Telegram账号] session 未登录，监听未启动")
+                return
+            self._account_user_cache = self._format_user(await client.get_me())
+
+            async def _handler(event):
+                await self._handle_telethon_event(event)
+
+            client.add_event_handler(_handler, telethon["events"].NewMessage)
+            self._monitor_running = True
+            selected_count = len(self._selected_dialog_ids())
+            logger.info(f"[Telegram账号] 消息监听已运行，目标数: {selected_count}")
+
+            while not self._monitor_stop_event.is_set() and client.is_connected():
+                await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"[Telegram通知] API 请求异常 ({method}): {e}")
-            return {}
-
-    def _poll_loop(self):
-        """Long polling 循环"""
-        logger.info("[Telegram通知] Polling 循环已开始")
-        while getattr(self, '_polling', False):
+            logger.error(f"[Telegram账号] 监听异常: {e}", exc_info=True)
+        finally:
             try:
-                resp = self._api_request("getUpdates", {
-                    "offset": self._offset,
-                    "timeout": 30,
-                    "allowed_updates": ["message"],
-                })
-                if not resp.get("ok"):
-                    logger.warning(f"[Telegram通知] getUpdates 失败: {resp}")
-                    import time
-                    time.sleep(5)
-                    continue
+                await client.disconnect()
+            except Exception:
+                pass
+            logger.info("[Telegram账号] 消息监听已停止")
 
-                for update in resp.get("result", []):
-                    self._offset = update["update_id"] + 1
-                    self._handle_update(update)
-
-            except Exception as e:
-                if self._polling:
-                    logger.error(f"[Telegram通知] Polling 异常: {e}")
-                    import time
-                    time.sleep(5)
-
-        logger.info("[Telegram通知] Polling 循环已退出")
-
-    def _extract_message_links(self, msg: dict) -> list[str]:
+    def _extract_telethon_links(self, message) -> list[str]:
         from app.services.transfer_service import transfer_service
 
         links: list[str] = []
-        for field in ("text", "caption"):
-            value = str(msg.get(field, "") or "")
-            if value:
-                links.extend(transfer_service.extract_links(value))
+        raw_text = str(getattr(message, "raw_text", "") or getattr(message, "message", "") or "")
+        if raw_text:
+            links.extend(transfer_service.extract_links(raw_text))
 
-        for field in ("entities", "caption_entities"):
-            for entity in msg.get(field, []) or []:
-                url = str(entity.get("url", "") or "").strip()
-                if url:
-                    links.extend(transfer_service.extract_links(url))
+        for entity in getattr(message, "entities", None) or []:
+            url = str(getattr(entity, "url", "") or "").strip()
+            if url:
+                links.extend(transfer_service.extract_links(url))
 
-        reply_markup = msg.get("reply_markup") or {}
-        for row in reply_markup.get("inline_keyboard", []) or []:
+        for row in getattr(message, "buttons", None) or []:
             for button in row or []:
-                if not isinstance(button, dict):
-                    continue
-                url = str(button.get("url", "") or "").strip()
-                if url:
-                    links.extend(transfer_service.extract_links(url))
-                login_url = button.get("login_url") if isinstance(button.get("login_url"), dict) else {}
-                url = str(login_url.get("url", "") or "").strip()
+                url = str(getattr(button, "url", "") or "").strip()
                 if url:
                     links.extend(transfer_service.extract_links(url))
 
         return transfer_service._dedupe_links(links)
 
-    def _handle_update(self, update: dict):
-        """处理单条 Telegram update"""
-        msg = update.get("message", {})
+    async def _handle_telethon_event(self, event):
+        if getattr(event, "out", False):
+            return
 
-        # 提取资源链接
-        links = self._extract_message_links(msg)
+        selected_ids = self._selected_dialog_ids()
+        event_chat_id = str(getattr(event, "chat_id", "") or "")
+        if not selected_ids or event_chat_id not in selected_ids:
+            return
+
+        links = self._extract_telethon_links(event.message)
         if not links:
             return
 
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        logger.info(f"[Telegram通知] 收到 {len(links)} 条资源链接 (chat={chat_id})")
+        logger.info(f"[Telegram账号] 收到 {len(links)} 条资源链接 (chat={event_chat_id})")
 
         from app.services.transfer_service import transfer_service
 
-        # 同步处理转存（polling 在后台线程中）
-        import asyncio
-        loop = asyncio.new_event_loop()
         try:
-            results = loop.run_until_complete(
-                transfer_service.process_links(links, source="telegram")
+            results = await transfer_service.process_links(
+                links,
+                source="telegram",
+                target_dir=self._monitor_transfer_dir(),
             )
             for result in results:
-                # 回复发消息者
-                reply = result.get("message", "转存完成")
-                self.send_message(reply, chat_id=chat_id)
-
-                # 发送转存通知到所有启用的渠道
                 try:
                     from app.routers.wechat_notify import send_to_all_channels
-                    send_to_all_channels(
+                    await asyncio.to_thread(
+                        send_to_all_channels,
                         title=result.get("status", "转存"),
                         description=result.get("message", ""),
                         notify_type="resource_transfer",
                     )
                 except Exception as e:
-                    logger.error(f"[Telegram通知] 发送转存通知失败: {e}")
-        finally:
-            loop.close()
+                    logger.error(f"[Telegram账号] 发送转存通知失败: {e}")
+        except Exception as e:
+            logger.error(f"[Telegram账号] 处理资源消息失败: {e}", exc_info=True)
 
 
 # 全局实例

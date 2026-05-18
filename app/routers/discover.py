@@ -1671,10 +1671,12 @@ def _build_missing_episode_stat(entry: dict, api_key: str) -> dict:
             label = f"已入库 {present_episodes}/{total_episodes}"
         elif present_episodes > 0:
             status = "partial"
-            label = f"部分入库 {present_episodes}/{total_episodes}"
+            label = f"已入库缺集 {present_episodes}/{total_episodes}"
         else:
-            status = "missing"
-            label = "未入库"
+            status = "error"
+            label = "刮削异常"
+            missing_category = "error"
+            category_label = "统计异常"
         poster_url = normalized.get("poster_url") or ""
         backdrop_url = normalized.get("backdrop_url") or ""
         item = {
@@ -1738,7 +1740,7 @@ def _accumulate_missing_episode_summary(summary: dict, item: dict) -> None:
     elif status == "partial":
         summary["partialCount"] += 1
     elif status == "missing":
-        summary["missingCount"] += 1
+        summary["errorCount"] += 1
     elif status == "error":
         summary["errorCount"] += 1
     category = item.get("missingCategory")
@@ -1795,7 +1797,7 @@ def _build_missing_episode_libraries_from_entries(entries: list[dict]) -> list[d
 
 _missing_episode_stats_lock = threading.RLock()
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
-MISSING_EPISODE_STATS_CACHE_VERSION = 4
+MISSING_EPISODE_STATS_CACHE_VERSION = 5
 _missing_episode_stats_state: dict = {
     "cache_key": "",
     "running": False,

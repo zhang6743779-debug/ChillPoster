@@ -211,8 +211,8 @@ async def lifespan_ui(app: FastAPI):
     rss_service_instance.load_active_jobs()
     hdhive_service.setup_scheduler(task_service_instance.scheduler)
     drive115_upload_service.start()
-    if telegram_notify_service.config.get("enabled") and telegram_notify_service.config.get("bot_token"):
-        telegram_notify_service.start_polling()
+    if telegram_notify_service.should_poll():
+        telegram_notify_service.start_monitor()
     logger.info("[启动] 基础任务与服务初始化完成")
 
     # 加载 Emby 媒体库缓存
@@ -278,7 +278,7 @@ async def lifespan_ui(app: FastAPI):
             life_event_monitor.stop()
     except Exception:
         pass
-    telegram_notify_service.stop_polling()
+    telegram_notify_service.stop_monitor()
     try:
         drive115_upload_service.stop()
     except Exception:

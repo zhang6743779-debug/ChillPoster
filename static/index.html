@@ -100,6 +100,9 @@
                     <div class="nav-item" :class="{active: tab === 'config_115'}" @click="tab = 'config_115'">
                         <i class="fa-solid fa-cloud"></i> 115 配置
                     </div>
+                    <div class="nav-item" :class="{active: tab === 'telegram_monitor'}" @click="tab = 'telegram_monitor'">
+                        <i class="fa-solid fa-satellite-dish"></i> Telegram 监听
+                    </div>
                     <div class="nav-item" :class="{active: tab === 'config_notification'}" @click="tab = 'config_notification'">
                         <i class="fa-solid fa-bell"></i> 通知配置
                     </div>
@@ -584,7 +587,7 @@
                                     </div>
 
                                     <div class="form-grid-3">
-                                        <div>
+                                        <div class="telegram-transfer-dir-control">
                                             <label>订阅名称</label>
                                             <input v-model="rssForm.name" placeholder="例如: 热播国产剧">
                                         </div>
@@ -1266,9 +1269,9 @@
                                     完结缺集
                                     <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
                                 </button>
-                                <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')" v-if="missingEpisodeActiveSummary.errorCount">
+                                <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')" v-if="missingEpisodeActiveErrorCount">
                                     统计异常
-                                    <strong>{{ missingEpisodeActiveSummary.errorCount || 0 }}</strong>
+                                    <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
                                 </button>
                             </div>
 
@@ -1291,11 +1294,10 @@
                                 <div class="missing-episode-mobile-control-group">
                                     <div class="missing-episode-mobile-control-title">状态</div>
                                     <div class="missing-episode-mobile-chip-scroll">
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                         <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'problem'}" @click="setMissingEpisodeStatusFilter('problem')">已入库缺集</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'partial'}" @click="setMissingEpisodeStatusFilter('partial')">部分入库</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'missing'}" @click="setMissingEpisodeStatusFilter('missing')">未入库</button>
+                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'exists'}" @click="setMissingEpisodeStatusFilter('exists')">完整入库</button>
                                         <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'error'}" @click="setMissingEpisodeStatusFilter('error')">异常</button>
+                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                     </div>
                                 </div>
                                 <div class="missing-episode-mobile-control-group">
@@ -1337,12 +1339,12 @@
 
                                     <div class="missing-episode-summary-grid">
                                         <div class="missing-episode-summary-card partial">
-                                            <span>部分入库</span>
+                                            <span>已入库缺集</span>
                                             <strong>{{ missingEpisodeActiveSummary.partialCount }}</strong>
                                         </div>
-                                        <div class="missing-episode-summary-card missing">
-                                            <span>未入库</span>
-                                            <strong>{{ missingEpisodeActiveSummary.missingCount }}</strong>
+                                        <div class="missing-episode-summary-card error">
+                                            <span>异常</span>
+                                            <strong>{{ missingEpisodeActiveErrorCount }}</strong>
                                         </div>
                                         <div class="missing-episode-summary-card exists">
                                             <span>完整入库</span>
@@ -1357,11 +1359,10 @@
                                     <div class="missing-episode-control-panel">
                                         <div class="missing-episode-panel-title">状态</div>
                                         <div class="missing-episode-chip-grid">
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                             <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'problem'}" @click="setMissingEpisodeStatusFilter('problem')">已入库缺集</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'partial'}" @click="setMissingEpisodeStatusFilter('partial')">部分入库</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'missing'}" @click="setMissingEpisodeStatusFilter('missing')">未入库</button>
+                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'exists'}" @click="setMissingEpisodeStatusFilter('exists')">完整入库</button>
                                             <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'error'}" @click="setMissingEpisodeStatusFilter('error')">异常</button>
+                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                         </div>
                                         <div class="missing-episode-panel-title">排序</div>
                                         <div class="missing-episode-chip-grid sort">
@@ -1448,7 +1449,7 @@
                                     </div>
                                     <div v-else-if="missingEpisodeStats.loaded" class="mp-empty missing-episode-empty">
                                         <i class="fa-solid fa-circle-check"></i>
-                                        <div>{{ missingEpisodeSearchActive ? '全局搜索没有匹配结果。' : '当前媒体库在这个筛选下没有缺集。' }}</div>
+                                        <div>{{ missingEpisodeSearchActive ? '全局搜索没有匹配结果。' : '当前媒体库在这个筛选下没有结果。' }}</div>
                                     </div>
                                 </section>
                             </div>
@@ -1498,19 +1499,27 @@
                                         <div class="form-row-tight">
                                             <label class="form-row-label">转存目录</label>
                                             <input class="form-control form-row-grow" v-model="transferConfigForm.dir" placeholder="留空则使用根目录">
-                                            <button class="btn btn-ghost btn-sm" @click="browseTransferDir()"><i class="fa-solid fa-folder-open"></i></button>
+                                            <button class="btn btn-ghost btn-sm" @click="browseTransferDir()">
+                                                <i class="fa-solid" :class="transferDirBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                {{ transferDirBrowser.visible ? '关闭浏览' : '浏览 115 文件夹' }}
+                                            </button>
                                         </div>
                                         <!-- 目录浏览器 -->
-                                        <div v-if="transferDirBrowser.show" class="dir-browser">
-                                            <div class="dir-browser-head">
-                                                <span v-if="transferDirBrowser.history.length>0" class="dir-browser-up" @click="transferDirUp"><i class="fa-solid fa-arrow-left"></i> 上级</span>
-                                                <span>{{ transferDirBrowser.path || '/' }}</span>
-                                                <button class="btn btn-ghost dir-browser-select-btn" @click="applyTransferDir">选择此目录</button>
+                                        <div v-if="transferDirBrowser.visible" class="cleanup-browser mt-15">
+                                            <div class="cleanup-browser-header">
+                                                <button class="btn btn-ghost btn-sm" @click="transferDirUp" :disabled="transferDirBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                                <span>{{ transferDirBrowser.currentPath }}</span>
+                                                <button class="btn btn-primary btn-sm" @click="applyTransferDir" :disabled="transferDirBrowser.currentCid === '0'">选择当前目录</button>
+                                                <button class="btn btn-ghost btn-sm" @click="transferDirBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
                                             </div>
-                                            <div v-for="dir in transferDirBrowser.dirs" :key="dir.cid"
-                                                class="dir-browser-item"
-                                                @click="selectTransferDir(dir)">
-                                                <i class="fa-solid fa-folder"></i> {{ dir.name }}
+                                            <div class="cleanup-browser-list">
+                                                <div v-if="transferDirBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                                <div v-else-if="transferDirBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                                <div v-else v-for="dir in transferDirBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectTransferDir(dir)">
+                                                    <i class="fa-solid fa-folder"></i>
+                                                    <span>{{ dir.name }}</span>
+                                                    <i class="fa-solid fa-chevron-right"></i>
+                                                </div>
                                             </div>
                                         </div>
                                         </template>
@@ -2448,7 +2457,12 @@
                                         <input type="text" v-model="config302.embys[0].public_host" placeholder="例如: https://emby.example.com:999">
 
                                         <label>Emby 密钥 (API Key)</label>
-                                        <input type="text" v-model="config302.embys[0].key">
+                                        <div class="form-row-tight">
+                                            <input :type="sensitiveVisibility.embyApiKey ? 'text' : 'password'" v-model="config302.embys[0].key" class="form-row-grow">
+                                            <button class="icon-btn" @click="sensitiveVisibility.embyApiKey = !sensitiveVisibility.embyApiKey" :class="sensitiveVisibility.embyApiKey ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                <i class="fa-solid" :class="sensitiveVisibility.embyApiKey ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                            </button>
+                                        </div>
 
                                         <label>反代端口号</label>
                                         <input type="text" v-model="config302.embys[0].proxy_port">
@@ -2721,7 +2735,12 @@
                                                                 </button>
                                                             </div>
 
-                                                            <input class="rapid-account-cookie" type="text" v-model="acc.cookie" placeholder="输入此账号的 Cookie">
+                                                            <div class="form-row-tight rapid-account-secret-row">
+                                                                <input class="rapid-account-cookie form-row-grow" :type="sensitiveVisibility.rapidCookie[aIdx] ? 'text' : 'password'" v-model="acc.cookie" placeholder="输入此账号的 Cookie">
+                                                                <button class="icon-btn" @click="sensitiveVisibility.rapidCookie[aIdx] = !sensitiveVisibility.rapidCookie[aIdx]" :class="sensitiveVisibility.rapidCookie[aIdx] ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                                    <i class="fa-solid" :class="sensitiveVisibility.rapidCookie[aIdx] ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                                </button>
+                                                            </div>
 
                                                             <div class="rapid-account-grid">
                                                                 <div>
@@ -2730,7 +2749,12 @@
                                                                 </div>
                                                                 <div>
                                                                     <label>回收站安全码</label>
-                                                                    <input type="password" v-model="acc.recycle_code" placeholder="默认主号配置">
+                                                                    <div class="form-row-tight rapid-account-secret-row">
+                                                                        <input :type="sensitiveVisibility.rapidRecycleCode[aIdx] ? 'text' : 'password'" v-model="acc.recycle_code" placeholder="默认主号配置" class="form-row-grow">
+                                                                        <button class="icon-btn" @click="sensitiveVisibility.rapidRecycleCode[aIdx] = !sensitiveVisibility.rapidRecycleCode[aIdx]" :class="sensitiveVisibility.rapidRecycleCode[aIdx] ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                                            <i class="fa-solid" :class="sensitiveVisibility.rapidRecycleCode[aIdx] ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
                                                             </div>
 
@@ -2768,8 +2792,10 @@
 
                                             <label>回收站安全码</label>
                                             <div class="inline-form-row">
-                                                <input class="form-grow" type="password" v-model="config302.drives[0].recycle_code">
-                                                <button class="btn btn-ghost input-icon-btn"><i class="fa-solid fa-eye"></i></button>
+                                                <input class="form-grow" :type="sensitiveVisibility.driveRecycleCode ? 'text' : 'password'" v-model="config302.drives[0].recycle_code">
+                                                <button class="btn btn-ghost input-icon-btn" @click="sensitiveVisibility.driveRecycleCode = !sensitiveVisibility.driveRecycleCode" :class="sensitiveVisibility.driveRecycleCode ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="sensitiveVisibility.driveRecycleCode ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
                                             </div>
 
                                             <label>复制/秒传目录</label>
@@ -2812,6 +2838,216 @@
                         </div>
                     </div>
 
+                    <div v-else-if="tab === 'telegram_monitor'" key="telegram_monitor" class="scroll-view">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <h2><i class="fa-solid fa-satellite-dish icon-brand-telegram"></i> Telegram 账号监听</h2>
+                            </div>
+
+                            <div class="card mb-15">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-user-check icon-brand-telegram-alt"></i> 账号监听接入</div>
+                                    <label class="ios-switch" title="使用Telegram账号监听已选择的群组和频道">
+                                        <input type="checkbox" v-model="telegramNotifyConfig.account_monitor_enabled">
+                                        <span class="ios-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="card-body">
+                                    <div class="status-badge mb-12">
+                                        <span class="dot" :class="telegramStatus.authorized ? 'ok' : 'error'"></span>
+                                        {{ telegramStatus.authorized ? '已登录' : '未登录' }}
+                                        <span v-if="telegramStatus.user && telegramStatus.user.name"> · {{ telegramStatus.user.name }}</span>
+                                        <span v-if="telegramStatus.monitor_running"> · 监听中</span>
+                                    </div>
+                                    <div class="notify-form-grid">
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-id-card icon-brand-telegram-alt"></i> API ID</label>
+                                            <div class="form-row-tight">
+                                                <input :type="telegramNotifyConfig.showApiId ? 'text' : 'password'" v-model="telegramNotifyConfig.api_id" placeholder="12345678" class="form-row-grow" inputmode="numeric">
+                                                <button class="icon-btn" @click="telegramNotifyConfig.showApiId = !telegramNotifyConfig.showApiId" :class="telegramNotifyConfig.showApiId ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="telegramNotifyConfig.showApiId ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
+                                            </div>
+                                            <div class="hint">
+                                                在 Telegram 官方应用页面获取：
+                                                <a href="https://my.telegram.org/apps" target="_blank" rel="noopener noreferrer">my.telegram.org/apps</a>
+                                            </div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-key icon-brand-telegram-alt"></i> API Hash</label>
+                                            <div class="form-row-tight">
+                                                <input :type="telegramNotifyConfig.showHash ? 'text' : 'password'" v-model="telegramNotifyConfig.api_hash" placeholder="0123456789abcdef0123456789abcdef" class="form-row-grow">
+                                                <button class="icon-btn" @click="telegramNotifyConfig.showHash = !telegramNotifyConfig.showHash" :class="telegramNotifyConfig.showHash ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="telegramNotifyConfig.showHash ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
+                                            </div>
+                                            <div class="hint">和 API ID 在同一个页面创建应用后一起显示</div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-mobile-screen icon-brand-telegram-alt"></i> 手机号</label>
+                                            <div class="form-row-tight">
+                                                <input :type="telegramNotifyConfig.showPhone ? 'text' : 'password'" v-model="telegramNotifyConfig.phone" placeholder="+8613800000000" class="form-row-grow" inputmode="tel">
+                                                <button class="icon-btn" @click="telegramNotifyConfig.showPhone = !telegramNotifyConfig.showPhone" :class="telegramNotifyConfig.showPhone ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="telegramNotifyConfig.showPhone ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-shield-halved icon-brand-telegram-alt"></i> 验证码</label>
+                                            <input type="text" v-model="telegramLoginForm.code" placeholder="12345">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-lock icon-brand-telegram-alt"></i> 两步验证密码</label>
+                                            <div class="form-row-tight">
+                                                <input :type="telegramLoginForm.showPassword ? 'text' : 'password'" v-model="telegramLoginForm.password" placeholder="未开启可留空" class="form-row-grow">
+                                                <button class="icon-btn" @click="telegramLoginForm.showPassword = !telegramLoginForm.showPassword" :class="telegramLoginForm.showPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="telegramLoginForm.showPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="hint notify-hint-box">
+                                        <i class="fa-solid fa-info-circle"></i> Telegram 使用全局代理设置，请在「基本配置」中配置代理
+                                    </div>
+                                    <div class="form-actions-end">
+                                        <button class="btn btn-ghost" @click="sendTelegramLoginCode" :disabled="telegramCodeSending">
+                                            <i class="fa-solid" :class="telegramCodeSending ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i> 发送验证码
+                                        </button>
+                                        <button class="btn btn-ghost" @click="signInTelegramAccount" :disabled="telegramSigningIn">
+                                            <i class="fa-solid" :class="telegramSigningIn ? 'fa-spinner fa-spin' : 'fa-right-to-bracket'"></i> 登录
+                                        </button>
+                                        <button class="btn btn-ghost" @click="logoutTelegramAccount" :disabled="telegramLoggingOut || !telegramStatus.authorized">
+                                            <i class="fa-solid" :class="telegramLoggingOut ? 'fa-spinner fa-spin' : 'fa-right-from-bracket'"></i> 退出
+                                        </button>
+                                        <button class="btn btn-primary" @click="saveTelegramNotifyConfig" :disabled="telegramNotifySaving">
+                                            <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-satellite-dish icon-brand-telegram-alt"></i> 监听目标</div>
+                                    <span class="hint">勾选后自动保存 · 已选择 {{ telegramNotifyConfig.selected_dialogs.length }} 个目标</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="notify-form-grid">
+                                        <div>
+                                            <label><i class="fa-solid fa-folder-tree icon-brand-telegram-alt"></i> 转存目录</label>
+                                            <div class="pill-group mb-12">
+                                                <button class="pill-btn pill-btn-accent-green"
+                                                        :class="{ active: telegramNotifyConfig.transfer_dir_mode !== 'custom' }"
+                                                        @click="telegramNotifyConfig.transfer_dir_mode = 'system'">
+                                                    <i class="fa-solid fa-box-archive"></i> 系统转存目录
+                                                </button>
+                                                <button class="pill-btn pill-btn-accent-purple"
+                                                        :class="{ active: telegramNotifyConfig.transfer_dir_mode === 'custom' }"
+                                                        @click="telegramNotifyConfig.transfer_dir_mode = 'custom'">
+                                                    <i class="fa-solid fa-folder-open"></i> 手动选择目录
+                                                </button>
+                                            </div>
+                                            <div v-if="telegramNotifyConfig.transfer_dir_mode === 'custom'" class="form-row-tight">
+                                                <input class="form-row-grow" type="text" v-model="telegramNotifyConfig.transfer_dir" placeholder="选择或填写 115 目录，如 /影视库/转存">
+                                                <button class="btn btn-ghost btn-sm" @click="browseTelegramTransferDir()">
+                                                    <i class="fa-solid" :class="telegramTransferDirBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                    {{ telegramTransferDirBrowser.visible ? '关闭浏览' : '浏览 115 文件夹' }}
+                                                </button>
+                                            </div>
+                                            <div v-if="telegramTransferDirBrowser.visible" class="cleanup-browser mt-15">
+                                                <div class="cleanup-browser-header">
+                                                    <button class="btn btn-ghost btn-sm" @click="telegramTransferDirUp" :disabled="telegramTransferDirBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                                    <span>{{ telegramTransferDirBrowser.currentPath }}</span>
+                                                    <button class="btn btn-primary btn-sm" @click="applyTelegramTransferDir" :disabled="telegramTransferDirBrowser.currentCid === '0'">选择当前目录</button>
+                                                    <button class="btn btn-ghost btn-sm" @click="telegramTransferDirBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                                </div>
+                                                <div class="cleanup-browser-list">
+                                                    <div v-if="telegramTransferDirBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                                    <div v-else-if="telegramTransferDirBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                                    <div v-else v-for="dir in telegramTransferDirBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectTelegramTransferDir(dir)">
+                                                        <i class="fa-solid fa-folder"></i>
+                                                        <span>{{ dir.name }}</span>
+                                                        <i class="fa-solid fa-chevron-right"></i>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="hint mt-8">
+                                                {{ telegramNotifyConfig.transfer_dir_mode === 'custom' ? 'Telegram 监听到的资源会转存到这个目录' : 'Telegram 监听到的资源会使用「资源转存」里的系统转存目录' }}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label><i class="fa-solid fa-magnifying-glass icon-brand-telegram-alt"></i> 筛选</label>
+                                            <input type="text" v-model="telegramDialogSearch" placeholder="搜索群组或频道">
+                                        </div>
+                                    </div>
+                                    <div class="form-actions-end mb-12">
+                                        <button class="btn btn-primary" @click="saveTelegramTransferSettings" :disabled="telegramNotifySaving">
+                                            <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存目录设置
+                                        </button>
+                                        <button class="btn btn-ghost" @click="fetchTelegramDialogs" :disabled="telegramDialogsLoading || !telegramStatus.authorized">
+                                            <i class="fa-solid" :class="telegramDialogsLoading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新列表
+                                        </button>
+                                    </div>
+                                    <div class="telegram-selected-panel mb-12">
+                                        <div class="telegram-selected-head">
+                                            <span><i class="fa-solid fa-check-double icon-brand-telegram-alt"></i> 已选目标</span>
+                                            <span>{{ selectedTelegramDialogs.length }} 个</span>
+                                        </div>
+                                        <div v-if="selectedTelegramDialogs.length === 0" class="telegram-selected-empty">
+                                            还没有选择监听目标
+                                        </div>
+                                        <div v-else class="telegram-selected-list">
+                                            <button v-for="dialog in selectedTelegramDialogs" :key="'selected-' + dialog.id"
+                                                    class="telegram-selected-chip"
+                                                    @click="removeTelegramSelectedDialog(dialog)"
+                                                    :title="'移除 ' + (dialog.title || dialog.id)">
+                                                <span class="telegram-selected-icon">
+                                                    <img v-if="dialog.avatar_url" :src="dialog.avatar_url" :alt="dialog.title || dialog.id" loading="lazy">
+                                                    <i v-else class="fa-solid" :class="dialog.type === '频道' ? 'fa-bullhorn' : 'fa-users'"></i>
+                                                </span>
+                                                <span class="telegram-selected-text">
+                                                    <span class="telegram-selected-title">{{ dialog.title || ('ID ' + dialog.id) }}</span>
+                                                    <span class="telegram-selected-meta">
+                                                        <template v-if="dialog.username">@{{ dialog.username }}</template>
+                                                        <template v-else>{{ dialog.type || '目标' }}</template>
+                                                    </span>
+                                                </span>
+                                                <i class="fa-solid fa-xmark telegram-selected-remove"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div v-if="telegramDialogs.length === 0" class="empty-state-card">
+                                        {{ telegramStatus.authorized ? '暂无群组或频道' : '登录后加载群组和频道' }}
+                                    </div>
+                                    <div v-else class="telegram-dialog-list">
+                                        <label v-for="dialog in filteredTelegramDialogs" :key="dialog.id"
+                                               class="telegram-dialog-item"
+                                               :class="{ 'telegram-dialog-item-selected': isTelegramDialogSelected(dialog) }">
+                                            <input class="telegram-dialog-checkbox" type="checkbox" :checked="isTelegramDialogSelected(dialog)" @change="toggleTelegramDialog(dialog, $event)">
+                                            <span class="telegram-dialog-avatar">
+                                                <img v-if="dialog.avatar_url" :src="dialog.avatar_url" :alt="dialog.title || dialog.id" loading="lazy" @error="dialog.avatar_url = ''">
+                                                <i v-else class="fa-solid" :class="dialog.type === '频道' ? 'fa-bullhorn' : 'fa-users'"></i>
+                                            </span>
+                                            <span class="telegram-dialog-main">
+                                                <span class="telegram-dialog-title-row">
+                                                    <span class="telegram-dialog-title">{{ dialog.title }}</span>
+                                                    <span class="telegram-dialog-type">{{ dialog.type }}</span>
+                                                </span>
+                                                <span class="telegram-dialog-meta">
+                                                    <template v-if="dialog.username">@{{ dialog.username }}</template>
+                                                    <template v-else>ID {{ dialog.id }}</template>
+                                                </span>
+                                            </span>
+                                            <span class="telegram-dialog-check">
+                                                <i class="fa-solid fa-check"></i>
+                                            </span>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'config_notification'" key="config_notification" class="scroll-view">
                         <div class="content-shell" style="max-width:100%;padding:0 24px">
                             <div class="server-toolbar mb-20">
@@ -2830,36 +3066,33 @@
                                     </label>
                                 </div>
                                 <div class="card-body">
-                                    <div class="mb-3">
-                                        <label><i class="fa-solid fa-robot icon-brand-telegram-alt"></i> Bot Token</label>
-                                        <div class="form-row-tight">
-                                            <input :type="telegramNotifyConfig.showToken ? 'text' : 'password'" v-model="telegramNotifyConfig.bot_token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" class="form-row-grow">
-                                            <button class="icon-btn" @click="telegramNotifyConfig.showToken = !telegramNotifyConfig.showToken" :class="telegramNotifyConfig.showToken ? 'btn-accent-ghost' : 'icon-action-hidden'">
-                                                <i class="fa-solid" :class="telegramNotifyConfig.showToken ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                    <div class="notify-section notify-section-flush">
+                                        <div class="notify-section-title">
+                                            <i class="fa-solid fa-bell"></i> 通知发送
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-robot icon-brand-telegram-alt"></i> Bot Token</label>
+                                            <div class="form-row-tight">
+                                                <input :type="telegramNotifyConfig.showToken ? 'text' : 'password'" v-model="telegramNotifyConfig.bot_token" placeholder="123456:ABC-DEF..." class="form-row-grow">
+                                                <button class="icon-btn" @click="telegramNotifyConfig.showToken = !telegramNotifyConfig.showToken" :class="telegramNotifyConfig.showToken ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                    <i class="fa-solid" :class="telegramNotifyConfig.showToken ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                                </button>
+                                            </div>
+                                            <div class="hint">仅用于向你的 Telegram 发送 ChillPoster 通知，不参与群组/频道资源监听</div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label><i class="fa-solid fa-users icon-brand-telegram-alt"></i> Chat ID</label>
+                                            <input type="text" v-model="telegramNotifyConfig.chat_id" placeholder="-1001234567890 或 用户ID">
+                                        </div>
+                                        <div class="form-actions-end">
+                                            <button class="btn btn-ghost" @click="testTelegramNotify" :disabled="telegramNotifyTesting">
+                                                <i class="fa-solid" :class="telegramNotifyTesting ? 'fa-spinner fa-spin' : 'fa-plug'"></i> 测试通知
+                                            </button>
+                                            <button class="btn btn-ghost" @click="sendTelegramTestMsg" :disabled="telegramNotifySending">
+                                                <i class="fa-solid" :class="telegramNotifySending ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i> 发送测试消息
                                             </button>
                                         </div>
-                                        <div class="hint">从 @BotFather 获取的 Bot Token</div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label><i class="fa-solid fa-users icon-brand-telegram-alt"></i> Chat ID</label>
-                                        <input type="text" v-model="telegramNotifyConfig.chat_id" placeholder="-1001234567890 或 用户ID">
-                                        <div class="hint">群组ID或用户ID，可私聊 @userinfobot 获取</div>
-                                    </div>
-                                    <div class="hint notify-hint-box">
-                                        <i class="fa-solid fa-info-circle"></i> Telegram 使用全局代理设置，请在「基本配置」中配置代理
-                                    </div>
-                                    <div class="form-actions-end">
-                                        <button class="btn btn-ghost" @click="testTelegramNotify" :disabled="telegramNotifyTesting">
-                                            <i class="fa-solid" :class="telegramNotifyTesting ? 'fa-spinner fa-spin' : 'fa-plug'"></i> 测试连接
-                                        </button>
-                                        <button class="btn btn-ghost" @click="sendTelegramTestMsg" :disabled="telegramNotifySending">
-                                            <i class="fa-solid" :class="telegramNotifySending ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i> 发送测试消息
-                                        </button>
-                                        <button class="btn btn-primary" @click="saveTelegramNotifyConfig" :disabled="telegramNotifySaving">
-                                            <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
-                                        </button>
-                                    </div>
-
                                     <template v-for="channel in notificationChannels.filter(c => c.key === 'telegram')" :key="channel.key + '-sections'">
                                         <div class="notify-section">
                                             <div class="notify-section-title">
@@ -2916,9 +3149,6 @@
                                                 </div>
                                             </div>
                                             <div class="form-actions-end mt-10">
-                                                <button class="btn btn-ghost" @click="channel.sendTest" :disabled="channel.sending.value">
-                                                    <i class="fa-solid" :class="channel.sending.value ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i> 发送测试消息
-                                                </button>
                                                 <button class="btn btn-ghost btn-accent-ghost" @click="channel.testTemplate" :disabled="channel.templateTesting.value">
                                                     <i class="fa-solid" :class="channel.templateTesting.value ? 'fa-spinner fa-spin' : 'fa-vial'"></i> 模板测试
                                                 </button>
@@ -3351,8 +3581,13 @@
                                     </div>
                                     <div class="form-group">
                                         <label>密码</label>
-                                        <input type="password" v-model="mpConfig.mp_password"
-                                               placeholder="MoviePilot 登录密码">
+                                        <div class="form-row-tight">
+                                            <input :type="sensitiveVisibility.mpPassword ? 'text' : 'password'" v-model="mpConfig.mp_password"
+                                                   placeholder="MoviePilot 登录密码" class="form-row-grow">
+                                            <button class="icon-btn" @click="sensitiveVisibility.mpPassword = !sensitiveVisibility.mpPassword" :class="sensitiveVisibility.mpPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                <i class="fa-solid" :class="sensitiveVisibility.mpPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                            </button>
+                                        </div>
                                     </div>
                                     <div class="form-row-tight mt-15">
                                         <button class="btn btn-secondary" @click="testMpConnection"
@@ -3416,7 +3651,12 @@
                                 <div class="card-body">
                                     <div class="form-group">
                                         <label>TMDb API Key</label>
-                                        <input type="password" v-model="globalConfig.tmdb_key" placeholder="您的 TMDb API 密钥">
+                                        <div class="form-row-tight">
+                                            <input :type="sensitiveVisibility.tmdbKey ? 'text' : 'password'" v-model="globalConfig.tmdb_key" placeholder="您的 TMDb API 密钥" class="form-row-grow">
+                                            <button class="icon-btn" @click="sensitiveVisibility.tmdbKey = !sensitiveVisibility.tmdbKey" :class="sensitiveVisibility.tmdbKey ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                <i class="fa-solid" :class="sensitiveVisibility.tmdbKey ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                            </button>
+                                        </div>
                                         <div class="input-tip">RSS 抓取、自动识别封面等功能的必需配置</div>
                                     </div>
                                     <div class="info-alert-box mt-15">
@@ -3435,7 +3675,12 @@
                                 <div class="card-body">
                                     <div class="form-group">
                                         <label>豆瓣 Cookie</label>
-                                        <input type="password" v-model="globalConfig.douban_cookie" placeholder="填入豆瓣登录 Cookie 可解锁近期热度等更多内容">
+                                        <div class="form-row-tight">
+                                            <input :type="sensitiveVisibility.doubanCookie ? 'text' : 'password'" v-model="globalConfig.douban_cookie" placeholder="填入豆瓣登录 Cookie 可解锁近期热度等更多内容" class="form-row-grow">
+                                            <button class="icon-btn" @click="sensitiveVisibility.doubanCookie = !sensitiveVisibility.doubanCookie" :class="sensitiveVisibility.doubanCookie ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                                <i class="fa-solid" :class="sensitiveVisibility.doubanCookie ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                            </button>
+                                        </div>
                                         <div class="input-tip">登录豆瓣网页版，从浏览器开发者工具复制 Cookie 粘贴到此处</div>
                                     </div>
                                 </div>
@@ -3448,10 +3693,22 @@
 
                             <div class="card card-accent-amber">
                                 <div class="card-header card-header-accent-amber"><div class="card-title-l"><i class="fa-solid fa-user-shield"></i> 修改登录信息</div></div>
-                                <label>当前密码</label><input type="password" v-model="accountForm.old_password">
+                                <label>当前密码</label>
+                                <div class="form-row-tight">
+                                    <input :type="sensitiveVisibility.accountOldPassword ? 'text' : 'password'" v-model="accountForm.old_password" class="form-row-grow">
+                                    <button class="icon-btn" @click="sensitiveVisibility.accountOldPassword = !sensitiveVisibility.accountOldPassword" :class="sensitiveVisibility.accountOldPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                        <i class="fa-solid" :class="sensitiveVisibility.accountOldPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                    </button>
+                                </div>
                                 <div class="divider"></div>
                                 <label>新用户名</label><input type="text" v-model="accountForm.new_username">
-                                <label>新密码</label><input type="password" v-model="accountForm.new_password">
+                                <label>新密码</label>
+                                <div class="form-row-tight">
+                                    <input :type="sensitiveVisibility.accountNewPassword ? 'text' : 'password'" v-model="accountForm.new_password" class="form-row-grow">
+                                    <button class="icon-btn" @click="sensitiveVisibility.accountNewPassword = !sensitiveVisibility.accountNewPassword" :class="sensitiveVisibility.accountNewPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
+                                        <i class="fa-solid" :class="sensitiveVisibility.accountNewPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
+                                    </button>
+                                </div>
                                 <div class="form-actions-right"><button class="btn btn-primary" @click="updateAccount" :disabled="updatingAccount">确认修改</button></div>
 
                                 <div class="info-alert-box mt-20">
@@ -4551,6 +4808,7 @@
                         <div class="mobile-more-grid">
                             <button class="mobile-more-item" :class="{active: tab === 'server'}" @click="selectMobileTab('server')"><i class="fa-solid fa-server"></i><span>服务器</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_115'}" @click="selectMobileTab('config_115')"><i class="fa-solid fa-cloud"></i><span>115</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'telegram_monitor'}" @click="selectMobileTab('telegram_monitor')"><i class="fa-solid fa-satellite-dish"></i><span>TG监听</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_notification'}" @click="selectMobileTab('config_notification')"><i class="fa-solid fa-bell"></i><span>通知</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_yingchao'}" @click="selectMobileTab('config_yingchao')"><i class="fa-solid fa-film"></i><span>影巢</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_moviepilot'}" @click="selectMobileTab('config_moviepilot')"><i class="fa-solid fa-plane"></i><span>MP</span></button>
