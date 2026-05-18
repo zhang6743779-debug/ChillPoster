@@ -175,10 +175,13 @@ class DockerAPI:
         query = urllib.parse.urlencode({"force": "1" if force else "0"})
         return self.request("DELETE", f"/images/{quoted}?{query}")
 
-    def prune_images(self, all_unused: bool = False):
+    def prune_images(self, all_unused: bool = False, dangling_only: bool = False):
         query = ""
         if all_unused:
             filters = urllib.parse.quote(json.dumps({"dangling": ["false"]}), safe="")
+            query = f"?filters={filters}"
+        elif dangling_only:
+            filters = urllib.parse.quote(json.dumps({"dangling": ["true"]}), safe="")
             query = f"?filters={filters}"
         return self.request("POST", f"/images/prune{query}")
 

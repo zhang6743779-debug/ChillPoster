@@ -435,6 +435,7 @@ createApp({
             imageDrafts: {},
             search: '',
             imageSearch: '',
+            imageFilter: 'all',
             pullImage: '',
             selectedContainer: null,
             logs: '',
@@ -578,11 +579,15 @@ createApp({
         });
 
         const filteredDockerImages = computed(() => {
-            const q = dockerManager.imageSearch.trim().toLowerCase();
-            if (!q) return dockerManager.images;
-            return dockerManager.images.filter(item =>
-                [item.name, item.short_id, ...(item.tags || [])].some(v => String(v || '').toLowerCase().includes(q))
-            );
+            const filter = dockerManager.imageFilter || 'all';
+            return dockerManager.images.filter(item => {
+                const containers = Number(item.containers);
+                const untagged = item.name === '<none>:<none>' || !(item.tags || []).length;
+                if (filter === 'used') return containers > 0;
+                if (filter === 'unused') return containers === 0;
+                if (filter === 'untagged') return untagged;
+                return true;
+            });
         });
 
         const dockerUpdateCount = computed(() => dockerManager.containers.filter(item => {
@@ -597,6 +602,10 @@ createApp({
             const used = Math.max(0, total - unused);
             return { total, used, unused, untagged };
         });
+
+        const setDockerImageFilter = (filter) => {
+            dockerManager.imageFilter = filter || 'all';
+        };
 
         const syncDockerImageDrafts = () => {
             const next = {};
@@ -893,6 +902,22 @@ createApp({
                 await fetchDockerImages();
             } catch (e) {
                 showToast('清理失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.pruneLoading = false;
+            }
+        };
+
+        const pruneUntaggedDockerImages = async () => {
+            const ok = await showConfirm('删除无 Tag 镜像', `将删除当前无 Tag 镜像，预计 ${dockerImageStats.value.untagged} 个。确定继续吗？`, 'danger');
+            if (!ok) return;
+            dockerManager.pruneLoading = true;
+            try {
+                const res = await axios.post('/api/docker/images/prune_untagged');
+                const reclaimed = formatDockerBytes(res.data?.space_reclaimed || 0);
+                showToast(`已清理无 Tag 镜像，释放 ${reclaimed}`, 'success');
+                await fetchDockerImages();
+            } catch (e) {
+                showToast('清理无 Tag 失败: ' + (e.response?.data?.detail || e.message), 'error');
             } finally {
                 dockerManager.pruneLoading = false;
             }
@@ -8280,7 +8305,7 @@ createApp({
             upgradeStatus, fetchUpgradeStatus, checkUpgrade, startUpgrade,
             dockerManager, filteredDockerContainers, filteredDockerImages, dockerUpdateCount, dockerImageStats,
             fetchDockerStatus, fetchDockerContainers, fetchDockerImages, checkDockerUpdates,
-            refreshDockerManager, runDockerContainerAction, openDockerLogs, closeDockerLogs, pullDockerImage, deleteDockerImage, pruneUnusedDockerImages,
+            refreshDockerManager, runDockerContainerAction, openDockerLogs, closeDockerLogs, pullDockerImage, deleteDockerImage, pruneUnusedDockerImages, pruneUntaggedDockerImages, setDockerImageFilter,
             closeDockerUpdateDialog, openDockerVersionDialog, closeDockerVersionDialog, saveDockerVersionDialog,
             formatDockerBytes, formatDockerDate,
             cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,

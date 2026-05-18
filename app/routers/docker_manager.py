@@ -563,6 +563,20 @@ def prune_unused_images():
         _api_error(e)
 
 
+@router.post("/images/prune_untagged")
+def prune_untagged_images():
+    try:
+        result = _docker().prune_images(dangling_only=True)
+        return {
+            "status": "ok",
+            "deleted": result.get("ImagesDeleted") or [],
+            "space_reclaimed": int(result.get("SpaceReclaimed") or 0),
+            "message": "无 Tag 镜像已清理",
+        }
+    except Exception as e:
+        _api_error(e)
+
+
 @router.delete("/images/{image_id:path}")
 def delete_image(image_id: str, force: bool = False):
     try:
