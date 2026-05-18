@@ -15,6 +15,8 @@ venv/
 *.bak
 *.original
 *备份*
+frontend/node_modules/
+frontend/dist/
 static/index 完整提示.html
 
 # === 排除 Docker 自身配置 ===

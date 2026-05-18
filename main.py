@@ -169,7 +169,10 @@ def restore_defaults():
 # ==========================================
 
 DEFAULT_PROJECT_VERSION = "v1.0.0.1"
-VERSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+STATIC_DIR = FRONTEND_DIST_DIR if os.path.exists(FRONTEND_DIST_DIR) else os.path.join(BASE_DIR, "static")
+VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
 
 
 def get_project_version() -> str:
@@ -331,7 +334,7 @@ app.include_router(docker_manager.router)
 app.include_router(drive115_cleanup.router)
 app.include_router(drive115_upload.router)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")
 app.mount("/templates", StaticFiles(directory="templates"), name="templates")
 app.mount("/backups", StaticFiles(directory="backups"), name="backups")

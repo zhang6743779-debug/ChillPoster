@@ -1,0 +1,1131 @@
+import axios from 'axios';
+import { computed, nextTick, reactive, ref, watch } from 'vue';
+
+export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, showToast, showNumberDialog }) {
+        // ==========================================
+        // 媒体整理模块 (115 网盘)
+        // ==========================================
+
+        const mediaOrganizeConfig = reactive({
+            drive_index: 0,
+            source_cid: '0',
+            source_name: '根目录',
+            target_cid: '0',
+            target_name: '根目录',
+            failed_cid: '0',
+            failed_name: '',
+            movie_enabled: true,
+            tv_enabled: true,
+            scrape_enabled: true,
+            emby_local_scrape: true,
+            scrape_nfo: true,
+            scrape_poster: true,
+            scrape_fanart: true,
+            scrape_logo: true,
+            scrape_banner: true,
+            scrape_thumb: true,
+            scrape_season_poster: true,
+            scrape_episode_thumb: true,
+            policy_nfo: 'missing_only',
+            policy_poster: 'missing_only',
+            policy_fanart: 'missing_only',
+            policy_logo: 'missing_only',
+            policy_banner: 'missing_only',
+            policy_thumb: 'missing_only',
+            policy_season_poster: 'missing_only',
+            policy_episode_thumb: 'missing_only',
+            auto_detect_bluray: true,
+            life_monitor_enabled: true,
+            auto_sync_strm: true,
+            wash_enabled: true,
+            wash_by_equivalent_size: true,
+            wash_tolerance_ratio: 0,
+            wash_reserved_1: false,
+            wash_reserved_2: false,
+            organize_parse_mode: 'ffprobe',
+            movie_folder_format: '{title} ({year}) {tmdb-{tmdb_id}}',
+            movie_rename_format: '{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}',
+            tv_folder_format: '{title} ({year}) {tmdb-{tmdb_id}}',
+            tv_episode_format: '{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}',
+        });
+
+        const ORGANIZE_RUN_ID_STORAGE_KEY = 'media_organize_run_id';
+        const organizeLoading = ref(false);
+        const organizeResult = ref(null);
+        const organizeRunId = ref(localStorage.getItem(ORGANIZE_RUN_ID_STORAGE_KEY) || null);
+        const organizeProgress = reactive({ percent: 0, status_text: '', detail: null });
+
+        const syncOrganizeTaskFromTaskMap = (tasks, { adoptRunning = false } = {}) => {
+            const taskMap = tasks || {};
+            let currentRunId = organizeRunId.value;
+            let currentTask = currentRunId ? taskMap[currentRunId] : null;
+
+            if ((!currentTask || currentTask.status !== 'running') && adoptRunning) {
+                const runningEntry = Object.entries(taskMap).find(([id, task]) => {
+                    if (!task || task.status !== 'running') return false;
+                    return task.task_type === 'media_organize' || id.startsWith('organize_');
+                });
+                if (runningEntry) {
+                    currentRunId = runningEntry[0];
+                    currentTask = runningEntry[1];
+                    if (organizeRunId.value !== currentRunId) {
+                        organizeRunId.value = currentRunId;
+                        localStorage.setItem(ORGANIZE_RUN_ID_STORAGE_KEY, currentRunId);
+                    }
+                }
+            }
+
+            if (!currentTask) {
+                if (adoptRunning && organizeRunId.value && !taskMap[organizeRunId.value]) {
+                    organizeRunId.value = null;
+                    localStorage.removeItem(ORGANIZE_RUN_ID_STORAGE_KEY);
+                }
+                return null;
+            }
+
+            organizeLoading.value = currentTask.status === 'running';
+            organizeProgress.percent = Math.round(currentTask.percent || 0);
+            organizeProgress.status_text = currentTask.cancel_requested ? '正在取消...' : (currentTask.name || '');
+            organizeProgress.detail = currentTask.detail || null;
+            return currentTask;
+        };
+
+        const restoreRunningOrganizeTask = async () => {
+            try {
+                const res = await axios.get('/api/progress');
+                const task = syncOrganizeTaskFromTaskMap(res.data || {}, { adoptRunning: true });
+                if (task && task.status === 'running') {
+                    startOrganizePolling();
+                }
+            } catch (_) { }
+        };
+        let organizePollTimer = null;
+
+        // 二级分类规则
+        const categoryRulesEditor = reactive({ activeType: 'movie', movie: [], tv: [] });
+        const categoryRulesSaving = ref(false);
+        const subClassify = reactive({
+            movie: { enabled: true, levels: ['year_decade'] },
+            tv:    { enabled: true, levels: ['year_decade'] },
+            sync_emby_library: true,
+            emby_server_idx: 0,
+            emby_library_level: 'level3',
+        });
+        const subClassifyVars = [
+            { key: 'year_decade', label: '年代' },
+            { key: 'rating_tier', label: '评分段' },
+            { key: 'origin_country', label: '国家' },
+            { key: 'genre_label', label: '类型' },
+        ];
+        const subClassifyVarExamples = {
+            year_decade: '2010s',
+            rating_tier: '8-9分',
+            origin_country: '日本',
+            genre_label: '动画',
+        };
+        const subClassifyBaseExamples = {
+            movie: '电影/日本电影',
+            tv: '剧集/日本动漫',
+        };
+        const subClassifyPreviewSegments = (mtype) => {
+            return (subClassify[mtype]?.levels || []).map(key => {
+                const meta = subClassifyVars.find(x => x.key === key);
+                return {
+                    key,
+                    label: meta?.label || key,
+                    example: subClassifyVarExamples[key] || (meta?.label || key),
+                };
+            });
+        };
+        const ruleListEl = ref(null);
+        let _ruleDragState = null;
+
+        const fetchCategoryRules = async () => {
+            try {
+                const res = await axios.get('/api/media_organize/category_rules/get');
+                categoryRulesEditor.movie = JSON.parse(JSON.stringify(res.data.movie || []));
+                categoryRulesEditor.tv = JSON.parse(JSON.stringify(res.data.tv || []));
+                const sc = res.data.sub_classify || {};
+                for (const t of ['movie', 'tv']) {
+                    subClassify[t].enabled = sc[t]?.enabled ?? true;
+                    subClassify[t].levels = JSON.parse(JSON.stringify(sc[t]?.levels || ['year_decade']));
+                }
+                subClassify.sync_emby_library = sc.sync_emby_library ?? true;
+                subClassify.emby_server_idx = 0;
+                subClassify.emby_library_level = sc.emby_library_level || 'level3';
+            } catch (e) {
+                console.error('获取分类规则失败', e);
+            }
+        };
+
+        const saveCategoryRules = async () => {
+            categoryRulesSaving.value = true;
+            try {
+                const res = await axios.post('/api/media_organize/category_rules/save', {
+                    movie: categoryRulesEditor.movie,
+                    tv: categoryRulesEditor.tv,
+                });
+                const data = res.data || {};
+                showToast('分类规则已保存');
+
+                const removedPaths = Array.isArray(data.removed_paths)
+                    ? data.removed_paths
+                    : (Array.isArray(data.diff?.removed_paths) ? data.diff.removed_paths : []);
+                const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+                if (removedPaths.length) {
+                    const warningText = warnings[0] || '这些旧分类路径已删除，但对应 Emby 媒体库不会自动删除，请自行到 Emby 手动清理';
+                    setTimeout(() => {
+                        alert(`${warningText}\n\n已删除路径：\n- ${removedPaths.join('\n- ')}`);
+                    }, 80);
+                }
+            } catch (e) {
+                showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                categoryRulesSaving.value = false;
+            }
+        };
+
+        let _subClassifyTimer = null;
+        const saveSubClassify = () => {
+            clearTimeout(_subClassifyTimer);
+            _subClassifyTimer = setTimeout(async () => {
+                try {
+                    await axios.post('/api/media_organize/category_rules/sub_classify/save', {
+                        movie: { enabled: subClassify.movie.enabled, levels: subClassify.movie.levels },
+                        tv:    { enabled: subClassify.tv.enabled,    levels: subClassify.tv.levels },
+                        sync_emby_library: subClassify.sync_emby_library,
+                        emby_server_idx: 0,
+                        emby_library_level: subClassify.emby_library_level,
+                    });
+                } catch (e) {
+                    console.error('子分类设置保存失败', e);
+                }
+            }, 500);
+        };
+
+        const addRule = (type) => {
+            categoryRulesEditor[type].push({ path: '', conditions: [] });
+        };
+        const removeRule = (type, idx) => {
+            categoryRulesEditor[type].splice(idx, 1);
+        };
+        const addCondition = (type, rIdx) => {
+            categoryRulesEditor[type][rIdx].conditions.push({ field: '', logic: 'AND', value: '' });
+        };
+        const removeCondition = (type, rIdx, cIdx) => {
+            categoryRulesEditor[type][rIdx].conditions.splice(cIdx, 1);
+        };
+        const resetCategoryRules = async () => {
+            if (!confirm('确定要恢复出厂默认分类规则吗？当前分类规则将被覆盖，子分类设置不受影响。')) return;
+            try {
+                const res = await axios.get('/api/media_organize/category_rules/defaults');
+                categoryRulesEditor.movie = JSON.parse(JSON.stringify(res.data.movie || []));
+                categoryRulesEditor.tv = JSON.parse(JSON.stringify(res.data.tv || []));
+                showToast('已加载出厂默认分类规则，点击保存生效');
+            } catch (e) {
+                showToast('加载默认规则失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+        const subClassifyToggleLevel = (mtype, key) => {
+            const levels = subClassify[mtype].levels;
+            const idx = levels.indexOf(key);
+            if (idx === -1) levels.push(key);
+            else levels.splice(idx, 1);
+            saveSubClassify();
+        };
+        const embyLibCount = (level) => {
+            const paths = new Set();
+            for (const r of (categoryRulesEditor.movie || [])) { if (r.path) paths.add(r.path); }
+            for (const r of (categoryRulesEditor.tv || [])) { if (r.path) paths.add(r.path); }
+            if (level === 'rule') return paths.size;
+            const n = parseInt(level.replace('level', ''));
+            const groups = new Set();
+            for (const p of paths) {
+                const parts = p.split('/');
+                groups.add(parts.length >= n ? parts.slice(0, n).join('/') : p);
+            }
+            return groups.size;
+        };
+        const embyLibLevelOptions = () => {
+            const paths = new Set();
+            for (const r of (categoryRulesEditor.movie || [])) { if (r.path) paths.add(r.path); }
+            for (const r of (categoryRulesEditor.tv || [])) { if (r.path) paths.add(r.path); }
+            let maxDepth = 1;
+            for (const p of paths) { const d = p.split('/').length; if (d > maxDepth) maxDepth = d; }
+            const opts = [{ value: 'rule', label: `每条规则一个库（${paths.size}个）` }];
+            for (let i = maxDepth; i >= 1; i--) {
+                opts.push({ value: `level${i}`, label: `按${i}级目录合并（${embyLibCount(`level${i}`)}个）` });
+            }
+            return opts;
+        };
+        const embyCacheRefreshing = ref(false);
+        async function refreshEmbyCache() {
+            embyCacheRefreshing.value = true;
+            try {
+                const resp = await fetch('/api/media_organize/emby_lib_cache/refresh', { method: 'POST' });
+                const data = await resp.json();
+                if (data.status === 'success') {
+                    showToast(`缓存已刷新（${data.count} 个媒体库）`, 'success');
+                }
+            } catch (e) {
+                showToast('刷新失败: ' + e.message, 'error');
+            } finally {
+                embyCacheRefreshing.value = false;
+            }
+        }
+        let _levelDragState = null;
+        const onLevelDragStart = (e, mtype, idx) => { _levelDragState = { mtype, from: idx }; e.dataTransfer.effectAllowed = 'move'; };
+        const onLevelDragOver = (e, mtype, idx) => { if (_levelDragState?.mtype === mtype) _levelDragState.to = idx; };
+        const onLevelDrop = (e, mtype, idx) => {
+            if (!_levelDragState || _levelDragState.mtype !== mtype || _levelDragState.from === idx) return;
+            const levels = subClassify[mtype].levels;
+            const [moved] = levels.splice(_levelDragState.from, 1);
+            levels.splice(idx, 0, moved);
+            _levelDragState = null;
+            saveSubClassify();
+        };
+        const onLevelDragEnd = () => { _levelDragState = null; };
+
+        // 拖拽排序（原生 HTML5 drag，无需额外依赖）
+        const onRuleDragStart = (e, type, idx) => {
+            _ruleDragState = { type, from: idx };
+            e.dataTransfer.effectAllowed = 'move';
+        };
+        const onRuleDragOver = (e, type, idx) => {
+            e.preventDefault();
+            if (_ruleDragState && _ruleDragState.type === type && _ruleDragState.from !== idx) _ruleDragState.to = idx;
+        };
+        const onRuleDrop = (e, type, idx) => {
+            e.preventDefault();
+            if (!_ruleDragState || _ruleDragState.type !== type || _ruleDragState.from === idx) return;
+            const list = categoryRulesEditor[type];
+            const [moved] = list.splice(_ruleDragState.from, 1);
+            list.splice(idx, 0, moved);
+            _ruleDragState = null;
+        };
+        const onRuleDragEnd = () => { _ruleDragState = null; };
+
+        // Refs for rename template textareas (for cursor-aware token insertion)
+        const movieFormatRef = ref(null);
+        const movieFolderFormatRef = ref(null);
+        const tvFolderFormatRef = ref(null);
+        const tvEpisodeFormatRef = ref(null);
+
+        // Preview example variables
+        const MOVIE_PREVIEW_VARS = {
+            title: '流浪地球', en_title: 'The.Wandering.Earth', original_title: '',
+            year: '2019', tmdb_id: '521777',
+            resource_pix: '2160p', resource_type: 'BluRay',
+            video_encode: 'HEVC', audio_encode: 'DTS-HD.MA.7.1',
+            web_source: 'UHD', resource_effect: 'REMUX',
+            video_effect: 'DV.HDR',
+            resource_team: 'CHD', fps: '60fps', part: '',
+            color_depth: '10bit',
+            first_letter: 'T', ext: 'mkv',
+            season_episode: '', season_num: '', episode_num: '',
+        };
+        const TV_PREVIEW_VARS = {
+            title: '怪奇物语', en_title: 'Stranger.Things', original_title: '',
+            year: '2022', tmdb_id: '66732',
+            season_episode: 'S04E01', season_num: '04', episode_num: '01',
+            resource_pix: '2160p', resource_type: 'WEB-DL',
+            video_encode: 'HEVC', audio_encode: 'Atmos.5.1',
+            web_source: 'NF', resource_effect: '',
+            video_effect: 'DV.HDR',
+            resource_team: 'CHD', fps: '23.976fps', part: '',
+            color_depth: '10bit',
+            first_letter: 'S', ext: 'mkv',
+        };
+
+        /**
+         * 渲染重命名模板（前端版，与后端 _render_template 逻辑一致）
+         */
+        function renderPreview(template, vars) {
+            if (!template) return '';
+            let result = template;
+            for (const [key, value] of Object.entries(vars)) {
+                result = result.replaceAll('{' + key + '}', value || '');
+            }
+            // 清理多余分隔符
+            result = result.replace(/\.{2,}/g, '.');
+            result = result.replace(/-{2,}/g, '-');
+            result = result.replace(/_{2,}/g, '_');
+            result = result.replace(/ {2,}/g, ' ');
+            result = result.replace(/\(\s*\)/g, '');
+            result = result.replace(/\[\s*\]/g, '');
+            result = result.replace(/\.\./g, '.');
+            result = result.replace(/^[.\-_ ]+|[.\-_ ]+$/g, '');
+            return result;
+        }
+
+        const MOVIE_FOLDER_DISPLAY_FORMAT = '{中文标题} ({公映年份}) {TMDB编号}';
+        const TV_FOLDER_DISPLAY_FORMAT = '{中文剧名} ({首播年份}) {TMDB编号}';
+        const MOVIE_DISPLAY_FORMAT = '{英文片名}.{公映年份}.{分辨率}.{介质来源}.{处理方式}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}.mkv';
+        const TV_DISPLAY_FORMAT = '{英文剧名}.{季数集数}.{首播年份}.{分辨率}.{来源平台}.{介质类型}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}.mkv';
+
+        function movieFolderTemplateToDisplay(template) {
+            let result = template || '';
+            result = result.replaceAll('{title}', '{中文标题}');
+            result = result.replaceAll('{year}', '{公映年份}');
+            result = result.replaceAll('{tmdb-{TMDB编号}}', '{TMDB编号}');
+            result = result.replaceAll('{tmdb-{tmdb_id}}', '{TMDB编号}');
+            return result;
+        }
+
+        function movieFolderDisplayToTemplate(display) {
+            let result = display || '';
+            result = result.replaceAll('{tmdb-{TMDB编号}}', '{tmdb-{tmdb_id}}');
+            result = result.replaceAll('{中文标题}', '{title}');
+            result = result.replaceAll('{公映年份}', '{year}');
+            result = result.replaceAll('{TMDB编号}', '{tmdb-{tmdb_id}}');
+            return result;
+        }
+
+        function tvFolderTemplateToDisplay(template) {
+            let result = template || '';
+            result = result.replaceAll('{title}', '{中文剧名}');
+            result = result.replaceAll('{year}', '{首播年份}');
+            result = result.replaceAll('{tmdb-{TMDB编号}}', '{TMDB编号}');
+            result = result.replaceAll('{tmdb-{tmdb_id}}', '{TMDB编号}');
+            return result;
+        }
+
+        function tvFolderDisplayToTemplate(display) {
+            let result = display || '';
+            result = result.replaceAll('{tmdb-{TMDB编号}}', '{tmdb-{tmdb_id}}');
+            result = result.replaceAll('{中文剧名}', '{title}');
+            result = result.replaceAll('{首播年份}', '{year}');
+            result = result.replaceAll('{TMDB编号}', '{tmdb-{tmdb_id}}');
+            return result;
+        }
+
+        function movieTemplateToDisplay(template) {
+            let result = template || '';
+            result = result.replaceAll('{audio_encode}', '{音频规格}');
+            result = result.replaceAll('{en_title}', '{英文片名}');
+            result = result.replaceAll('{year}', '{公映年份}');
+            result = result.replaceAll('{resource_pix}', '{分辨率}');
+            result = result.replaceAll('{video_encode}', '{视频编码}');
+            result = result.replaceAll('{color_depth}', '{色深}');
+            result = result.replaceAll('{video_effect}', '{动态范围}');
+            result = result.replaceAll('{fps}', '{帧率}');
+            result = result.replaceAll('{resource_team}', '{制作组}');
+            result = result.replaceAll('{web_source}.{resource_type}.{resource_effect}', '{介质来源}.{处理方式}');
+            result = result.replaceAll('{web_source}.{resource_effect}', '{介质来源}.{处理方式}');
+            return result.endsWith('.mkv') ? result : `${result}.mkv`;
+        }
+
+        function movieDisplayToTemplate(display) {
+            let result = (display || '').replace(/\.mkv$/i, '');
+            result = result.replaceAll('{音频规格}', '{audio_encode}');
+            result = result.replaceAll('{英文片名}', '{en_title}');
+            result = result.replaceAll('{公映年份}', '{year}');
+            result = result.replaceAll('{分辨率}', '{resource_pix}');
+            result = result.replaceAll('{视频编码}', '{video_encode}');
+            result = result.replaceAll('{色深}', '{color_depth}');
+            result = result.replaceAll('{动态范围}', '{video_effect}');
+            result = result.replaceAll('{帧率}', '{fps}');
+            result = result.replaceAll('{制作组}', '{resource_team}');
+            result = result.replaceAll('{介质来源}.{处理方式}', '{web_source}.{resource_type}.{resource_effect}');
+            return result;
+        }
+
+        function tvTemplateToDisplay(template) {
+            let result = template || '';
+            result = result.replaceAll('{audio_encode}', '{音频规格}');
+            result = result.replaceAll('{en_title}', '{英文剧名}');
+            result = result.replaceAll('{season_episode}', '{季数集数}');
+            result = result.replaceAll('{year}', '{首播年份}');
+            result = result.replaceAll('{resource_pix}', '{分辨率}');
+            result = result.replaceAll('{web_source}', '{来源平台}');
+            result = result.replaceAll('{resource_type}', '{介质类型}');
+            result = result.replaceAll('{video_encode}', '{视频编码}');
+            result = result.replaceAll('{color_depth}', '{色深}');
+            result = result.replaceAll('{video_effect}', '{动态范围}');
+            result = result.replaceAll('{fps}', '{帧率}');
+            result = result.replaceAll('{resource_team}', '{制作组}');
+            return result.endsWith('.mkv') ? result : `${result}.mkv`;
+        }
+
+        function tvDisplayToTemplate(display) {
+            let result = (display || '').replace(/\.mkv$/i, '');
+            result = result.replaceAll('{音频规格}', '{audio_encode}');
+            result = result.replaceAll('{英文剧名}', '{en_title}');
+            result = result.replaceAll('{季数集数}', '{season_episode}');
+            result = result.replaceAll('{首播年份}', '{year}');
+            result = result.replaceAll('{分辨率}', '{resource_pix}');
+            result = result.replaceAll('{来源平台}', '{web_source}');
+            result = result.replaceAll('{介质类型}', '{resource_type}');
+            result = result.replaceAll('{视频编码}', '{video_encode}');
+            result = result.replaceAll('{色深}', '{color_depth}');
+            result = result.replaceAll('{动态范围}', '{video_effect}');
+            result = result.replaceAll('{帧率}', '{fps}');
+            result = result.replaceAll('{制作组}', '{resource_team}');
+            return result;
+        }
+
+        const movieFolderFormatDisplay = computed({
+            get: () => movieFolderTemplateToDisplay(mediaOrganizeConfig.movie_folder_format),
+            set: (value) => {
+                mediaOrganizeConfig.movie_folder_format = movieFolderDisplayToTemplate(value);
+            }
+        });
+        const tvFolderFormatDisplay = computed({
+            get: () => tvFolderTemplateToDisplay(mediaOrganizeConfig.tv_folder_format),
+            set: (value) => {
+                mediaOrganizeConfig.tv_folder_format = tvFolderDisplayToTemplate(value);
+            }
+        });
+        const movieFormatDisplay = computed({
+            get: () => movieTemplateToDisplay(mediaOrganizeConfig.movie_rename_format),
+            set: (value) => {
+                mediaOrganizeConfig.movie_rename_format = movieDisplayToTemplate(value);
+            }
+        });
+        const tvEpisodeFormatDisplay = computed({
+            get: () => tvTemplateToDisplay(mediaOrganizeConfig.tv_episode_format),
+            set: (value) => {
+                mediaOrganizeConfig.tv_episode_format = tvDisplayToTemplate(value);
+            }
+        });
+
+        // 实时预览计算属性
+        const moviePreviewName = computed(() =>
+            renderPreview(mediaOrganizeConfig.movie_rename_format, MOVIE_PREVIEW_VARS) || '（请输入模板）'
+        );
+        const movieFolderPreviewName = computed(() =>
+            renderPreview(mediaOrganizeConfig.movie_folder_format, MOVIE_PREVIEW_VARS) || '（请输入模板）'
+        );
+        const tvFolderPreviewName = computed(() =>
+            renderPreview(mediaOrganizeConfig.tv_folder_format, TV_PREVIEW_VARS) || '（请输入模板）'
+        );
+        const tvEpisodePreviewName = computed(() =>
+            renderPreview(mediaOrganizeConfig.tv_episode_format, TV_PREVIEW_VARS) || '（请输入模板）'
+        );
+
+        /**
+         * 在光标位置插入 token
+         * @param {string} type - 'movie' | 'tvFolder' | 'tvEpisode'
+         * @param {string} token - 要插入的 token 字符串
+         */
+        function insertToken(type, token) {
+            const refMap = {
+                movie: movieFormatRef,
+                movieFolder: movieFolderFormatRef,
+                tvFolder: tvFolderFormatRef,
+                tvEpisode: tvEpisodeFormatRef,
+            };
+            const fieldMap = {
+                movie: 'movie_rename_format',
+                movieFolder: 'movie_folder_format',
+                tvFolder: 'tv_folder_format',
+                tvEpisode: 'tv_episode_format',
+            };
+            const el = refMap[type]?.value;
+            const field = fieldMap[type];
+            if (!el || !field) return;
+
+            const start = el.selectionStart ?? el.value.length;
+            const end = el.selectionEnd ?? el.value.length;
+            let current = mediaOrganizeConfig[field] || '';
+            mediaOrganizeConfig[field] = current.slice(0, start) + token + current.slice(end);
+
+            // 恢复光标到插入后的位置
+            nextTick(() => {
+                el.focus();
+                const pos = start + token.length;
+                el.setSelectionRange(pos, pos);
+            });
+        }
+
+        async function resetMovieFormat() {
+            const res = await axios.get('/api/media_organize/defaults');
+            mediaOrganizeConfig.movie_folder_format = res.data.movie_folder_format;
+            mediaOrganizeConfig.movie_rename_format = res.data.movie_rename_format;
+        }
+
+        async function resetTvFormat() {
+            const res = await axios.get('/api/media_organize/defaults');
+            mediaOrganizeConfig.tv_folder_format = res.data.tv_folder_format;
+            mediaOrganizeConfig.tv_episode_format = res.data.tv_episode_format;
+        }
+
+        // 整理专用表单
+        const organizeForm = reactive({
+            media_type: '',
+            overwrite: false,
+            is_bluray: false,
+        });
+
+        // 源目录浏览器
+        const orgSourceBrowser = reactive({
+            dirs: [],
+            path: '',
+            history: [],
+            currentCid: '0',
+            opened: false
+        });
+
+        // 目标目录浏览器
+        const orgTargetBrowser = reactive({
+            dirs: [],
+            path: '',
+            history: [],
+            currentCid: '0',
+            opened: false
+        });
+
+        // 失败目录浏览器
+        const orgFailedBrowser = reactive({
+            dirs: [],
+            path: '',
+            history: [],
+            currentCid: '0',
+            opened: false
+        });
+
+        const normalizeOrganizeParseMode = () => {
+            const mode = (mediaOrganizeConfig.organize_parse_mode || '').toLowerCase();
+            if (mode === 'filename' || mode === 'ffprobe' || mode === 'ffprobe_full' || mode === '') {
+                mediaOrganizeConfig.organize_parse_mode = mode;
+                return;
+            }
+            mediaOrganizeConfig.organize_parse_mode = 'filename';
+        };
+
+        const applyDefaultScrapeSettings = () => {
+            mediaOrganizeConfig.scrape_enabled = true;
+            mediaOrganizeConfig.emby_local_scrape = true;
+            mediaOrganizeConfig.scrape_nfo = true;
+            mediaOrganizeConfig.scrape_poster = true;
+            mediaOrganizeConfig.scrape_fanart = true;
+            mediaOrganizeConfig.scrape_logo = true;
+            mediaOrganizeConfig.scrape_banner = true;
+            mediaOrganizeConfig.scrape_thumb = true;
+            mediaOrganizeConfig.scrape_season_poster = true;
+            mediaOrganizeConfig.scrape_episode_thumb = true;
+            mediaOrganizeConfig.policy_nfo = 'missing_only';
+            mediaOrganizeConfig.policy_poster = 'missing_only';
+            mediaOrganizeConfig.policy_fanart = 'missing_only';
+            mediaOrganizeConfig.policy_logo = 'missing_only';
+            mediaOrganizeConfig.policy_banner = 'missing_only';
+            mediaOrganizeConfig.policy_thumb = 'missing_only';
+            mediaOrganizeConfig.policy_season_poster = 'missing_only';
+            mediaOrganizeConfig.policy_episode_thumb = 'missing_only';
+        };
+
+        const fetchMediaOrganizeConfig = async () => {
+            try {
+                const res = await axios.get('/api/media_organize/get');
+                if (res.data) {
+                    Object.assign(mediaOrganizeConfig, res.data);
+                    mediaOrganizeConfig.drive_index = 0;
+                }
+            } catch (e) { /* first load, use defaults */ }
+            normalizeOrganizeParseMode();
+            applyDefaultScrapeSettings();
+        };
+
+        const saveMediaOrganizeConfig = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return false;
+            }
+            try {
+                normalizeOrganizeParseMode();
+                applyDefaultScrapeSettings();
+                await axios.post('/api/media_organize/save', { ...mediaOrganizeConfig, drive_index: 0 });
+                showToast('媒体整理配置已保存', 'success');
+                return true;
+            } catch (e) {
+                showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
+            }
+        };
+
+        const toggleAutoSyncStrm = async (event) => {
+            const nextChecked = !!event?.target?.checked;
+            if (!nextChecked) {
+                mediaOrganizeConfig.auto_sync_strm = false;
+                return;
+            }
+            try {
+                const res = await axios.get('/api/strm/get');
+                const tasks = res.data?.sync_tasks || [];
+                const valid = tasks.some(t => t.remote_path && t.local_path);
+                if (!valid) {
+                    showToast('请先在 STRM生成 页面配置好同步任务（远程路径、本地路径）', 'error');
+                    mediaOrganizeConfig.auto_sync_strm = false;
+                } else {
+                    mediaOrganizeConfig.auto_sync_strm = true;
+                }
+            } catch (e) {
+                showToast('验证 STRM 配置失败: ' + e.message, 'error');
+                mediaOrganizeConfig.auto_sync_strm = false;
+            }
+        };
+
+        const toggleFilenameOnlyMode = () => {
+            const mode = mediaOrganizeConfig.organize_parse_mode;
+
+            if (mode === 'filename') {
+                mediaOrganizeConfig.organize_parse_mode = '';
+                showToast('已关闭纯文件名整理', 'success');
+                return;
+            }
+            if (mode === 'ffprobe') {
+                showToast('当前已开启智能ffprobe整理，请先关闭再切换', 'warning');
+                return;
+            }
+            if (mode === 'ffprobe_full') {
+                showToast('当前已开启全量ffprobe整理，请先关闭再切换', 'warning');
+                return;
+            }
+            mediaOrganizeConfig.organize_parse_mode = 'filename';
+            showToast('已开启纯文件名整理', 'success');
+        };
+
+        const toggleFfprobeMode = () => {
+            const mode = mediaOrganizeConfig.organize_parse_mode;
+
+            if (mode === 'ffprobe') {
+                mediaOrganizeConfig.organize_parse_mode = '';
+                showToast('已关闭智能ffprobe整理', 'success');
+                return;
+            }
+            if (mode === 'filename') {
+                showToast('当前已开启纯文件名整理，请先关闭再切换', 'warning');
+                return;
+            }
+            if (mode === 'ffprobe_full') {
+                showToast('当前已开启全量ffprobe整理，请先关闭再切换', 'warning');
+                return;
+            }
+            mediaOrganizeConfig.organize_parse_mode = 'ffprobe';
+            showToast('已开启智能ffprobe整理', 'success');
+        };
+
+        const toggleFullFfprobeMode = () => {
+            const mode = mediaOrganizeConfig.organize_parse_mode;
+
+            if (mode === 'ffprobe_full') {
+                mediaOrganizeConfig.organize_parse_mode = '';
+                showToast('已关闭全量ffprobe整理', 'success');
+                return;
+            }
+            if (mode === 'filename') {
+                showToast('当前已开启纯文件名整理，请先关闭再切换', 'warning');
+                return;
+            }
+            if (mode === 'ffprobe') {
+                showToast('当前已开启智能ffprobe整理，请先关闭再切换', 'warning');
+                return;
+            }
+            mediaOrganizeConfig.organize_parse_mode = 'ffprobe_full';
+            showToast('已开启全量ffprobe整理', 'success');
+        };
+
+        const toggleWashByEquivalentSize = async (event) => {
+            const nextChecked = !!event?.target?.checked;
+            if (!nextChecked) {
+                mediaOrganizeConfig.wash_by_equivalent_size = false;
+                return;
+            }
+            const input = await showNumberDialog(
+                '等效体积洗版容差',
+                '请输入容差百分比。填写 2 表示当新文件等效体积大于旧文件的 0.98 倍时，也允许替换。适合在画质接近时优先保留较新的资源。',
+                0,
+                '例如 2 或 2.5',
+                (value) => {
+                    const normalized = String(value).trim();
+                    const parsed = Number(normalized);
+                    if (!normalized || !Number.isFinite(parsed) || parsed < 0 || parsed >= 100) {
+                        return '请输入 0 到 100 之间的数字，且不能等于 100';
+                    }
+                    return '';
+                }
+            );
+            if (input === null) {
+                mediaOrganizeConfig.wash_by_equivalent_size = false;
+                return;
+            }
+            mediaOrganizeConfig.wash_tolerance_ratio = Number(String(input).trim());
+            mediaOrganizeConfig.wash_by_equivalent_size = true;
+        };
+
+        watch(() => mediaOrganizeConfig.emby_local_scrape, val => {
+            mediaOrganizeConfig.scrape_enabled = !!val;
+        });
+
+        // --- 源目录 115 浏览 ---
+        const browseOrganizeSource = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
+            orgSourceBrowser.history = [];
+            orgSourceBrowser.path = '';
+            orgSourceBrowser.opened = true;
+            await loadOrgSourceDir('0');
+        };
+
+        const loadOrgSourceDir = async (cid) => {
+            try {
+                const res = await axios.post('/api/media_organize/browse115', {
+                    cid: cid,
+                    drive_index: 0
+                });
+                if (res.data.status === 'ok') {
+                    orgSourceBrowser.dirs = res.data.dirs || [];
+                    orgSourceBrowser.currentCid = cid;
+                } else {
+                    showToast(res.data.message, 'error');
+                    orgSourceBrowser.dirs = [];
+                }
+            } catch (e) {
+                showToast('浏览失败: ' + e.message, 'error');
+                orgSourceBrowser.dirs = [];
+            }
+        };
+
+        const selectOrgSourceDir = async (dir) => {
+            orgSourceBrowser.history.push({ cid: orgSourceBrowser.currentCid, path: orgSourceBrowser.path });
+            orgSourceBrowser.path = (orgSourceBrowser.path ? orgSourceBrowser.path + '/' : '/') + dir.name;
+            await loadOrgSourceDir(dir.cid);
+        };
+
+        const orgSourceUp = async () => {
+            if (orgSourceBrowser.history.length > 0) {
+                const prev = orgSourceBrowser.history.pop();
+                orgSourceBrowser.path = prev.path;
+                await loadOrgSourceDir(prev.cid);
+            }
+        };
+
+        const applyOrgSourcePath = () => {
+            mediaOrganizeConfig.source_cid = orgSourceBrowser.currentCid;
+            mediaOrganizeConfig.source_name = orgSourceBrowser.path || '根目录';
+            orgSourceBrowser.dirs = [];
+            orgSourceBrowser.path = '';
+            orgSourceBrowser.history = [];
+            orgSourceBrowser.opened = false;
+        };
+
+        // --- 目标目录 115 浏览 ---
+        const browseOrganizeTarget = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
+            orgTargetBrowser.history = [];
+            orgTargetBrowser.path = '';
+            orgTargetBrowser.opened = true;
+            await loadOrgTargetDir('0');
+        };
+
+        const loadOrgTargetDir = async (cid) => {
+            try {
+                const res = await axios.post('/api/media_organize/browse115', {
+                    cid: cid,
+                    drive_index: 0
+                });
+                if (res.data.status === 'ok') {
+                    orgTargetBrowser.dirs = res.data.dirs || [];
+                    orgTargetBrowser.currentCid = cid;
+                } else {
+                    showToast(res.data.message, 'error');
+                    orgTargetBrowser.dirs = [];
+                }
+            } catch (e) {
+                showToast('浏览失败: ' + e.message, 'error');
+                orgTargetBrowser.dirs = [];
+            }
+        };
+
+        const selectOrgTargetDir = async (dir) => {
+            orgTargetBrowser.history.push({ cid: orgTargetBrowser.currentCid, path: orgTargetBrowser.path });
+            orgTargetBrowser.path = (orgTargetBrowser.path ? orgTargetBrowser.path + '/' : '/') + dir.name;
+            await loadOrgTargetDir(dir.cid);
+        };
+
+        const orgTargetUp = async () => {
+            if (orgTargetBrowser.history.length > 0) {
+                const prev = orgTargetBrowser.history.pop();
+                orgTargetBrowser.path = prev.path;
+                await loadOrgTargetDir(prev.cid);
+            }
+        };
+
+        const applyOrgTargetPath = () => {
+            mediaOrganizeConfig.target_cid = orgTargetBrowser.currentCid;
+            mediaOrganizeConfig.target_name = orgTargetBrowser.path || '根目录';
+            orgTargetBrowser.dirs = [];
+            orgTargetBrowser.path = '';
+            orgTargetBrowser.history = [];
+            orgTargetBrowser.opened = false;
+        };
+
+        // --- 失败目录 115 浏览 ---
+        const browseOrganizeFailed = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
+            orgFailedBrowser.history = [];
+            orgFailedBrowser.path = '';
+            orgFailedBrowser.opened = true;
+            await loadOrgFailedDir('0');
+        };
+
+        const loadOrgFailedDir = async (cid) => {
+            try {
+                const res = await axios.post('/api/media_organize/browse115', {
+                    cid: cid,
+                    drive_index: 0
+                });
+                if (res.data.status === 'ok') {
+                    orgFailedBrowser.dirs = res.data.dirs || [];
+                    orgFailedBrowser.currentCid = cid;
+                } else {
+                    showToast(res.data.message, 'error');
+                    orgFailedBrowser.dirs = [];
+                }
+            } catch (e) {
+                showToast('浏览失败: ' + e.message, 'error');
+                orgFailedBrowser.dirs = [];
+            }
+        };
+
+        const selectOrgFailedDir = async (dir) => {
+            orgFailedBrowser.history.push({ cid: orgFailedBrowser.currentCid, path: orgFailedBrowser.path });
+            orgFailedBrowser.path = (orgFailedBrowser.path ? orgFailedBrowser.path + '/' : '/') + dir.name;
+            await loadOrgFailedDir(dir.cid);
+        };
+
+        const orgFailedUp = async () => {
+            if (orgFailedBrowser.history.length > 0) {
+                const prev = orgFailedBrowser.history.pop();
+                orgFailedBrowser.path = prev.path;
+                await loadOrgFailedDir(prev.cid);
+            }
+        };
+
+        const applyOrgFailedPath = () => {
+            mediaOrganizeConfig.failed_cid = orgFailedBrowser.currentCid;
+            mediaOrganizeConfig.failed_name = orgFailedBrowser.path || '根目录';
+            orgFailedBrowser.dirs = [];
+            orgFailedBrowser.path = '';
+            orgFailedBrowser.history = [];
+            orgFailedBrowser.opened = false;
+        };
+
+        // 执行整理
+        const runOrganize = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
+            if (!mediaOrganizeConfig.source_cid || mediaOrganizeConfig.source_cid === '0') { showToast('请先配置源目录', 'error'); return; }
+            if (!mediaOrganizeConfig.target_cid || mediaOrganizeConfig.target_cid === '0') { showToast('请先配置目标目录', 'error'); return; }
+
+            organizeLoading.value = true;
+            organizeResult.value = null;
+            organizeProgress.percent = 0;
+            organizeProgress.status_text = '启动中...';
+            organizeProgress.detail = null;
+            try {
+                const saved = await saveMediaOrganizeConfig();
+                if (!saved) {
+                    organizeLoading.value = false;
+                    return;
+                }
+                const res = await axios.post('/api/media_organize/organize', {
+                    media_type: organizeForm.media_type,
+                    is_bluray: organizeForm.is_bluray,
+                    overwrite: organizeForm.overwrite,
+                    drive_index: 0,
+                });
+                if (res.data.status === 'ok') {
+                    organizeRunId.value = res.data.run_id;
+                    localStorage.setItem(ORGANIZE_RUN_ID_STORAGE_KEY, organizeRunId.value);
+                    showToast('整理任务已启动', 'success');
+                    startOrganizePolling();
+                } else {
+                    showToast(res.data.message || '整理启动失败', 'error');
+                    organizeLoading.value = false;
+                }
+            } catch (e) {
+                organizeResult.value = { status: 'error', message: e.response?.data?.detail || e.message };
+                showToast('整理请求失败', 'error');
+                organizeLoading.value = false;
+            }
+        };
+
+        const requestStopOrganizeRun = async (runId) => {
+            if (!runId) return { status: 'not_found', message: '任务不存在或已结束' };
+            const res = await axios.post('/api/stop_task', { run_id: runId });
+            return res.data || {};
+        };
+
+        const cancelOrganize = async () => {
+            try {
+                let runId = organizeRunId.value;
+                if (!runId) {
+                    const progressRes = await axios.get('/api/progress');
+                    syncOrganizeTaskFromTaskMap(progressRes.data || {}, { adoptRunning: true });
+                    runId = organizeRunId.value;
+                }
+                if (!runId) {
+                    showToast('未找到正在运行的整理任务', 'warning');
+                    return;
+                }
+
+                let stopResult = await requestStopOrganizeRun(runId);
+                if (stopResult.status !== 'ok') {
+                    const oldRunId = runId;
+                    const progressRes = await axios.get('/api/progress');
+                    const task = syncOrganizeTaskFromTaskMap(progressRes.data || {}, { adoptRunning: true });
+                    runId = organizeRunId.value;
+                    if (task && runId && runId !== oldRunId) {
+                        stopResult = await requestStopOrganizeRun(runId);
+                    }
+                }
+
+                if (stopResult.status === 'ok') {
+                    organizeProgress.status_text = '正在取消...';
+                    showToast('已发送取消请求', 'info');
+                    startOrganizePolling();
+                } else {
+                    showToast(stopResult.message || '未找到正在运行的整理任务', 'warning');
+                }
+            } catch (e) {
+                showToast('取消失败: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        };
+
+        const startOrganizePolling = () => {
+            if (!organizeRunId.value) return;
+            organizeLoading.value = true;
+            stopOrganizePolling();
+            organizePollTimer = setInterval(async () => {
+                try {
+                    const res = await axios.get('/api/progress');
+                    const tasks = res.data || {};
+                    const task = syncOrganizeTaskFromTaskMap(tasks, { adoptRunning: true });
+                    if (!task) return;
+
+                    if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
+                        organizeLoading.value = false;
+                        const detail = task.detail || {};
+                        const label = task.status === 'finished' ? '完成' : (task.status === 'stopped' ? '已取消' : '异常');
+                        organizeResult.value = {
+                            status: task.status === 'finished' ? 'success' : 'error',
+                            message: `整理${label}: 成功 ${detail.success || 0}/${detail.total || 0} | 失败 ${detail.failed || 0}`,
+                            detail: detail,
+                        };
+                        showToast(`整理${label}`, task.status === 'finished' ? 'success' : 'error');
+                        stopOrganizePolling();
+                        const finishedRunId = organizeRunId.value;
+                        organizeRunId.value = null;
+                        localStorage.removeItem(ORGANIZE_RUN_ID_STORAGE_KEY);
+                        if (finishedRunId) {
+                            setTimeout(() => axios.post('/api/clear_task_progress', { run_id: finishedRunId }), 3000);
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            }, 2000);
+        };
+
+        const stopOrganizePolling = () => {
+            if (organizePollTimer) {
+                clearInterval(organizePollTimer);
+                organizePollTimer = null;
+            }
+        };
+
+        // tab 切换时加载配置
+        watch(tab, (v) => {
+            if (v === 'media_organize') {
+                fetchMediaOrganizeConfig();
+                restoreRunningOrganizeTask();
+            }
+            if (v === 'media_organize_rules') fetchCategoryRules();
+        });
+
+    return {
+        mediaOrganizeConfig,
+        organizeForm,
+        organizeLoading,
+        organizeResult,
+        organizeProgress,
+        runOrganize,
+        cancelOrganize,
+        categoryRulesEditor,
+        categoryRulesSaving,
+        ruleListEl,
+        subClassify,
+        subClassifyVars,
+        subClassifyVarExamples,
+        subClassifyBaseExamples,
+        subClassifyPreviewSegments,
+        subClassifyToggleLevel,
+        embyLibCount,
+        embyLibLevelOptions,
+        embyCacheRefreshing,
+        refreshEmbyCache,
+        onLevelDragStart,
+        onLevelDragOver,
+        onLevelDrop,
+        onLevelDragEnd,
+        fetchCategoryRules,
+        saveCategoryRules,
+        saveSubClassify,
+        addRule,
+        removeRule,
+        addCondition,
+        removeCondition,
+        resetCategoryRules,
+        onRuleDragStart,
+        onRuleDragOver,
+        onRuleDrop,
+        onRuleDragEnd,
+        orgSourceBrowser,
+        orgTargetBrowser,
+        orgFailedBrowser,
+        fetchMediaOrganizeConfig,
+        saveMediaOrganizeConfig,
+        restoreRunningOrganizeTask,
+        toggleAutoSyncStrm,
+        toggleFilenameOnlyMode,
+        toggleFfprobeMode,
+        toggleFullFfprobeMode,
+        toggleWashByEquivalentSize,
+        browseOrganizeSource,
+        selectOrgSourceDir,
+        orgSourceUp,
+        applyOrgSourcePath,
+        browseOrganizeTarget,
+        selectOrgTargetDir,
+        orgTargetUp,
+        applyOrgTargetPath,
+        browseOrganizeFailed,
+        selectOrgFailedDir,
+        orgFailedUp,
+        applyOrgFailedPath,
+        movieFormatRef,
+        movieFolderFormatRef,
+        tvFolderFormatRef,
+        tvEpisodeFormatRef,
+        movieFolderFormatDisplay,
+        tvFolderFormatDisplay,
+        movieFormatDisplay,
+        tvEpisodeFormatDisplay,
+        moviePreviewName,
+        movieFolderPreviewName,
+        tvFolderPreviewName,
+        tvEpisodePreviewName,
+        insertToken,
+        resetMovieFormat,
+        resetTvFormat,
+    };
+}

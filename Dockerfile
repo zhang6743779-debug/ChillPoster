@@ -1,11 +1,13 @@
-# 前端阶段：压缩静态脚本，降低浏览器端代码可读性
+# 前端阶段：构建独立 Vue/Vite 管理 UI
 FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
 
-WORKDIR /src
-COPY static ./static
-RUN mkdir -p /protected-static \
-    && cp -a static/. /protected-static/ \
-    && npx --yes terser@5 static/app.js --compress --mangle --comments false --output /protected-static/app.js
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build \
+    && mkdir -p /protected-static \
+    && cp -a dist/. /protected-static/
 
 # 构建阶段：按目标架构编译 Python 扩展模块，避免多架构镜像混用二进制
 FROM python:3.12-slim AS builder

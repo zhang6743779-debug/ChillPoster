@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-ChillPoster is a Python/FastAPI application with a static Vue UI. The main app serves the management UI on port 5256 and starts one or more gateway/reverse-proxy servers for Emby-related traffic.
+ChillPoster is a Python/FastAPI application with a Vue/Vite management UI. The main app serves the management UI on port 5256 and starts one or more gateway/reverse-proxy servers for Emby-related traffic.
 
 Primary entry points:
 
-- `main.py` creates the FastAPI UI app, registers routers, mounts static assets, starts schedulers/services during lifespan, exposes `/api/version`, and runs both UI and gateway uvicorn servers.
-- `static/index.html`, `static/app.js`, and `static/style.css` are the browser UI. The UI is not a bundled frontend build; it loads static Vue/axios assets directly.
+- `main.py` creates the FastAPI UI app, registers routers, mounts frontend static assets, starts schedulers/services during lifespan, exposes `/api/version`, and runs both UI and gateway uvicorn servers.
+- `frontend/` is the browser UI source. It uses Vite with Vue and outputs `frontend/dist/` for local production serving.
+- `static/` is kept as a legacy fallback/runtime static directory. Docker builds `frontend/` and copies the generated files into the runtime image's `/app/static`.
 - `Dockerfile` builds the deployable image and injects `CHILLPOSTER_VERSION` from GitHub Actions build args.
 
 ## Architecture map
@@ -32,14 +33,23 @@ source .venv/bin/activate
 # Install/update Python dependencies
 pip install -r requirements.txt
 
+# Install/update frontend dependencies
+cd frontend && npm install
+
+# Run the frontend dev server
+cd frontend && npm run dev
+
+# Build the frontend
+cd frontend && npm run build
+
 # Run the app locally
 python main.py
 
 # Syntax-check the backend entrypoint
 python -m py_compile main.py
 
-# Syntax-check the static frontend file
-node --check static/app.js
+# Validate the frontend bundle
+cd frontend && npm run build
 
 # Run the ad-hoc root test scripts if explicitly needed
 python test_pickcode.py
@@ -84,7 +94,7 @@ Pushing a `v*` tag triggers GitHub Actions to build the root `Dockerfile` and pu
 - `chillne/chillposter:1.0.0.2`
 - `chillne/chillposter:latest`
 
-The workflow passes `CHILLPOSTER_VERSION=<tag>` as a Docker build arg. `main.py` reads `CHILLPOSTER_VERSION` first and falls back to `DEFAULT_PROJECT_VERSION`; `static/app.js` reads `/api/version`, so do not manually edit the UI version string in `static/app.js` for releases.
+The workflow passes `CHILLPOSTER_VERSION=<tag>` as a Docker build arg. `main.py` reads `CHILLPOSTER_VERSION` first and falls back to `DEFAULT_PROJECT_VERSION`; the frontend reads `/api/version`, so do not manually edit frontend version display strings for releases.
 
 GitHub Actions requires repository secrets:
 
@@ -99,6 +109,7 @@ GitHub Actions requires repository secrets:
 - `config/*.json` except `config/media_organize_category_rules.json`
 - `config/*.log*`
 - `backups/`
+- `frontend/node_modules/`, `frontend/dist/`
 - `MoviePilot-2.10.6/` and `MoviePilot-Frontend-2.10.5/`
 
 Before committing, check `git status` and avoid staging ignored/generated local runtime files. Prefer staging specific files over broad adds when the changed set is unclear.
