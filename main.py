@@ -218,6 +218,7 @@ async def lifespan_ui(app: FastAPI):
     task_service_instance.refresh_cleanup_jobs()
     task_service_instance.refresh_selected_cleanup_jobs()
     task_service_instance.schedule_daily_signin_job()
+    strm.schedule_daily_full_sync_job(task_service_instance.scheduler)
     task_service_instance.load_active_jobs()
     rss_service_instance.load_active_jobs()
     hdhive_service.setup_scheduler(task_service_instance.scheduler)

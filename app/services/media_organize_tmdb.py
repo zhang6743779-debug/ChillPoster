@@ -8,6 +8,7 @@ and scraping-config construction.  No FastAPI dependencies.
 import os
 import re
 import json
+import hashlib
 import asyncio
 import time as _time
 import threading
@@ -38,6 +39,13 @@ _CORRECTED_TMDB_ID_CACHE_TTL_SECONDS = 6 * 60 * 60
 _DIRECT_TMDB_ID_CACHE_MAX_SIZE = 5000
 _DIRECT_TMDB_ID_CACHE_LOCK = threading.Lock()
 _DIRECT_TMDB_ID_CACHE: dict[tuple, tuple[float, tuple[Optional[int], str]]] = {}
+_TMDB_SQLITE_CACHE_LOCK = threading.Lock()
+_TMDB_SQLITE_CACHE_READY = False
+_TMDB_DETAIL_CACHE_MOVIE_TTL_SECONDS = 30 * 24 * 60 * 60
+_TMDB_DETAIL_CACHE_ENDED_TV_TTL_SECONDS = 30 * 24 * 60 * 60
+_TMDB_DETAIL_CACHE_ACTIVE_TV_TTL_SECONDS = 24 * 60 * 60
+_TMDB_SEARCH_CACHE_HIT_TTL_SECONDS = 30 * 24 * 60 * 60
+_TMDB_SEARCH_CACHE_MISS_TTL_SECONDS = 6 * 60 * 60
 _EXPLICIT_SEASON_OR_EPISODE_MARKER_RE = re.compile(
     r'(?i)(\bS\d{1,3}E[P]?\d{1,4}\b|\bS\d{1,3}\b|\bE[P]?\d{1,4}\b|Episode\s+\d{1,4}|Season\s+\d{1,3}|[第\s]*\d{1,4}\s*[集话話期幕]|第\s*[0-9一二三四五六七八九十百零]+\s*季)'
 )
@@ -173,7 +181,181 @@ def _build_scraping_config(config_data: dict) -> "ScrapingConfig":
 # ---------------------------------------------------------------------------
 
 
-def _fetch_tmdb_data_sync(tmdb_id: int, media_type: str, api_key: str, season_number: Optional[int] = None, parsed: Optional[dict] = None) -> Optional[dict]:
+def _ensure_tmdb_sqlite_cache_schema() -> bool:
+    global _TMDB_SQLITE_CACHE_READY
+    if _TMDB_SQLITE_CACHE_READY:
+        return True
+    with _TMDB_SQLITE_CACHE_LOCK:
+        if _TMDB_SQLITE_CACHE_READY:
+            return True
+        try:
+            from core.cache_db import cache_db
+            with cache_db(write=True) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS tmdb_detail_cache (
+                        media_type TEXT NOT NULL,
+                        tmdb_id INTEGER NOT NULL,
+                        fetched_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        status TEXT NOT NULL DEFAULT '',
+                        episode_keys_json TEXT NOT NULL DEFAULT '[]',
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (media_type, tmdb_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_tmdb_detail_cache_expires
+                        ON tmdb_detail_cache(expires_at);
+
+                    CREATE TABLE IF NOT EXISTS tmdb_search_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        fetched_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        hit INTEGER NOT NULL DEFAULT 0,
+                        payload_json TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_tmdb_search_cache_expires
+                        ON tmdb_search_cache(expires_at);
+                    """
+                )
+            _TMDB_SQLITE_CACHE_READY = True
+            return True
+        except Exception as e:
+            logger.debug(f"[TMDbCache] 初始化 SQLite 缓存失败，跳过缓存: {e}")
+            return False
+
+
+def _tmdb_episode_key(season: Optional[int], episode: Optional[int]) -> str:
+    try:
+        if season is None or episode is None:
+            return ""
+        season_num = int(season)
+        episode_num = int(episode)
+        if season_num <= 0 or episode_num <= 0:
+            return ""
+        return f"S{season_num}E{episode_num}"
+    except Exception:
+        return ""
+
+
+def _normalize_required_episodes(required_episodes: Optional[list[tuple]], parsed: Optional[dict], season_number: Optional[int]) -> list[str]:
+    keys: list[str] = []
+    seen = set()
+
+    def _add(season, episode):
+        key = _tmdb_episode_key(season, episode)
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+
+    for item in required_episodes or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        _add(item[0], item[1])
+
+    if parsed:
+        _add(season_number if season_number is not None else parsed.get("season"), parsed.get("episode"))
+    return keys
+
+
+def _tmdb_data_episode_keys(data: Optional[dict]) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    episodes = data.get("episodes_details")
+    if not isinstance(episodes, dict):
+        return []
+    return sorted(str(key) for key in episodes.keys() if key)
+
+
+def _tmdb_data_has_required_episodes(data: Optional[dict], required_episode_keys: list[str]) -> bool:
+    if not required_episode_keys:
+        return True
+    episode_keys = set(_tmdb_data_episode_keys(data))
+    return all(key in episode_keys for key in required_episode_keys)
+
+
+def _tmdb_detail_status(media_type: str, data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    if media_type == "movie":
+        return "movie"
+    series_details = data.get("series_details") if isinstance(data.get("series_details"), dict) else data
+    return str(series_details.get("status", "") or "")
+
+
+def _tmdb_detail_ttl(media_type: str, data: Optional[dict]) -> int:
+    if media_type == "movie":
+        return _TMDB_DETAIL_CACHE_MOVIE_TTL_SECONDS
+    status = _tmdb_detail_status(media_type, data).strip().lower()
+    if status in {"ended", "canceled", "cancelled"}:
+        return _TMDB_DETAIL_CACHE_ENDED_TV_TTL_SECONDS
+    return _TMDB_DETAIL_CACHE_ACTIVE_TV_TTL_SECONDS
+
+
+def _get_cached_tmdb_detail(tmdb_id: int, media_type: str, required_episode_keys: Optional[list[str]] = None) -> Optional[dict]:
+    if not tmdb_id or not media_type or not _ensure_tmdb_sqlite_cache_schema():
+        return None
+    try:
+        from core.cache_db import cache_db
+        now_ts = _time.time()
+        with cache_db() as conn:
+            row = conn.execute(
+                "SELECT payload_json, expires_at FROM tmdb_detail_cache WHERE media_type = ? AND tmdb_id = ?",
+                (str(media_type), int(tmdb_id)),
+            ).fetchone()
+        if not row:
+            return None
+        if float(row["expires_at"] or 0) <= now_ts:
+            return None
+        data = json.loads(row["payload_json"])
+        if media_type != "movie" and not _tmdb_data_has_required_episodes(data, list(required_episode_keys or [])):
+            logger.debug(f"[TMDbCache] 剧集详情缓存缺少目标集，强制刷新: TMDb:{tmdb_id} required={required_episode_keys}")
+            return None
+        logger.debug(f"[TMDbCache] 详情缓存命中: {media_type} TMDb:{tmdb_id}")
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        logger.debug(f"[TMDbCache] 读取详情缓存失败: {media_type} TMDb:{tmdb_id} err={e}")
+        return None
+
+
+def _set_cached_tmdb_detail(tmdb_id: int, media_type: str, data: Optional[dict]) -> None:
+    if not tmdb_id or not media_type or not isinstance(data, dict) or not _ensure_tmdb_sqlite_cache_schema():
+        return
+    try:
+        from core.cache_db import cache_db
+        now_ts = _time.time()
+        ttl_seconds = _tmdb_detail_ttl(media_type, data)
+        status = _tmdb_detail_status(media_type, data)
+        episode_keys = _tmdb_data_episode_keys(data)
+        payload_json = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        with cache_db(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO tmdb_detail_cache(
+                    media_type, tmdb_id, fetched_at, expires_at, status, episode_keys_json, payload_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(media_type, tmdb_id) DO UPDATE SET
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at,
+                    status = excluded.status,
+                    episode_keys_json = excluded.episode_keys_json,
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    str(media_type),
+                    int(tmdb_id),
+                    now_ts,
+                    now_ts + ttl_seconds,
+                    status,
+                    json.dumps(episode_keys, ensure_ascii=False, separators=(",", ":")),
+                    payload_json,
+                ),
+            )
+        logger.debug(f"[TMDbCache] 详情缓存写入: {media_type} TMDb:{tmdb_id} ttl={ttl_seconds}s status={status}")
+    except Exception as e:
+        logger.debug(f"[TMDbCache] 写入详情缓存失败: {media_type} TMDb:{tmdb_id} err={e}")
+
+
+def _fetch_tmdb_data_uncached_sync(tmdb_id: int, media_type: str, api_key: str, season_number: Optional[int] = None, parsed: Optional[dict] = None) -> Optional[dict]:
     """同步版本：直接调用 tmdb 模块（在线程池中安全调用）"""
     try:
         from core import tmdb
@@ -210,9 +392,32 @@ def _fetch_tmdb_data_sync(tmdb_id: int, media_type: str, api_key: str, season_nu
         return None
 
 
-async def _fetch_tmdb_data(tmdb_id: int, media_type: str, season_number: Optional[int] = None, parsed: Optional[dict] = None) -> Optional[dict]:
+def _fetch_tmdb_data_sync(
+    tmdb_id: int,
+    media_type: str,
+    api_key: str,
+    season_number: Optional[int] = None,
+    parsed: Optional[dict] = None,
+    required_episodes: Optional[list[tuple]] = None,
+) -> Optional[dict]:
+    required_episode_keys = _normalize_required_episodes(required_episodes, parsed, season_number)
+    cached = _get_cached_tmdb_detail(tmdb_id, media_type, required_episode_keys)
+    if cached:
+        return cached
+    data = _fetch_tmdb_data_uncached_sync(tmdb_id, media_type, api_key, season_number, parsed)
+    if data:
+        _set_cached_tmdb_detail(tmdb_id, media_type, data)
+    return data
+
+
+async def _fetch_tmdb_data(
+    tmdb_id: int,
+    media_type: str,
+    season_number: Optional[int] = None,
+    parsed: Optional[dict] = None,
+    required_episodes: Optional[list[tuple]] = None,
+) -> Optional[dict]:
     try:
-        from core import tmdb
         from core.configs import global_config
 
         api_key = global_config.tmdb_key
@@ -221,42 +426,16 @@ async def _fetch_tmdb_data(tmdb_id: int, media_type: str, season_number: Optiona
             return None
 
         loop = asyncio.get_event_loop()
-        if media_type == 'movie':
-            data = await loop.run_in_executor(None, tmdb.get_movie_details, tmdb_id, api_key)
-            if data:
-                return data
-            last_error = tmdb.get_last_tmdb_error()
-            if last_error and last_error.get("status_code") == 404 and parsed:
-                corrected_tmdb_id = await loop.run_in_executor(
-                    None,
-                    _find_corrected_tmdb_id_by_title_year,
-                    parsed,
-                    "movie",
-                    api_key,
-                    tmdb_id,
-                )
-                if corrected_tmdb_id:
-                    _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
-                    return await loop.run_in_executor(None, tmdb.get_movie_details, corrected_tmdb_id, api_key)
-            return None
-        else:
-            data = await loop.run_in_executor(None, tmdb.aggregate_full_series_data_from_tmdb, tmdb_id, api_key)
-            if data:
-                return data
-            last_error = tmdb.get_last_tmdb_error()
-            if last_error and last_error.get("status_code") == 404 and parsed:
-                corrected_tmdb_id = await loop.run_in_executor(
-                    None,
-                    _find_corrected_tmdb_id_by_title_year,
-                    parsed,
-                    "tv",
-                    api_key,
-                    tmdb_id,
-                )
-                if corrected_tmdb_id:
-                    _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
-                    return await loop.run_in_executor(None, tmdb.aggregate_full_series_data_from_tmdb, corrected_tmdb_id, api_key)
-            return None
+        return await loop.run_in_executor(
+            None,
+            _fetch_tmdb_data_sync,
+            tmdb_id,
+            media_type,
+            api_key,
+            season_number,
+            parsed,
+            required_episodes,
+        )
     except Exception as e:
         logger.error(f"[MediaOrganize] TMDb 请求失败: {e}")
         return None
@@ -1322,6 +1501,77 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 
 
+def _tmdb_search_cache_key(parsed: dict) -> str:
+    payload = {
+        "v": 1,
+        "media_type": parsed.get("media_type", ""),
+        "title_key": parsed.get("title_key") or (),
+        "titles_to_try": parsed.get("titles_to_try") or [],
+        "year": parsed.get("year"),
+        "season": parsed.get("season"),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _get_cached_tmdb_search_result(parsed: dict) -> tuple[bool, Optional[dict]]:
+    if not parsed or not _ensure_tmdb_sqlite_cache_schema():
+        return False, None
+    cache_key = _tmdb_search_cache_key(parsed)
+    try:
+        from core.cache_db import cache_db
+        now_ts = _time.time()
+        with cache_db() as conn:
+            row = conn.execute(
+                "SELECT hit, payload_json, expires_at FROM tmdb_search_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        if not row:
+            return False, None
+        if float(row["expires_at"] or 0) <= now_ts:
+            return False, None
+        if not int(row["hit"] or 0):
+            logger.debug(f"[TMDbCache] 搜索失败缓存命中: {parsed.get('filename', '')}")
+            return True, None
+        data = json.loads(row["payload_json"] or "{}")
+        if not isinstance(data, dict) or not data.get("tmdb_id"):
+            return False, None
+        logger.debug(f"[TMDbCache] 搜索缓存命中: {parsed.get('filename', '')} -> TMDb:{data.get('tmdb_id')}")
+        return True, data
+    except Exception as e:
+        logger.debug(f"[TMDbCache] 读取搜索缓存失败: {parsed.get('filename', '') if parsed else ''} err={e}")
+        return False, None
+
+
+def _set_cached_tmdb_search_result(parsed: dict, result: Optional[dict]) -> None:
+    if not parsed or not _ensure_tmdb_sqlite_cache_schema():
+        return
+    cache_key = _tmdb_search_cache_key(parsed)
+    hit = 1 if result else 0
+    ttl_seconds = _TMDB_SEARCH_CACHE_HIT_TTL_SECONDS if hit else _TMDB_SEARCH_CACHE_MISS_TTL_SECONDS
+    payload_json = json.dumps(result or {}, ensure_ascii=False, separators=(",", ":"))
+    try:
+        from core.cache_db import cache_db
+        now_ts = _time.time()
+        with cache_db(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO tmdb_search_cache(cache_key, fetched_at, expires_at, hit, payload_json)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at,
+                    hit = excluded.hit,
+                    payload_json = excluded.payload_json
+                """,
+                (cache_key, now_ts, now_ts + ttl_seconds, hit, payload_json),
+            )
+        if hit:
+            logger.debug(f"[TMDbCache] 搜索缓存写入: {parsed.get('filename', '')} -> TMDb:{(result or {}).get('tmdb_id')}")
+    except Exception as e:
+        logger.debug(f"[TMDbCache] 写入搜索缓存失败: {parsed.get('filename', '') if parsed else ''} err={e}")
+
+
 def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -> Optional[dict]:
     """
     根据 _parse_filename 的解析结果搜索 TMDb。
@@ -1350,16 +1600,26 @@ def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -
             "episode": parsed.get("episode"),
         }
 
+    search_cache_found, cached_search = _get_cached_tmdb_search_result(parsed)
+    if search_cache_found:
+        if cached_search:
+            return cached_search
+        failed_cache.add(series_key)
+        return None
+
     matched = _search_tmdb_candidates(titles_to_try, filename, media_type, year, season, api_key)
     if matched:
+        _set_cached_tmdb_search_result(parsed, matched)
         return matched
 
     douban_matched = _search_tmdb_via_douban_fallback(parsed, api_key)
     if douban_matched:
+        _set_cached_tmdb_search_result(parsed, douban_matched)
         return douban_matched
 
     logger.info(f"[MediaIdentify] 完全未找到匹配: '{filename}' (标题: {parsed['title']})")
     failed_cache.add(series_key)
+    _set_cached_tmdb_search_result(parsed, None)
     return None
 
 

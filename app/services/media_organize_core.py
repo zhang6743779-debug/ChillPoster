@@ -895,6 +895,9 @@ def _build_source_poll_session_key(drive_index: int, source_cid: str) -> str:
     return f"{int(drive_index)}:{str(source_cid or '')}"
 
 
+_SOURCE_PRE_RUN_DEBOUNCE_SECONDS = 1.0
+
+
 def _update_streaming_progress(run_id: str, *, scanned_video_count: int, processed_result_count: int,
                                success_count: int, error_count: int, strm_generated_count: int,
                                scan_complete: bool = False, status: Optional[str] = None):
@@ -1054,6 +1057,7 @@ def _schedule_or_refresh_source_poll(drive_index: int, source_dir: str, target_d
                 "event_generation": 1,
                 "active_run_id": "",
                 "started_at": now,
+                "last_event_at": now,
                 "max_runs": 20,
             }
             _state._source_poll_sessions[session_key] = session
@@ -1062,6 +1066,7 @@ def _schedule_or_refresh_source_poll(drive_index: int, source_dir: str, target_d
             session["source_dir"] = str(source_dir or session.get("source_dir", ""))
             session["target_dir"] = str(target_dir or session.get("target_dir", ""))
             session["event_generation"] = int(session.get("event_generation", 0) or 0) + 1
+            session["last_event_at"] = now
             if desired_phase == "post_run":
                 session["phase"] = "post_run"
                 session["last_scan_signature"] = ""
@@ -1112,6 +1117,14 @@ async def _run_source_poll_loop():
                 phase = str(current.get("phase", "pre_run") or "pre_run")
 
                 if phase == "pre_run":
+                    now_ts = _time.time()
+                    last_event_at = float(current.get("last_event_at", current.get("started_at", now_ts)) or now_ts)
+                    wait_seconds = max(0.0, _SOURCE_PRE_RUN_DEBOUNCE_SECONDS - (now_ts - last_event_at))
+                    if wait_seconds > 0:
+                        logger.debug(
+                            f"[115Life] 源目录事件防抖等待: key={session_key} wait={wait_seconds:.2f}s"
+                        )
+                        await asyncio.sleep(wait_seconds)
                     logger.info(f"[115Life] 源目录事件触发自动整理: key={session_key} reason=pre_run_event")
                     run_id, run_status = await _trigger_auto_organize_and_wait(drive_index)
                     current["active_run_id"] = run_id
@@ -1285,6 +1298,37 @@ async def _run_organize_async(run_id: str, req):
             ).start()
         return len(payloads_to_flush)
 
+    async def _run_finish_maintenance(label: str, *, include_refresh: bool = True):
+        try:
+            if include_refresh:
+                await asyncio.sleep(1)
+                _flush_pending_media_server_refreshes()
+            await asyncio.sleep(1)
+            try:
+                await _cleanup_empty_source_dirs(client, str(source_cid))
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
+
+            await _wait_source_tree_stable(drive_index, str(source_cid), label)
+
+            source_dir = str(config_data.get("source_name", "") or "")
+            target_dir = str(config_data.get("target_name", "") or "")
+            _schedule_or_refresh_source_poll(
+                drive_index=drive_index,
+                source_dir=source_dir,
+                target_dir=target_dir,
+                source_cid=str(source_cid),
+                phase="post_run",
+            )
+
+            try:
+                from app.services.emby_library_cache import schedule_discover_index_refresh
+                schedule_discover_index_refresh(reason="media_organize:finished", delay_sec=90)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[MediaOrganize] 整理结束后台维护失败: {e}")
+
     try:
         config_data = await _load_config_data()
         drive_index = req.drive_index or config_data.get("drive_index", 0)
@@ -1371,14 +1415,43 @@ async def _run_organize_async(run_id: str, req):
             tmdb_id = search_result["tmdb_id"]
             media_type = first_parsed["media_type"]
             season_num = search_result.get("season", first_parsed["season"])
+            required_episodes = []
+            if media_type == "tv":
+                for _, item_parsed, _ in group:
+                    item_season = search_result.get("season", item_parsed.get("season"))
+                    item_episode = item_parsed.get("episode")
+                    if item_season is not None and item_episode is not None:
+                        required_episodes.append((item_season, item_episode))
             cache_key = (tmdb_id, media_type)
             if cache_key in tmdb_cache:
-                return tmdb_cache[cache_key]
+                cached_data = tmdb_cache[cache_key]
+                if media_type != "tv":
+                    return cached_data
+                episodes = cached_data.get("episodes_details") if isinstance(cached_data, dict) else {}
+                if isinstance(episodes, dict):
+                    missing_required = False
+                    for item_season, item_episode in required_episodes:
+                        try:
+                            episode_key = f"S{int(item_season)}E{int(item_episode)}"
+                        except Exception:
+                            continue
+                        if episode_key not in episodes:
+                            missing_required = True
+                            break
+                    if not missing_required:
+                        return cached_data
+                tmdb_cache.pop(cache_key, None)
             if cache_key not in _tmdb_fetch_locks:
                 _tmdb_fetch_locks[cache_key] = asyncio.Lock()
             async with _tmdb_fetch_locks[cache_key]:
                 if cache_key not in tmdb_cache:
-                    tmdb_cache[cache_key] = await _fetch_tmdb_data(tmdb_id, media_type, season_num, first_parsed)
+                    tmdb_cache[cache_key] = await _fetch_tmdb_data(
+                        tmdb_id,
+                        media_type,
+                        season_num,
+                        first_parsed,
+                        required_episodes=required_episodes,
+                    )
                 return tmdb_cache[cache_key]
 
         async def _identify_group(key, group):
@@ -2468,12 +2541,8 @@ async def _run_organize_async(run_id: str, req):
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
-            try:
-                await _cleanup_empty_source_dirs(client, str(source_cid))
-            except Exception as e:
-                logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
-            await _wait_source_tree_stable(drive_index, str(source_cid), "无视频清理后")
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
+            asyncio.create_task(_run_finish_maintenance("无视频清理后", include_refresh=False))
             return
 
         scan_complete = True
@@ -2563,33 +2632,6 @@ async def _run_organize_async(run_id: str, req):
             if len(failed_results) > 20:
                 logger.warning(f"[MediaOrganize] 失败文件还有 {len(failed_results) - 20} 个未在摘要中展开")
 
-        await asyncio.sleep(1)
-        _flush_pending_media_server_refreshes()
-        await asyncio.sleep(1)
-
-        try:
-            await _cleanup_empty_source_dirs(client, str(source_cid))
-        except Exception as e:
-            logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
-
-        await _wait_source_tree_stable(drive_index, str(source_cid), "整理结束清理后")
-
-        source_dir = str(config_data.get("source_name", "") or "")
-        target_dir = str(config_data.get("target_name", "") or "")
-        _schedule_or_refresh_source_poll(
-            drive_index=drive_index,
-            source_dir=source_dir,
-            target_dir=target_dir,
-            source_cid=str(source_cid),
-            phase="post_run",
-        )
-
-        update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
-        try:
-            from app.services.emby_library_cache import schedule_discover_index_refresh
-            schedule_discover_index_refresh(reason="media_organize:finished", delay_sec=90)
-        except Exception:
-            pass
         ACTIVE_TASKS[run_id]["detail"] = {
             "total": total_files,
             "success": success_count,
@@ -2602,6 +2644,8 @@ async def _run_organize_async(run_id: str, req):
             "other_skipped": other_skipped_count,
             "strm": strm_generated_count,
         }
+        update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
+        asyncio.create_task(_run_finish_maintenance("整理结束清理后", include_refresh=True))
 
     except _OrganizeCancelledError:
         organize_cancel_event.set()

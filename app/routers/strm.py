@@ -1,10 +1,13 @@
 import os
 import json
 import uuid
+import random
+import threading
 import socket
 import ipaddress
 import psutil
 from fastapi import APIRouter, HTTPException
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel
 from typing import List
 from p115client import P115Client
@@ -14,6 +17,7 @@ from core.media_library_cache import build_task_key, prune_tasks_by_keys
 router = APIRouter(prefix="/api/strm", tags=["strm"])
 
 CONFIG_FILE = "config/strm_config.json"
+DAILY_FULL_SYNC_JOB_ID = "strm_daily_full_sync_0400"
 
 
 # ==========================================
@@ -160,6 +164,88 @@ def hydrate_strm_task(task: dict, config_302_data: dict | None = None) -> dict:
         config_302_data = get_config_302_sync()
     hydrated["strm_url_base"] = derive_strm_url_base(config_302_data, drive_index)
     return hydrated
+
+
+def _has_running_strm_or_organize_task() -> str:
+    try:
+        from app.dependencies import ACTIVE_TASKS
+        for task in ACTIVE_TASKS.values():
+            if not isinstance(task, dict):
+                continue
+            if str(task.get("status", "") or "") == "running":
+                task_type = str(task.get("task_type", "") or "")
+                if task_type == "strm":
+                    return "已有 STRM 同步任务运行中"
+                if task_type == "media_organize":
+                    return "已有媒体整理任务运行中"
+    except Exception:
+        return ""
+    return ""
+
+
+def _run_daily_full_sync_sequence(tasks: list[dict]):
+    from app.dependencies import update_task_progress
+    from app.services.strm_service import strm_service
+
+    total = len(tasks)
+    for idx, task_config in enumerate(tasks, 1):
+        run_id = f"strm_daily_{uuid.uuid4().hex[:8]}"
+        task_name = str(task_config.get("name", "") or f"任务{idx}")
+        update_task_progress(run_id, f"STRM定时全量同步: {task_name}", 0, "running")
+        logger.info(f"[STRM] 定时全量同步开始: {idx}/{total} {task_name} (run_id={run_id})")
+        try:
+            strm_service.run_full_sync(task_config, run_id)
+        except Exception as e:
+            logger.error(f"[STRM] 定时全量同步异常: {task_name}: {e}", exc_info=True)
+            update_task_progress(run_id, f"STRM定时全量同步失败: {task_name}", 100, "error")
+
+
+def run_daily_full_sync_job():
+    from app.services.strm_service import strm_service
+
+    running_reason = _has_running_strm_or_organize_task()
+    if running_reason:
+        logger.warning(f"[STRM] 定时全量同步跳过: {running_reason}")
+        return
+
+    config = strm_service.load_config()
+    tasks = [task for task in config.get("sync_tasks", []) if isinstance(task, dict)]
+    tasks = [
+        task for task in tasks
+        if str(task.get("remote_path", "") or "").strip()
+        and str(task.get("local_path", "") or "").strip()
+    ]
+    if not tasks:
+        default_task = _build_standard_topology_default_task()
+        if default_task:
+            tasks = [default_task]
+    if not tasks:
+        logger.warning("[STRM] 定时全量同步跳过: 没有可用的 STRM 同步配置")
+        return
+
+    logger.info(f"[STRM] 定时全量同步已提交: {len(tasks)} 个任务")
+    strm_service._executor.submit(_run_daily_full_sync_sequence, tasks)
+
+
+def schedule_daily_full_sync_job(scheduler):
+    try:
+        def delayed_job():
+            delay_seconds = random.randint(0, 3600)
+            logger.info(f"[STRM] 每日全量同步随机延迟: {delay_seconds}s")
+            timer = threading.Timer(delay_seconds, run_daily_full_sync_job)
+            timer.daemon = True
+            timer.start()
+
+        scheduler.add_job(
+            delayed_job,
+            CronTrigger.from_crontab("0 4 * * *"),
+            id=DAILY_FULL_SYNC_JOB_ID,
+            name="STRM每日全量同步",
+            replace_existing=True,
+        )
+        logger.info("[STRM] 已注册每日全量同步任务: 04:00-05:00 随机启动")
+    except Exception as e:
+        logger.error(f"[STRM] 注册每日全量同步任务失败: {e}")
 
 
 def _build_standard_topology_default_task() -> dict | None:
