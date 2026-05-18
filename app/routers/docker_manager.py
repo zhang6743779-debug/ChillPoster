@@ -1,7 +1,9 @@
 import os
 import time
 from typing import Literal
+import urllib.parse
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -20,6 +22,10 @@ class ContainerActionPayload(BaseModel):
 
 class PullImagePayload(BaseModel):
     image: str
+
+
+class CheckUpdatesPayload(BaseModel):
+    images: list[str] = []
 
 
 def _docker() -> DockerAPI:
@@ -151,6 +157,104 @@ def _require_image_ref(image: str) -> str:
     return value
 
 
+def _parse_image_ref(image: str) -> tuple[str, str, str]:
+    value = _require_image_ref(image)
+    if "@" in value:
+        value = value.split("@", 1)[0]
+    last_slash = value.rfind("/")
+    last_colon = value.rfind(":")
+    tag = "latest"
+    if last_colon > last_slash:
+        tag = value[last_colon + 1:] or "latest"
+        value = value[:last_colon]
+    first = value.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        registry, repo = value.split("/", 1)
+    else:
+        registry = "registry-1.docker.io"
+        repo = value
+        if "/" not in repo:
+            repo = f"library/{repo}"
+    return registry, repo, tag
+
+
+def _registry_request_digest(registry: str, repo: str, tag: str, token: str = "") -> tuple[int, str, str]:
+    url = f"https://{registry}/v2/{repo}/manifests/{urllib.parse.quote(tag, safe='')}"
+    headers = {
+        "Accept": ", ".join([
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.oci.image.manifest.v1+json",
+        ])
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+        resp = client.get(url, headers=headers)
+    return resp.status_code, resp.headers.get("Docker-Content-Digest", ""), resp.headers.get("WWW-Authenticate", "")
+
+
+def _parse_auth_params(header: str) -> dict:
+    if not header.lower().startswith("bearer "):
+        return {}
+    result = {}
+    for part in header[7:].split(","):
+        key, _, value = part.strip().partition("=")
+        if key and value:
+            result[key] = value.strip().strip('"')
+    return result
+
+
+def _remote_manifest_digest(image: str) -> str:
+    registry, repo, tag = _parse_image_ref(image)
+    status, digest, auth = _registry_request_digest(registry, repo, tag)
+    if status == 401 and auth:
+        params = _parse_auth_params(auth)
+        realm = params.get("realm")
+        if realm:
+            query = {
+                "service": params.get("service", registry),
+                "scope": params.get("scope", f"repository:{repo}:pull"),
+            }
+            with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+                token_resp = client.get(realm, params=query)
+                token_resp.raise_for_status()
+                token = token_resp.json().get("token") or token_resp.json().get("access_token") or ""
+            if token:
+                status, digest, _ = _registry_request_digest(registry, repo, tag, token)
+    if status >= 400:
+        raise RuntimeError(f"远程镜像查询失败: HTTP {status}")
+    if not digest:
+        raise RuntimeError("远程镜像未返回 digest")
+    return digest
+
+
+def _local_image_digests(api: DockerAPI, image: str) -> set[str]:
+    info = api.inspect_image(image)
+    digests = set()
+    for item in info.get("RepoDigests") or []:
+        if "@sha256:" in item:
+            digests.add(item.split("@", 1)[1])
+    image_id = str(info.get("Id") or "")
+    if image_id.startswith("sha256:"):
+        digests.add(image_id)
+    return digests
+
+
+def _check_image_update(api: DockerAPI, image: str) -> dict:
+    image = _require_image_ref(image)
+    local = _local_image_digests(api, image)
+    remote = _remote_manifest_digest(image)
+    return {
+        "image": image,
+        "remote_digest": remote,
+        "local_digests": sorted(local),
+        "update_available": bool(remote and remote not in local),
+        "message": "",
+    }
+
+
 def _recreate_container(api: DockerAPI, container_id: str, image: str) -> dict:
     image = _require_image_ref(image)
     info = api.inspect_container(container_id)
@@ -278,12 +382,47 @@ def list_images():
         _api_error(e)
 
 
+@router.post("/containers/check_updates")
+def check_container_updates(payload: CheckUpdatesPayload):
+    try:
+        api = _docker()
+        result = {}
+        for image in sorted(set(str(item or "").strip() for item in payload.images or [])):
+            if not image or image.startswith("sha256:"):
+                continue
+            try:
+                result[image] = _check_image_update(api, image)
+            except Exception as e:
+                result[image] = {
+                    "image": image,
+                    "update_available": False,
+                    "message": str(e),
+                }
+        return {"images": result}
+    except Exception as e:
+        _api_error(e)
+
+
 @router.post("/images/pull")
 def pull_image(payload: PullImagePayload):
     try:
         image = _require_image_ref(payload.image)
         _docker().pull_image(image)
         return {"status": "ok", "message": f"镜像已拉取: {image}"}
+    except Exception as e:
+        _api_error(e)
+
+
+@router.post("/images/prune_unused")
+def prune_unused_images():
+    try:
+        result = _docker().prune_images(all_unused=True)
+        return {
+            "status": "ok",
+            "deleted": result.get("ImagesDeleted") or [],
+            "space_reclaimed": int(result.get("SpaceReclaimed") or 0),
+            "message": "未使用镜像已清理",
+        }
     except Exception as e:
         _api_error(e)
 

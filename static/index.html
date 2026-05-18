@@ -19,7 +19,7 @@
     <script src="/static/vue.global.js"></script>
     <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260518docker-manager">
+    <link rel="stylesheet" href="/static/style.css?v=20260518docker-manager-tight">
 
 </head>
 
@@ -3466,12 +3466,17 @@
                     </div>
 
                     <div v-else-if="tab === 'docker_manager'" key="docker_manager" class="scroll-view">
-                        <div class="content-shell shell-xl">
-                            <div class="server-toolbar mb-20">
+                        <div class="content-shell shell-xl docker-manager-shell">
+                            <div class="server-toolbar docker-manager-head">
                                 <h2><i class="fa-solid fa-cubes icon-brand-docker"></i> Docker 管理</h2>
-                                <button class="btn btn-ghost" @click="refreshDockerManager" :disabled="dockerManager.loading">
-                                    <i class="fa-solid" :class="dockerManager.loading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新
-                                </button>
+                                <div class="docker-head-actions">
+                                    <button class="btn btn-ghost" @click="checkDockerUpdates" :disabled="dockerManager.updateChecking || dockerManager.loading || dockerManager.containers.length === 0">
+                                        <i class="fa-solid" :class="dockerManager.updateChecking ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i> 检查更新
+                                    </button>
+                                    <button class="btn btn-ghost" @click="refreshDockerManager" :disabled="dockerManager.loading">
+                                        <i class="fa-solid" :class="dockerManager.loading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新
+                                    </button>
+                                </div>
                             </div>
 
                             <div class="docker-manager-tabs">
@@ -3507,6 +3512,7 @@
                                         <span class="upgrade-badge ok">全部 {{ dockerManager.containers.length }}</span>
                                         <span class="upgrade-badge ok">运行中 {{ dockerManager.containers.filter(c => c.state === 'running').length }}</span>
                                         <span class="upgrade-badge muted">已停止 {{ dockerManager.containers.filter(c => c.state !== 'running').length }}</span>
+                                        <span class="upgrade-badge" :class="dockerUpdateCount > 0 ? 'warn' : 'muted'">有更新 {{ dockerUpdateCount }}</span>
                                     </div>
                                 </div>
 
@@ -3514,30 +3520,39 @@
                                 <div v-else-if="filteredDockerContainers.length === 0" class="empty-state-card">暂无容器</div>
                                 <div v-else class="docker-container-grid">
                                     <div v-for="container in filteredDockerContainers" :key="container.id" class="docker-container-card" :class="{running: container.state === 'running', stopped: container.state !== 'running'}">
+                                        <div class="docker-card-status-rail"></div>
                                         <div class="docker-card-head">
                                             <div class="docker-title-wrap">
-                                                <i class="fa-solid" :class="container.state === 'running' ? 'fa-circle-play docker-state-running' : 'fa-circle-stop docker-state-stopped'"></i>
+                                                <div class="docker-container-icon" :class="container.state === 'running' ? 'running' : 'stopped'">
+                                                    <i class="fa-solid fa-cube"></i>
+                                                </div>
                                                 <div>
                                                     <strong>{{ container.name }}</strong>
                                                     <span>{{ container.short_id }}</span>
                                                 </div>
                                             </div>
-                                            <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
+                                            <div class="docker-card-badges">
+                                                <span v-if="dockerManager.updateMap[container.image]?.update_available" class="docker-state-pill warn">有更新</span>
+                                                <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
+                                            </div>
+                                        </div>
+                                        <div class="docker-image-editor">
+                                            <label>修改版本</label>
+                                            <input v-model="dockerManager.imageDrafts[container.id]" :placeholder="container.image">
                                         </div>
                                         <div class="docker-meta-list">
-                                            <div><i class="fa-solid fa-layer-group"></i><span>{{ container.image }}</span></div>
                                             <div><i class="fa-solid fa-network-wired"></i><span>{{ container.ports_text || '未映射端口' }}</span></div>
                                             <div><i class="fa-solid fa-microchip"></i><span>CPU {{ container.cpu_percent || 0 }}%</span></div>
                                             <div><i class="fa-solid fa-memory"></i><span>{{ formatDockerBytes(container.memory_usage) }} / {{ formatDockerBytes(container.memory_limit) }}</span></div>
                                             <div><i class="fa-solid fa-clock"></i><span>{{ container.status }}</span></div>
                                         </div>
                                         <div class="docker-card-actions">
-                                            <button v-if="container.state !== 'running'" class="icon-btn icon-btn-success" @click="runDockerContainerAction(container, 'start')" title="启动"><i class="fa-solid fa-play"></i></button>
-                                            <button v-if="container.state === 'running'" class="icon-btn icon-btn-amber" @click="runDockerContainerAction(container, 'stop')" title="停止"><i class="fa-solid fa-stop"></i></button>
-                                            <button class="icon-btn icon-btn-blue" @click="runDockerContainerAction(container, 'restart')" title="重启"><i class="fa-solid fa-rotate-right"></i></button>
-                                            <button class="icon-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i></button>
-                                            <button class="icon-btn icon-btn-green" @click="runDockerContainerAction(container, 'update')" title="拉取镜像并重建"><i class="fa-solid fa-cloud-arrow-down"></i></button>
-                                            <button class="icon-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i></button>
+                                            <button v-if="container.state !== 'running'" class="docker-action-btn success" @click="runDockerContainerAction(container, 'start')" title="启动"><i class="fa-solid fa-play"></i><span>启动</span></button>
+                                            <button v-if="container.state === 'running'" class="docker-action-btn stop" @click="runDockerContainerAction(container, 'stop')" title="停止"><i class="fa-solid fa-stop"></i><span>停止</span></button>
+                                            <button class="docker-action-btn" @click="runDockerContainerAction(container, 'restart')" title="重启"><i class="fa-solid fa-rotate-right"></i><span>重启</span></button>
+                                            <button class="docker-action-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i><span>日志</span></button>
+                                            <button class="docker-action-btn update" :class="{ hot: dockerManager.updateMap[container.image]?.update_available }" @click="runDockerContainerAction(container, 'update')" title="按当前卡片版本拉取并重建"><i class="fa-solid fa-cloud-arrow-down"></i><span>更新</span></button>
+                                            <button class="docker-action-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i><span>删除</span></button>
                                         </div>
                                     </div>
                                 </div>
@@ -3554,7 +3569,16 @@
                                         <button class="btn btn-primary" @click="pullDockerImage" :disabled="dockerManager.imagePulling">
                                             <i class="fa-solid" :class="dockerManager.imagePulling ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i> 拉取镜像
                                         </button>
+                                        <button class="btn btn-danger" @click="pruneUnusedDockerImages" :disabled="dockerManager.pruneLoading || dockerImageStats.unused === 0">
+                                            <i class="fa-solid" :class="dockerManager.pruneLoading ? 'fa-spinner fa-spin' : 'fa-broom'"></i> 删除未使用
+                                        </button>
                                     </div>
+                                </div>
+                                <div class="docker-image-stats">
+                                    <div><strong>{{ dockerImageStats.total }}</strong><span>总镜像</span></div>
+                                    <div><strong>{{ dockerImageStats.used }}</strong><span>使用中</span></div>
+                                    <div><strong>{{ dockerImageStats.unused }}</strong><span>未使用</span></div>
+                                    <div><strong>{{ dockerImageStats.untagged }}</strong><span>无 Tag</span></div>
                                 </div>
 
                                 <div v-if="dockerManager.loading" class="empty-state-card">正在加载镜像...</div>
@@ -3583,6 +3607,9 @@
                                         <input type="number" v-model.number="dockerManager.logsTail" min="20" max="2000">
                                         <button class="btn btn-ghost" @click="dockerManager.selectedContainer && openDockerLogs(dockerManager.selectedContainer)" :disabled="!dockerManager.selectedContainer || dockerManager.logsLoading">
                                             <i class="fa-solid" :class="dockerManager.logsLoading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 重新加载
+                                        </button>
+                                        <button class="btn btn-ghost" @click="closeDockerLogs">
+                                            <i class="fa-solid fa-xmark"></i> 关闭日志
                                         </button>
                                     </div>
                                 </div>

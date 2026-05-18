@@ -426,16 +426,23 @@ createApp({
             actionLoading: '',
             logsLoading: false,
             imagePulling: false,
+            updateChecking: false,
+            pruneLoading: false,
             status: { available: false, message: '' },
             containers: [],
             images: [],
+            updateMap: {},
+            imageDrafts: {},
             search: '',
             imageSearch: '',
             pullImage: '',
             selectedContainer: null,
             logs: '',
             logsTail: 200,
+            lastRefreshAt: 0,
+            lastUpdateCheckAt: 0,
         });
+        let dockerSilentRefreshTimer = null;
 
         const loadProjectVersion = async () => {
             try {
@@ -560,6 +567,27 @@ createApp({
             );
         });
 
+        const dockerUpdateCount = computed(() => dockerManager.containers.filter(item => {
+            const info = dockerManager.updateMap[item.image];
+            return !!info?.update_available;
+        }).length);
+
+        const dockerImageStats = computed(() => {
+            const total = dockerManager.images.length;
+            const unused = dockerManager.images.filter(item => Number(item.containers) === 0).length;
+            const untagged = dockerManager.images.filter(item => item.name === '<none>:<none>' || !(item.tags || []).length).length;
+            const used = Math.max(0, total - unused);
+            return { total, used, unused, untagged };
+        });
+
+        const syncDockerImageDrafts = () => {
+            const next = {};
+            for (const item of dockerManager.containers) {
+                next[item.id] = dockerManager.imageDrafts[item.id] || item.image || '';
+            }
+            dockerManager.imageDrafts = next;
+        };
+
         const fetchDockerStatus = async () => {
             try {
                 const res = await axios.get('/api/docker/status');
@@ -569,28 +597,35 @@ createApp({
             }
         };
 
-        const fetchDockerContainers = async () => {
-            dockerManager.loading = true;
+        const fetchDockerContainers = async (options = {}) => {
+            const silent = !!options.silent;
+            if (!silent) dockerManager.loading = true;
             try {
                 await fetchDockerStatus();
                 const res = await axios.get('/api/docker/containers');
                 dockerManager.containers = res.data?.containers || [];
+                syncDockerImageDrafts();
+                dockerManager.lastRefreshAt = Date.now();
+                if (options.checkUpdates || (!dockerManager.lastUpdateCheckAt || Date.now() - dockerManager.lastUpdateCheckAt > 30 * 60 * 1000)) {
+                    checkDockerUpdates({ silent: true });
+                }
             } catch (e) {
-                showToast('获取容器失败: ' + (e.response?.data?.detail || e.message), 'error');
+                if (!silent) showToast('获取容器失败: ' + (e.response?.data?.detail || e.message), 'error');
             } finally {
-                dockerManager.loading = false;
+                if (!silent) dockerManager.loading = false;
             }
         };
 
-        const fetchDockerImages = async () => {
-            dockerManager.loading = true;
+        const fetchDockerImages = async (options = {}) => {
+            const silent = !!options.silent;
+            if (!silent) dockerManager.loading = true;
             try {
                 const res = await axios.get('/api/docker/images');
                 dockerManager.images = res.data?.images || [];
             } catch (e) {
-                showToast('获取镜像失败: ' + (e.response?.data?.detail || e.message), 'error');
+                if (!silent) showToast('获取镜像失败: ' + (e.response?.data?.detail || e.message), 'error');
             } finally {
-                dockerManager.loading = false;
+                if (!silent) dockerManager.loading = false;
             }
         };
 
@@ -602,6 +637,44 @@ createApp({
             }
         };
 
+        const checkDockerUpdates = async (options = {}) => {
+            const silent = !!options.silent;
+            const images = [...new Set(dockerManager.containers.map(item => item.image).filter(Boolean))];
+            if (!images.length) return;
+            if (!silent) dockerManager.updateChecking = true;
+            try {
+                const res = await axios.post('/api/docker/containers/check_updates', { images });
+                dockerManager.updateMap = res.data?.images || {};
+                dockerManager.lastUpdateCheckAt = Date.now();
+                if (!silent) {
+                    showToast(dockerUpdateCount.value > 0 ? `发现 ${dockerUpdateCount.value} 个容器镜像有更新` : '容器镜像均为最新', dockerUpdateCount.value > 0 ? 'success' : 'info');
+                }
+            } catch (e) {
+                if (!silent) showToast('检查更新失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                if (!silent) dockerManager.updateChecking = false;
+            }
+        };
+
+        const startDockerSilentRefresh = () => {
+            if (dockerSilentRefreshTimer) return;
+            dockerSilentRefreshTimer = setInterval(() => {
+                if (tab.value !== 'docker_manager') return;
+                if (dockerManager.activeTab === 'images') {
+                    fetchDockerImages({ silent: true });
+                } else {
+                    fetchDockerContainers({ silent: true });
+                }
+            }, 5 * 60 * 1000);
+        };
+
+        const stopDockerSilentRefresh = () => {
+            if (dockerSilentRefreshTimer) {
+                clearInterval(dockerSilentRefreshTimer);
+                dockerSilentRefreshTimer = null;
+            }
+        };
+
         const runDockerContainerAction = async (container, action) => {
             const actionLabel = { start: '启动', stop: '停止', restart: '重启', remove: '删除', update: '更新镜像并重建' }[action] || action;
             if (['stop', 'restart', 'remove', 'update'].includes(action)) {
@@ -610,7 +683,7 @@ createApp({
             }
             let image = '';
             if (action === 'update') {
-                image = window.prompt('请输入要拉取并重建的镜像', container.image || '');
+                image = (dockerManager.imageDrafts[container.id] || container.image || '').trim();
                 if (!image) return;
             }
             dockerManager.actionLoading = `${action}:${container.id}`;
@@ -621,7 +694,7 @@ createApp({
                     image,
                 });
                 showToast(res.data?.message || `${actionLabel}已完成`, 'success');
-                await fetchDockerContainers();
+                await fetchDockerContainers({ checkUpdates: action === 'update' });
             } catch (e) {
                 showToast(`${actionLabel}失败: ` + (e.response?.data?.detail || e.message), 'error');
             } finally {
@@ -644,6 +717,12 @@ createApp({
             } finally {
                 dockerManager.logsLoading = false;
             }
+        };
+
+        const closeDockerLogs = () => {
+            dockerManager.selectedContainer = null;
+            dockerManager.logs = '';
+            dockerManager.activeTab = 'containers';
         };
 
         const pullDockerImage = async () => {
@@ -674,6 +753,22 @@ createApp({
                 showToast('删除镜像失败: ' + (e.response?.data?.detail || e.message), 'error');
             } finally {
                 dockerManager.actionLoading = '';
+            }
+        };
+
+        const pruneUnusedDockerImages = async () => {
+            const ok = await showConfirm('删除未使用镜像', `将删除当前未被容器使用的镜像，预计 ${dockerImageStats.value.unused} 个。确定继续吗？`, 'danger');
+            if (!ok) return;
+            dockerManager.pruneLoading = true;
+            try {
+                const res = await axios.post('/api/docker/images/prune_unused');
+                const reclaimed = formatDockerBytes(res.data?.space_reclaimed || 0);
+                showToast(`已清理未使用镜像，释放 ${reclaimed}`, 'success');
+                await fetchDockerImages();
+            } catch (e) {
+                showToast('清理失败: ' + (e.response?.data?.detail || e.message), 'error');
+            } finally {
+                dockerManager.pruneLoading = false;
             }
         };
 
@@ -4681,6 +4776,10 @@ createApp({
                 fetch115UploadTasks();
                 start115UploadPolling();
             }
+            if (tab.value === 'docker_manager') {
+                refreshDockerManager();
+                startDockerSilentRefresh();
+            }
             await restoreRunningOrganizeTask();
             fetchHdhiveConfig();
             startHdhiveEventStream();
@@ -4715,6 +4814,7 @@ createApp({
             stopDashboardDeviceMetricsPolling();
             stopDashboard115Polling();
             stop115UploadPolling();
+            stopDockerSilentRefresh();
             stopConsoleLogStream();
             document.removeEventListener('keydown', handleKeydown);
             window.removeEventListener('resize', handleResize);
@@ -4856,6 +4956,9 @@ createApp({
             }
             if (newVal === 'docker_manager') {
                 refreshDockerManager();
+                startDockerSilentRefresh();
+            } else if (oldVal === 'docker_manager') {
+                stopDockerSilentRefresh();
             }
             if (newVal === 'drive115_upload') {
                 fetch115UploadTasks();
@@ -8048,8 +8151,9 @@ createApp({
             numberDialogState, handleNumberDialog, closeNumberDialog,
             projectVersion, currentUsername, stopTask,
             upgradeStatus, fetchUpgradeStatus, checkUpgrade, startUpgrade,
-            dockerManager, filteredDockerContainers, filteredDockerImages, fetchDockerStatus, fetchDockerContainers, fetchDockerImages,
-            refreshDockerManager, runDockerContainerAction, openDockerLogs, pullDockerImage, deleteDockerImage,
+            dockerManager, filteredDockerContainers, filteredDockerImages, dockerUpdateCount, dockerImageStats,
+            fetchDockerStatus, fetchDockerContainers, fetchDockerImages, checkDockerUpdates,
+            refreshDockerManager, runDockerContainerAction, openDockerLogs, closeDockerLogs, pullDockerImage, deleteDockerImage, pruneUnusedDockerImages,
             formatDockerBytes, formatDockerDate,
             cleanup115Tasks, cleanup115Form, cleanup115EditingId, showCreate115Cleanup, cleanup115Browser,
             fetch115CleanupTasks, openCreate115Cleanup, reset115CleanupForm, save115CleanupTask, edit115CleanupTask,
