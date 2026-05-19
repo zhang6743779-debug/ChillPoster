@@ -1936,8 +1936,7 @@ async def _run_organize_async(run_id: str, req):
                                 episodes=[(season_num, episode_num)],
                                 success_count=1,
                                 total_size=vf.get("size", 0),
-                                elapsed_seconds=notify_elapsed_seconds,
-                                tmdb_elapsed_seconds=tmdb_elapsed_seconds,
+                                elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
                             ))
                             _finalize_organize_result(
                                 result=result,
@@ -2179,8 +2178,7 @@ async def _run_organize_async(run_id: str, req):
                         episodes=batch_episodes,
                         success_count=batch_success,
                         total_size=batch_size,
-                        elapsed_seconds=notify_elapsed_seconds,
-                        tmdb_elapsed_seconds=tmdb_elapsed_seconds,
+                        elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
                     ))
 
             logger.debug(
@@ -2549,8 +2547,12 @@ async def _run_organize_async(run_id: str, req):
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
+            try:
+                await _cleanup_empty_source_dirs(client, str(source_cid))
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
+            await _wait_source_tree_stable(drive_index, str(source_cid), "无视频清理后")
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
-            asyncio.create_task(_run_finish_maintenance("无视频清理后", include_refresh=False))
             return
 
         scan_complete = True
@@ -2666,8 +2668,8 @@ async def _run_organize_async(run_id: str, req):
             "other_skipped": other_skipped_count,
             "strm": strm_generated_count,
         }
+        await _run_finish_maintenance("整理结束清理后", include_refresh=True)
         update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
-        asyncio.create_task(_run_finish_maintenance("整理结束清理后", include_refresh=True))
 
     except _OrganizeCancelledError:
         organize_cancel_event.set()
@@ -2757,7 +2759,7 @@ def _format_episode_range(values: list[int]) -> str:
 
 def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_type: str, tmdb_id: str,
                                   episodes: list[tuple], success_count: int, total_size: int,
-                                  elapsed_seconds: float, tmdb_elapsed_seconds: float | None = None) -> dict:
+                                  elapsed_seconds: float) -> dict:
     source = tmdb_data.get("series_details") if "series_details" in tmdb_data else tmdb_data
     title = source.get("name" if media_type == "tv" else "title", "")
     season_episode = ""
@@ -2808,7 +2810,6 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         "episode_ranges": episode_ranges,
         "file_size": file_size,
         "release_group": variables.get("release_group", ""),
-        "tmdb_elapsed": f"{tmdb_elapsed_seconds:.1f}秒" if tmdb_elapsed_seconds is not None else "",
         "elapsed": f"{elapsed_seconds:.1f}秒",
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "original_name": source.get("original_name" if media_type == "tv" else "original_title", ""),

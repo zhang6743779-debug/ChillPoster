@@ -10,7 +10,6 @@ import random
 from datetime import datetime, timedelta
 import time
 from concurrent.futures import as_completed
-from io import BytesIO
 
 # 调度器相关
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,7 +21,6 @@ from core.engine import PosterEngine
 from core.configs import TEMPLATES_DIR, FONTS_DIR, LAYOUTS_DIR, TASKS_FILE
 from core.logger import logger
 from app.routers.config_302 import get_emby_config_by_index_sync
-from PIL import Image
 
 # 引入 115 服务 (用于清理任务)
 from app.services.drive115_service import drive115_service
@@ -40,30 +38,16 @@ from app.dependencies import (
 # ==========================================
 # 1. 任务执行逻辑 (封面生成)
 # ==========================================
-def _build_wechat_cover_preview(image_data: bytes, width: int = 900, height: int = 383) -> bytes:
-    source = Image.open(BytesIO(image_data)).convert("RGB")
-    bg = source.copy()
-    bg_ratio = width / height
-    src_ratio = bg.width / bg.height
-    if src_ratio > bg_ratio:
-        crop_w = int(bg.height * bg_ratio)
-        left = max((bg.width - crop_w) // 2, 0)
-        bg = bg.crop((left, 0, left + crop_w, bg.height))
-    else:
-        crop_h = int(bg.width / bg_ratio)
-        top = max((bg.height - crop_h) // 2, 0)
-        bg = bg.crop((0, top, bg.width, top + crop_h))
-    bg = bg.resize((width, height), Image.LANCZOS)
-
-    fg = source.copy()
-    fg.thumbnail((width, height), Image.LANCZOS)
-    x = (width - fg.width) // 2
-    y = (height - fg.height) // 2
-    bg.paste(fg, (x, y))
-
-    output = BytesIO()
-    bg.save(output, format="JPEG", quality=85, optimize=True)
-    return output.getvalue()
+def _build_wechat_cover_preview(engine: PosterEngine, config: dict, assets: dict,
+                                width: int = 900, height: int = 400) -> bytes:
+    preview_config = copy.deepcopy(config or {})
+    preview_config["enable_animation"] = False
+    preview_config["canvas_width"] = 1920
+    preview_config["canvas_height"] = round(1920 * height / width)
+    preview_config["output_width"] = width
+    preview_config["output_height"] = height
+    preview_b64 = engine.draw(preview_config, assets)
+    return base64.b64decode(preview_b64)
 
 
 def _normalize_task_target(target_obj):
@@ -192,7 +176,7 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
                     poster_url = ""
                     if base:
                         preview_key = uuid.uuid4().hex
-                        put_task_cover_preview(preview_key, _build_wechat_cover_preview(img_data))
+                        put_task_cover_preview(preview_key, _build_wechat_cover_preview(engine, run_config, assets))
                         poster_url = f"{base}/api/discover/task_cover?key={preview_key}"
                     if poster_url:
                         logger.info(f"[任务] Webhook封面通知图片: {t.get('library_name', '')} -> {poster_url}")

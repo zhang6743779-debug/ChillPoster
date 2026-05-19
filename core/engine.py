@@ -237,12 +237,16 @@ class PosterEngine:
 
     # === [核心修改] APNG 生成 (含320x180网页优化) ===
     def draw(self, config, assets):
+        canvas_w = int(config.get('canvas_width') or 1920)
+        canvas_h = int(config.get('canvas_height') or 1080)
+        canvas_w = max(1, canvas_w)
+        canvas_h = max(1, canvas_h)
         bg = None
         if assets.get('bg_url'):
             bg = self.download_img(assets['bg_url'])
         
-        if not bg: bg = Image.new("RGBA", (1920, 1080), (20, 30, 50, 255))
-        bg = bg.resize((1920, 1080))
+        if not bg: bg = Image.new("RGBA", (canvas_w, canvas_h), (20, 30, 50, 255))
+        bg = bg.resize((canvas_w, canvas_h))
         
         blur = int(config.get('blur_radius', 4))
         if blur > 0: bg = bg.filter(ImageFilter.GaussianBlur(blur))
@@ -339,6 +343,10 @@ class PosterEngine:
 
             count_val = assets.get('count', 0)
             final_img = self._draw_badge(final_img, config, count_val, fonts)
+            output_w = int(config.get('output_width') or 0)
+            output_h = int(config.get('output_height') or 0)
+            if output_w > 0 and output_h > 0 and final_img.size != (output_w, output_h):
+                final_img = final_img.resize((output_w, output_h), Image.LANCZOS)
             final_img.convert("RGB").save(output, format='JPEG', quality=90)
             
         return base64.b64encode(output.getvalue()).decode('utf-8')

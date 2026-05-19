@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 11
+TEMPLATE_VERSION = 12
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -29,7 +29,6 @@ DEFAULT_TEMPLATES = {
                 "{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}"
                 "{% if tmdb_id %}\n🎬tmdbid：{{ tmdb_id }}{% endif %}"
                 "{% if release_group %}\n👨‍🎨制作组：{{ release_group }}{% endif %}"
-                "{% if tmdb_elapsed %}\n🔎TMDb识别耗时：{{ tmdb_elapsed }}{% endif %}"
                 "{% if elapsed %}\n⏱️整理耗时：{{ elapsed }}{% endif %}"
                 "\n🕐完成时间：{{ now }}"
                 "{% if overview %}\n\n📝简介：{{ overview }}{% endif %}"
