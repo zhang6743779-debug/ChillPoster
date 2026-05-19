@@ -49,9 +49,7 @@ def probe_file(filepath: str) -> Optional[dict]:
         if result.returncode != 0:
             logger.debug(f"ffprobe 返回非零状态码 {result.returncode}: {result.stderr[:200]}")
             return None
-        probe = json.loads(result.stdout)
-        logger.debug(f"[MediaInfo] ffprobe 全量原始输出: {json.dumps(probe, ensure_ascii=False)}")
-        return probe
+        return json.loads(result.stdout)
     except FileNotFoundError:
         logger.warning("ffprobe 未安装或不在 PATH 中，跳过 MediaInfo 获取")
         return None
@@ -411,7 +409,9 @@ def extract_media_fields(filepath: str) -> dict:
         return {}
 
     info, _ = _extract_probe_media_fields(probe)
-    return {k: v for k, v in info.items() if v is not None and v != ""}
+    fields = {k: v for k, v in info.items() if v is not None and v != ""}
+    logger.debug(f"[MediaInfo] ffprobe 提取字段: {fields}")
+    return fields
 
 
 def extract_wash_fields(filepath: str) -> dict:
@@ -430,4 +430,6 @@ def extract_wash_fields(filepath: str) -> dict:
     }
     if duration_seconds:
         result["duration_seconds"] = duration_seconds
-    return {k: v for k, v in result.items() if v not in (None, "")}
+    fields = {k: v for k, v in result.items() if v not in (None, "")}
+    logger.debug(f"[MediaInfo] ffprobe 洗版字段: {fields}")
+    return fields

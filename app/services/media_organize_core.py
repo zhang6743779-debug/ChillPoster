@@ -11,6 +11,7 @@ Contains the master orchestrator and supporting functions for:
 import os
 import re
 import json
+import gc
 import uuid
 import asyncio
 import time as _time
@@ -115,6 +116,60 @@ _FFPROBE_BATCH_CACHE: Optional[dict] = None
 _FFPROBE_MEDIA_DOWNLOAD_LIMIT = 3
 _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(_FFPROBE_MEDIA_DOWNLOAD_LIMIT)
 _FFPROBE_EXEC_TIMEOUT_SECONDS = 45
+
+
+def _trim_process_heap() -> bool:
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        return bool(libc.malloc_trim(0))
+    except Exception:
+        return False
+
+
+def _release_ffprobe_memory_caches() -> tuple[int, int]:
+    global _FFPROBE_FILE_CACHE, _FFPROBE_BATCH_CACHE
+    with _FFPROBE_CACHE_LOCK:
+        file_count = len(_FFPROBE_FILE_CACHE or {})
+        batch_count = len(_FFPROBE_BATCH_CACHE or {})
+        _FFPROBE_FILE_CACHE = None
+        _FFPROBE_BATCH_CACHE = None
+    return file_count, batch_count
+
+
+def _release_organize_memory(local_vars: dict, run_id: str = "") -> None:
+    cleared = 0
+    for name in (
+        "results", "skipped_results", "failed_results",
+        "pending_library_cache_items", "pending_refresh_payloads",
+        "pending_duplicate_moves", "pending_wash_reject_moves",
+        "subtitles_by_parent", "tmdb_cache", "_tmdb_fetch_locks",
+        "failed_cache", "search_cache", "_dir_chain_cache",
+        "_category_match_cache", "_tv_summary_logged",
+        "prefetched_source_tree_entries", "media_entries", "video_items",
+        "normal_video_items", "grouped_items_by_key",
+        "identify_worker_tasks", "organize_worker_tasks",
+        "postprocess_batcher_tasks", "postprocess_worker_tasks",
+        "pending_async_tasks",
+        "ffprobe_batch_profiles", "ffprobe_batch_sizes",
+        "ffprobe_name_conflict_samples", "ffprobe_name_conflict_accepted",
+        "ffprobe_batch_segment_samples",
+    ):
+        obj = local_vars.get(name)
+        if hasattr(obj, "clear"):
+            try:
+                obj.clear()
+                cleared += 1
+            except Exception:
+                pass
+    file_cache_count, batch_cache_count = _release_ffprobe_memory_caches()
+    collected = gc.collect()
+    trimmed = _trim_process_heap()
+    logger.info(
+        f"[MediaOrganize] 整理内存释放完成: run_id={run_id or '-'} "
+        f"cleared={cleared} ffprobe_file_cache={file_cache_count} "
+        f"ffprobe_batch_cache={batch_cache_count} gc={collected} malloc_trim={trimmed}"
+    )
 
 
 def _load_ffprobe_file_cache() -> dict:
@@ -2798,6 +2853,8 @@ async def _run_organize_async(run_id: str, req):
             elapsed_seconds=elapsed,
             detail=f"失败原因：{e}",
         )
+    finally:
+        _release_organize_memory(locals(), run_id)
 
 
 # ---------------------------------------------------------------------------
