@@ -24,7 +24,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         const templateVars = {
             media_added: ['title', 'year', 'media_type', 'library_name', 'rating', 'genres', 'overview', 'tagline', 'poster_url', 'now'],
             playback: ['title', 'year', 'original_name', 'media_type', 'rating', 'genres', 'overview', 'tagline', 'emby_name', 'user_name', 'client_info', 'now', 'poster_url'],
-            organize_complete: ['title', 'year', 'media_type', 'season_episode', 'rating', 'genres', 'overview', 'tmdb_id', 'quality', 'audio', 'episode_count', 'episode_ranges', 'file_size', 'release_group', 'elapsed']
+            organize_complete: ['title', 'year', 'media_type', 'season_episode', 'rating', 'genres', 'overview', 'tmdb_id', 'quality', 'video', 'audio', 'library_location', 'episode_count', 'episode_ranges', 'file_size', 'release_group', 'elapsed']
         };
 
         // 默认模板
@@ -39,7 +39,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
             },
             organize_complete: {
                 title: '💿 整理完成 ✅ 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}',
-                text: '⭐️评分：{{ rating or \'暂无\' }}\n🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}{% if quality %}\n💎画质：{{ quality }}{% endif %}{% if audio %}\n🎵音质：{{ audio }}{% endif %}{% if episode_count %}\n📖数量：{{ episode_count }} 集{% endif %}{% if episode_ranges %}\n📚集数：{{ episode_ranges }}{% endif %}{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}{% if tmdb_id %}\n🎬tmdbid：{{ tmdb_id }}{% endif %}{% if release_group %}\n👨\u200d🎨制作组：{{ release_group }}{% endif %}{% if elapsed %}\n⏱️整理耗时：{{ elapsed }}{% endif %}{% if overview %}\n\n📝简介：{{ overview }}{% endif %}'
+                text: '⭐️评分：{{ rating or \'暂无\' }}\n🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}{% if quality %}\n💎画质：{{ quality }}{% endif %}{% if video %}\n🎞️视频：{{ video }}{% endif %}{% if audio %}\n🎵音频：{{ audio }}{% endif %}{% if library_location %}\n📁库位：{{ library_location }}{% endif %}{% if episode_count %}\n📖数量：{{ episode_count }} 集{% endif %}{% if episode_ranges %}\n📚集数：{{ episode_ranges }}{% endif %}{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}{% if tmdb_id %}\n🎬tmdbid：{{ tmdb_id }}{% endif %}{% if release_group %}\n👨\u200d🎨制作组：{{ release_group }}{% endif %}{% if elapsed %}\n⏱️整理耗时：{{ elapsed }}{% endif %}{% if overview %}\n\n📝简介：{{ overview }}{% endif %}'
             }
         };
 

@@ -1993,6 +1993,7 @@ async def _run_organize_async(run_id: str, req):
                                 success_count=1,
                                 total_size=vf.get("size", 0),
                                 elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
+                                library_location=target_base,
                             ))
                             _finalize_organize_result(
                                 result=result,
@@ -2194,6 +2195,7 @@ async def _run_organize_async(run_id: str, req):
                                 plan_item.get("variables") or {},
                                 plan_item.get("media_type", "tv"),
                                 plan_item.get("tmdb_id", ""),
+                                plan_item.get("target_base", ""),
                             )
                         _finalize_organize_result(
                             result=result,
@@ -2231,7 +2233,7 @@ async def _run_organize_async(run_id: str, req):
                     _raise_if_organize_cancelled(run_id)
 
                 if batch_notify and batch_success > 0:
-                    _td, _vars, _mt, _tid = batch_notify
+                    _td, _vars, _mt, _tid, _library_location = batch_notify
                     _send_organize_notify(_build_organize_notify_payload(
                         tmdb_data=_td,
                         variables=_vars,
@@ -2241,6 +2243,7 @@ async def _run_organize_async(run_id: str, req):
                         success_count=batch_success,
                         total_size=batch_size,
                         elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
+                        library_location=_library_location,
                     ))
 
             logger.debug(
@@ -2821,7 +2824,7 @@ def _format_episode_range(values: list[int]) -> str:
 
 def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_type: str, tmdb_id: str,
                                   episodes: list[tuple], success_count: int, total_size: int,
-                                  elapsed_seconds: float) -> dict:
+                                  elapsed_seconds: float, library_location: str = "") -> dict:
     source = tmdb_data.get("series_details") if "series_details" in tmdb_data else tmdb_data
     title = source.get("name" if media_type == "tv" else "title", "")
     season_episode = ""
@@ -2856,7 +2859,8 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         f"{total_size/1024:.0f}K" if total_size else ""
     )
     quality = " ".join(p for p in [variables.get("source", ""), variables.get("resource_effect", ""), variables.get("video_effect", ""), variables.get("resource_pix", "")] if p)
-    audio = " ".join(p for p in [variables.get("video_encode", ""), variables.get("color_depth", ""), variables.get("fps", ""), variables.get("audio_encode", "")] if p)
+    video = " ".join(p for p in [variables.get("video_encode", ""), variables.get("color_depth", ""), variables.get("fps", "")] if p)
+    audio = str(variables.get("audio_encode", "") or "")
     return {
         "media_name": title,
         "media_type": media_type,
@@ -2867,7 +2871,9 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
         "overview": (source.get("overview", "") or "")[:150],
         "tmdb_id": tmdb_id,
         "quality": quality,
+        "video": video,
         "audio": audio,
+        "library_location": library_location,
         "episode_count": str(success_count) if media_type == "tv" else "",
         "episode_ranges": episode_ranges,
         "file_size": file_size,

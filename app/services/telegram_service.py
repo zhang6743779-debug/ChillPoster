@@ -921,9 +921,9 @@ class TelegramNotifyService:
                                  year: str = "", season_episode: str = "",
                                  rating: str = "", genres: str = "",
                                  overview: str = "", tmdb_id: str = "",
-                                 quality: str = "", audio: str = "",
+                                 quality: str = "", video: str = "", audio: str = "",
                                  episode_count: str = "", episode_ranges: str = "", file_size: str = "",
-                                 release_group: str = "", elapsed: str = "",
+                                 release_group: str = "", elapsed: str = "", library_location: str = "",
                                  original_name: str = "", **kwargs) -> bool:
         if not self.is_notify_type_enabled("organize_complete"):
             return False
@@ -943,7 +943,9 @@ class TelegramNotifyService:
             "overview": overview or "",
             "tmdb_id": tmdb_id or "",
             "quality": quality or "",
+            "video": video or kwargs.get("video") or "",
             "audio": audio or "",
+            "library_location": library_location or kwargs.get("library_location") or "",
             "episode_count": episode_count or "",
             "episode_ranges": episode_ranges or kwargs.get("episode_ranges") or "",
             "file_size": file_size or "",

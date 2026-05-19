@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 12
+TEMPLATE_VERSION = 13
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -23,7 +23,9 @@ DEFAULT_TEMPLATES = {
         "title": "整理完成 ✅ 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}",
         "text": "⭐️评分：{{ rating or '暂无' }}\n🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}"
                 "{% if quality %}\n💎画质：{{ quality }}{% endif %}"
-                "{% if audio %}\n🎵音质：{{ audio }}{% endif %}"
+                "{% if video %}\n🎞️视频：{{ video }}{% endif %}"
+                "{% if audio %}\n🎵音频：{{ audio }}{% endif %}"
+                "{% if library_location %}\n📁库位：{{ library_location }}{% endif %}"
                 "{% if episode_count %}\n📖数量：{{ episode_count }} 集{% endif %}"
                 "{% if episode_ranges %}\n📚集数：{{ episode_ranges }}{% endif %}"
                 "{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}"
