@@ -2698,8 +2698,11 @@ async def _run_organize_async(run_id: str, req):
             f"预告片 {trailer_skipped_count}, 其他 {other_skipped_count}) | "
             f"新生成STRM {strm_generated_count} | 耗时 {elapsed:.1f}s"
         )
+        notify_detail = ""
+        if failed_count:
+            notify_detail = f"部分条目失败：{failed_count} 个，请查看日志中的失败文件明细"
         _send_organize_task_notify(
-            status="success" if failed_count == 0 else "error",
+            status="success",
             total_files=total_files,
             success_count=success_count,
             failed_count=failed_count,
@@ -2711,6 +2714,7 @@ async def _run_organize_async(run_id: str, req):
             other_skipped_count=other_skipped_count,
             strm_generated_count=strm_generated_count,
             elapsed_seconds=elapsed,
+            detail=notify_detail,
         )
         if failed_results:
             logger.warning(f"[MediaOrganize] 本次失败文件明细: {len(failed_results)} 个")
