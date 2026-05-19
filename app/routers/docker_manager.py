@@ -18,6 +18,26 @@ from core.logger import logger
 router = APIRouter(prefix="/api/docker", tags=["DockerManager"])
 _UPDATE_TASKS: dict[str, dict] = {}
 _UPDATE_TASK_LOCK = threading.Lock()
+_DOCKER_HUB_REGISTRY = "registry-1.docker.io"
+_DOCKER_HUB_CHALLENGE_HOST = "index.docker.io"
+_DOCKER_HUB_ACCELERATOR_HOSTS = [
+    "docker.1ms.run",
+    "docker.m.daocloud.io",
+    "docker.1panel.top",
+    "docker.1panel.live",
+    "proxy.1panel.live",
+    "dockerproxy.1panel.live",
+    "docker.1panel.dev",
+    "docker.anye.in",
+    "hub.rat.dev",
+    "docker.amingg.com",
+]
+_DOCKER_HUB_HOST_CACHE = {"ts": 0.0, "hosts": []}
+_DOCKER_HUB_HOST_CACHE_TTL = 1800
+
+
+class RegistryRateLimitError(RuntimeError):
+    pass
 
 
 class ContainerActionPayload(BaseModel):
@@ -177,7 +197,7 @@ def _parse_image_ref(image: str) -> tuple[str, str, str]:
     if "." in first or ":" in first or first == "localhost":
         registry, repo = value.split("/", 1)
     else:
-        registry = "registry-1.docker.io"
+        registry = _DOCKER_HUB_REGISTRY
         repo = value
         if "/" not in repo:
             repo = f"library/{repo}"
@@ -206,8 +226,40 @@ def _registry_request_digest(registry: str, repo: str, tag: str, token: str = ""
     if token:
         headers["Authorization"] = f"Bearer {token}"
     with httpx.Client(**_registry_client_kwargs()) as client:
-        resp = client.get(url, headers=headers)
+        resp = client.head(url, headers=headers)
+        if resp.status_code in (405, 501) or not resp.headers.get("Docker-Content-Digest"):
+            resp = client.get(url, headers=headers)
     return resp.status_code, resp.headers.get("Docker-Content-Digest", ""), resp.headers.get("WWW-Authenticate", "")
+
+
+def _registry_ping(host: str) -> bool:
+    try:
+        with httpx.Client(**_registry_client_kwargs()) as client:
+            resp = client.get(f"https://{host}/v2/")
+        return resp.status_code in (200, 401)
+    except Exception as e:
+        logger.debug(f"[DockerManager] Registry 可用性检测失败: {host} - {e}")
+        return False
+
+
+def _docker_hub_candidate_hosts() -> list[str]:
+    now = time.time()
+    cached_hosts = _DOCKER_HUB_HOST_CACHE.get("hosts") or []
+    if cached_hosts and now - float(_DOCKER_HUB_HOST_CACHE.get("ts") or 0) < _DOCKER_HUB_HOST_CACHE_TTL:
+        return list(cached_hosts)
+
+    candidates = [_DOCKER_HUB_REGISTRY, _DOCKER_HUB_CHALLENGE_HOST, *_DOCKER_HUB_ACCELERATOR_HOSTS]
+    available = []
+    for host in candidates:
+        if host in available:
+            continue
+        if _registry_ping(host):
+            available.append(host)
+    if not available:
+        available = [_DOCKER_HUB_REGISTRY]
+    _DOCKER_HUB_HOST_CACHE.update({"ts": now, "hosts": available})
+    logger.info(f"[DockerManager] Docker Hub 可用 registry 候选: {', '.join(available)}")
+    return list(available)
 
 
 def _parse_auth_params(header: str) -> dict:
@@ -221,8 +273,7 @@ def _parse_auth_params(header: str) -> dict:
     return result
 
 
-def _remote_manifest_digest(image: str) -> str:
-    registry, repo, tag = _parse_image_ref(image)
+def _remote_manifest_digest_from(registry: str, repo: str, tag: str) -> str:
     status, digest, auth = _registry_request_digest(registry, repo, tag)
     if status == 401 and auth:
         params = _parse_auth_params(auth)
@@ -238,11 +289,35 @@ def _remote_manifest_digest(image: str) -> str:
                 token = token_resp.json().get("token") or token_resp.json().get("access_token") or ""
             if token:
                 status, digest, _ = _registry_request_digest(registry, repo, tag, token)
+    if status == 429:
+        raise RegistryRateLimitError("远程镜像查询失败: HTTP 429，Docker Hub 请求过多，请稍后再试")
     if status >= 400:
         raise RuntimeError(f"远程镜像查询失败: HTTP {status}")
     if not digest:
         raise RuntimeError("远程镜像未返回 digest")
     return digest
+
+
+def _remote_manifest_digest(image: str) -> str:
+    registry, repo, tag = _parse_image_ref(image)
+    hosts = _docker_hub_candidate_hosts() if registry == _DOCKER_HUB_REGISTRY else [registry]
+    errors = []
+    for host in hosts:
+        try:
+            return _remote_manifest_digest_from(host, repo, tag)
+        except RegistryRateLimitError as e:
+            errors.append(f"{host}: {e}")
+            continue
+        except Exception as e:
+            errors.append(f"{host}: {e}")
+            if registry != _DOCKER_HUB_REGISTRY:
+                break
+            continue
+    if registry == _DOCKER_HUB_REGISTRY and errors:
+        if all("HTTP 429" in item for item in errors):
+            raise RegistryRateLimitError("Docker Hub 及可用镜像源均返回 HTTP 429，请稍后再试")
+        raise RuntimeError("; ".join(errors))
+    raise RuntimeError("; ".join(errors) or "远程镜像查询失败")
 
 
 def _local_image_digests(api: DockerAPI, image: str) -> set[str]:
@@ -582,23 +657,55 @@ def check_container_updates(payload: CheckUpdatesPayload):
         if not images:
             return {"images": result}
 
-        max_workers = min(8, max(2, len(images)))
         logger.info(
             f"[DockerManager] 开始检查 {len(images)} 个镜像更新"
             f"{'（使用代理）' if str(global_config.proxy_url or '').strip() else '（直连）'}"
         )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(_check_image_update, api, image): image for image in images}
-            for future in as_completed(future_map):
-                image = future_map[future]
-                try:
-                    result[image] = future.result()
-                except Exception as e:
-                    result[image] = {
-                        "image": image,
-                        "update_available": False,
-                        "message": str(e),
-                    }
+
+        grouped: dict[str, list[str]] = {}
+        for image in images:
+            registry, _, _ = _parse_image_ref(image)
+            grouped.setdefault(registry, []).append(image)
+
+        def mark_failed(image: str, error: Exception | str):
+            message = str(error)
+            logger.warning(f"[DockerManager] 镜像更新检查失败: {image} - {message}")
+            result[image] = {
+                "image": image,
+                "update_available": False,
+                "message": message,
+            }
+
+        for registry, registry_images in grouped.items():
+            # Docker Hub 匿名 manifest 查询很容易触发 429；串行并在限流后停止同 registry 后续请求。
+            if registry == _DOCKER_HUB_REGISTRY:
+                rate_limited = False
+                for image in registry_images:
+                    if rate_limited:
+                        result[image] = {
+                            "image": image,
+                            "update_available": False,
+                            "message": "Docker Hub 已限流，已跳过本轮剩余 Docker Hub 镜像检查，请稍后再试",
+                        }
+                        continue
+                    try:
+                        result[image] = _check_image_update(api, image)
+                    except RegistryRateLimitError as e:
+                        rate_limited = True
+                        mark_failed(image, e)
+                    except Exception as e:
+                        mark_failed(image, e)
+                continue
+
+            max_workers = min(3, max(1, len(registry_images)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {executor.submit(_check_image_update, api, image): image for image in registry_images}
+                for future in as_completed(future_map):
+                    image = future_map[future]
+                    try:
+                        result[image] = future.result()
+                    except Exception as e:
+                        mark_failed(image, e)
         return {"images": result}
     except Exception as e:
         _api_error(e)

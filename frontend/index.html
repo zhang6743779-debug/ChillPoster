@@ -3883,14 +3883,22 @@
                                             </div>
                                         </div>
                                         <div class="docker-image-display" :class="{ changed: dockerManager.imageDrafts[container.id] && dockerManager.imageDrafts[container.id] !== container.image }">
-                                            <span>镜像版本</span>
+                                            <div class="docker-image-label"><i class="fa-solid fa-layer-group"></i><span>镜像</span></div>
                                             <strong :title="dockerManager.imageDrafts[container.id] || container.image">{{ dockerManager.imageDrafts[container.id] || container.image }}</strong>
                                         </div>
                                         <div class="docker-meta-list">
                                             <div><i class="fa-solid fa-network-wired"></i><span>{{ container.ports_text || '未映射端口' }}</span></div>
-                                            <div><i class="fa-solid fa-microchip"></i><span>CPU {{ container.cpu_percent || 0 }}%</span></div>
-                                            <div><i class="fa-solid fa-memory"></i><span>{{ formatDockerBytes(container.memory_usage) }} / {{ formatDockerBytes(container.memory_limit) }}</span></div>
                                             <div><i class="fa-solid fa-clock"></i><span>{{ container.status }}</span></div>
+                                        </div>
+                                        <div class="docker-resource-row">
+                                            <div class="docker-resource-tile">
+                                                <div class="docker-resource-head"><i class="fa-solid fa-microchip"></i><span>CPU</span><strong>{{ container.cpu_percent || 0 }}%</strong></div>
+                                                <div class="docker-resource-bar"><span :style="{ width: Math.min(100, Math.max(0, container.cpu_percent || 0)) + '%' }"></span></div>
+                                            </div>
+                                            <div class="docker-resource-tile">
+                                                <div class="docker-resource-head"><i class="fa-solid fa-memory"></i><span>内存</span><strong>{{ formatDockerBytes(container.memory_usage) }}</strong></div>
+                                                <div class="docker-resource-bar memory"><span :style="{ width: Math.min(100, Math.max(0, container.memory_percent || 0)) + '%' }"></span></div>
+                                            </div>
                                         </div>
                                         <div class="docker-card-actions">
                                             <button v-if="container.state !== 'running'" class="docker-action-btn success" @click="runDockerContainerAction(container, 'start')" title="启动"><i class="fa-solid fa-play"></i><span>启动</span></button>

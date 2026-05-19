@@ -356,7 +356,9 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
                 const failedCount = Object.values(dockerManager.updateMap).filter(item => item?.message).length;
                 const updateCount = dockerUpdateCount.value;
                 if (failedCount) {
-                    showToast(`检查完成：${updateCount} 个有更新，${failedCount} 个检查失败`, updateCount > 0 ? 'warning' : 'error');
+                    const firstFailure = Object.values(dockerManager.updateMap).find(item => item?.message);
+                    const reason = firstFailure?.message ? `：${firstFailure.message}` : '';
+                    showToast(`检查完成：${updateCount} 个有更新，${failedCount} 个检查失败${reason}`, updateCount > 0 ? 'warning' : 'error');
                 } else {
                     showToast(updateCount > 0 ? `发现 ${updateCount} 个容器镜像有更新` : '容器镜像均为最新', updateCount > 0 ? 'success' : 'info');
                 }
