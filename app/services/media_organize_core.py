@@ -1284,6 +1284,7 @@ async def _run_organize_async(run_id: str, req):
     pending_refresh_payloads: list[dict] = []
     pending_duplicate_moves: list[dict] = []
     pending_wash_reject_moves: list[dict] = []
+    pending_failed_moves: list[dict] = []
     duplicate_batch_size = 50000
     organize_cancel_event = threading.Event()
     _raise_cancel_if_requested = globals()["_raise_if_organize_cancelled"]
@@ -1354,6 +1355,27 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
+    async def _flush_pending_failed_moves():
+        nonlocal pending_failed_moves
+        if not pending_failed_moves:
+            return 0
+        if not (has_failed_dir and failed_dir_cid):
+            return len(pending_failed_moves)
+        batch = pending_failed_moves
+        pending_failed_moves = []
+        logger.info(f"[MediaOrganize] 开始统一移动失败文件/目录: {len(batch)} 条")
+        await _move_failed_files_batch(
+            client,
+            batch,
+            str(source_cid),
+            failed_dir_cid,
+            moved_dirs,
+            subtitles_by_parent=subtitles_by_parent,
+        )
+        moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
+        logger.info(f"[MediaOrganize] 失败文件/目录统一移动完成: {moved_count}/{len(batch)}")
+        return len(batch) - moved_count
+
     def _flush_pending_media_server_refreshes(immediate: bool = False, payloads: Optional[list[dict]] = None):
         nonlocal pending_refresh_payloads
         if payloads is None:
@@ -1392,6 +1414,16 @@ async def _run_organize_async(run_id: str, req):
                 await _cleanup_empty_source_dirs(client, str(source_cid))
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
+
+            try:
+                await _flush_pending_failed_moves()
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 统一移动失败文件失败: {e}")
+
+            try:
+                await _flush_pending_wash_reject_moves()
+            except Exception as e:
+                logger.warning(f"[Wash] 统一移动洗版未通过文件失败: {e}")
 
             await _wait_source_tree_stable(drive_index, str(source_cid), label)
 
@@ -2151,6 +2183,7 @@ async def _run_organize_async(run_id: str, req):
                                         wash_dir_cid,
                                         moved_dirs,
                                         subtitles_by_parent=subtitles_by_parent,
+                                        move_top_dir=False,
                                     )
                             else:
                                 logger.info(
@@ -2176,6 +2209,7 @@ async def _run_organize_async(run_id: str, req):
                                         wash_dir_cid,
                                         moved_dirs,
                                         subtitles_by_parent=subtitles_by_parent,
+                                        move_top_dir=False,
                                     )
                                 continue
 
@@ -2280,13 +2314,9 @@ async def _run_organize_async(run_id: str, req):
                 f"[MediaOrganize] FFPROBE统计: 全量探测={ffprobe_stats['full_probe']} 样本={ffprobe_stats['sample']} 异常={ffprobe_stats['anomaly']} 文件缓存命中={ffprobe_stats['cache']} 批次缓存命中={ffprobe_stats['batch_cache']} 批次复用={ffprobe_stats['reuse']} 样本不一致={ffprobe_stats['mismatch']} 分段切换={ffprobe_stats['segment']} 命名冲突确认={ffprobe_stats['name_conflict']}"
             )
 
-            # 本组整理完：失败文件所在的顶层目录直接移到失败目录
+            # 本组整理完：失败文件先暂存，整理收尾清理空目录后再统一移动。
             if group_failed and has_failed_dir and failed_dir_cid:
-                await _move_failed_files_batch(
-                    client, group_failed, str(source_cid),
-                    failed_dir_cid, moved_dirs,
-                    subtitles_by_parent=subtitles_by_parent,
-                )
+                pending_failed_moves.extend(group_failed)
 
             # === 本组 STRM + 媒体库刷新 ===
             # 放入后处理队列，释放整理并发槽继续处理下一组。
@@ -2613,6 +2643,8 @@ async def _run_organize_async(run_id: str, req):
             if not parsed:
                 logger.info(f"[MediaOrganize] 解析失败 -> {file_name}")
                 results.append({"file": file_name, "status": "error", "message": "无法识别媒体信息"})
+                if has_failed_dir and failed_dir_cid:
+                    pending_failed_moves.append(vf)
                 _update_streaming_progress(
                     run_id,
                     scanned_video_count=scanned_video_count,
@@ -2686,10 +2718,6 @@ async def _run_organize_async(run_id: str, req):
             await _stop_queue_workers(postprocess_batch_queue, postprocess_worker_tasks, "后处理")
 
         _raise_if_organize_cancelled(run_id)
-        if pending_wash_reject_moves:
-            await _flush_pending_wash_reject_moves()
-            _raise_if_organize_cancelled(run_id)
-
         _flush_pending_library_cache_updates()
 
         metadata_executor.shutdown(wait=True)

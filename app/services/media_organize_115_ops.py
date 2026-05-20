@@ -1035,20 +1035,86 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
     return result_map
 
 
+def _resolve_failed_move_target(client, file_item: dict, source_cid_str: str) -> tuple[str, bool, str]:
+    """返回要移动到失败目录的 ID：源目录根文件移动文件本身，子目录文件移动源目录下顶层目录。"""
+    file_id = str(file_item.get("id") or file_item.get("fid", ""))
+    file_name = str(file_item.get("name", "") or "")
+    source_cid = str(source_cid_str or "")
+    parent_id = str(file_item.get("parent_id", "") or "")
+    if not file_id:
+        return "", False, file_name
+    if source_cid and parent_id == source_cid:
+        return file_id, False, file_name
+
+    ancestors = file_item.get("ancestors") or []
+    if isinstance(ancestors, list) and source_cid:
+        source_seen = False
+        for ancestor in ancestors:
+            if not isinstance(ancestor, dict):
+                continue
+            ancestor_id = str(
+                ancestor.get("id")
+                or ancestor.get("cid")
+                or ancestor.get("category_id")
+                or ""
+            )
+            ancestor_name = str(ancestor.get("name", "") or "")
+            if not ancestor_id:
+                continue
+            if source_seen:
+                return ancestor_id, True, ancestor_name or file_name
+            if ancestor_id == source_cid:
+                source_seen = True
+
+    if not source_cid:
+        return file_id, False, file_name
+
+    try:
+        fs = _get_115_fs(client)
+        current_id = file_id
+        current_name = file_name
+        seen_ids = set()
+        for _ in range(30):
+            if not current_id or current_id in seen_ids:
+                break
+            seen_ids.add(current_id)
+            with _read_lock:
+                attr = fs._get_attr_by_id(int(current_id))
+            current_name = str(attr.get("name", "") or current_name)
+            current_parent = str(attr.get("parent_id", attr.get("cid", "")) or "")
+            if current_parent == source_cid:
+                return current_id, current_id != file_id, current_name
+            current_id = current_parent
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] 解析失败移动顶层目录失败，回退移动文件: {file_name}, err={e}")
+
+    return file_id, False, file_name
+
+
 async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
                                   failed_dir_cid: str, moved_dirs: set,
                                   subtitles_by_parent: dict | None = None,
-                                  target_path: str = ""):
-    """将失败文件及同目录匹配字幕移到失败目录"""
+                                  target_path: str = "",
+                                  move_top_dir: bool = True):
+    """将失败文件所在的源目录顶层文件夹移到失败目录；根目录文件则移动文件及匹配字幕。"""
     try:
         file_id = str(file_item.get("id") or file_item.get("fid", ""))
-        if file_id and file_id not in moved_dirs:
-            await _move_115_items(client, int(file_id), failed_dir_cid)
-            moved_dirs.add(file_id)
+        if move_top_dir:
+            target_id, moving_dir, target_name = _resolve_failed_move_target(client, file_item, source_cid_str)
+        else:
+            target_id = file_id
+            moving_dir = False
+            target_name = str(file_item.get("name", "") or "")
+        if target_id and target_id not in moved_dirs:
+            await _move_115_items(client, int(target_id), failed_dir_cid)
+            moved_dirs.add(target_id)
+            if file_id:
+                moved_dirs.add(file_id)
             if target_path:
-                _record_organized_source_path(file_id, target_path)
-            logger.debug(f"[MediaOrganize] 移动失败文件: {file_item.get('name', '')} -> 整理失败目录")
-        if subtitles_by_parent:
+                _record_organized_source_path(file_id or target_id, target_path)
+            label = "目录" if moving_dir else "文件"
+            logger.debug(f"[MediaOrganize] 移动失败{label}: {target_name or file_item.get('name', '')} -> 整理失败目录")
+        if subtitles_by_parent and not moving_dir:
             await _move_matched_subtitles_to_target(
                 client,
                 file_item,
@@ -1066,23 +1132,37 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
 async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
                                    failed_dir_cid: str, moved_dirs: set,
                                    subtitles_by_parent: dict | None = None):
-    """批量将失败文件移到失败目录，一次 API 请求"""
+    """批量将失败文件所在的源目录顶层文件夹移到失败目录，一次 API 请求。"""
     ids_to_move = []
+    seen_targets = set()
+    file_ids_by_target = {}
+    moving_dir_by_target = {}
+    direct_file_ids = set()
     for fi in group_failed:
         file_id = str(fi.get("id") or fi.get("fid", ""))
-        if file_id and file_id not in moved_dirs:
-            ids_to_move.append((file_id, fi.get("name", "")))
+        target_id, moving_dir, target_name = _resolve_failed_move_target(client, fi, source_cid)
+        if target_id and file_id:
+            file_ids_by_target.setdefault(target_id, []).append(file_id)
+        if target_id and file_id and not moving_dir:
+            direct_file_ids.add(file_id)
+        if target_id and target_id not in moved_dirs and target_id not in seen_targets:
+            seen_targets.add(target_id)
+            ids_to_move.append((target_id, target_name or fi.get("name", "")))
+            moving_dir_by_target[target_id] = moving_dir
 
     if not ids_to_move:
         return
 
     try:
         await _move_115_items(client, [int(fid) for fid, _ in ids_to_move], failed_dir_cid)
-        for file_id, name in ids_to_move:
-            moved_dirs.add(file_id)
-            logger.debug(f"[MediaOrganize] 移动失败文件: {name} -> 整理失败目录")
+        for target_id, name in ids_to_move:
+            moved_dirs.add(target_id)
+            for source_file_id in file_ids_by_target.get(target_id, []):
+                moved_dirs.add(source_file_id)
+            label = "目录" if moving_dir_by_target.get(target_id) else "文件"
+            logger.debug(f"[MediaOrganize] 移动失败{label}: {name} -> 整理失败目录")
     except Exception as e:
-        logger.warning(f"[MediaOrganize] 批量移动失败文件失败: count={len(ids_to_move)}, err={e}")
+        logger.warning(f"[MediaOrganize] 批量移动失败文件/目录失败: count={len(ids_to_move)}, err={e}")
         # 降级逐个移动
         for fi in group_failed:
             await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,
@@ -1092,7 +1172,7 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
     if subtitles_by_parent:
         for fi in group_failed:
             file_id = str(fi.get("id") or fi.get("fid", ""))
-            if file_id in moved_dirs:
+            if file_id in direct_file_ids and file_id in moved_dirs:
                 await _move_matched_subtitles_to_target(
                     client, fi, subtitles_by_parent,
                     target_cid=str(failed_dir_cid), target_path="",
@@ -1225,6 +1305,7 @@ def _iter_115_media_entries_from_tree(items: list[dict]) -> Iterator[dict]:
                     "parent_id": parent_id,
                     "size": item.get("size", 0),
                     "path": item.get("path", ""),
+                    "ancestors": item.get("ancestors", []),
                     "sha1": str(item.get("sha1", "") or "").upper(),
                 },
             }
@@ -1237,6 +1318,7 @@ def _iter_115_media_entries_from_tree(items: list[dict]) -> Iterator[dict]:
                     "pickcode": pickcode,
                     "parent_id": parent_id,
                     "path": item.get("path", ""),
+                    "ancestors": item.get("ancestors", []),
                 },
             }
 
