@@ -1428,11 +1428,11 @@
                                         <i class="fa-solid fa-tv"></i>
                                         <div>当前媒体库没有可统计的电视剧。</div>
                                     </div>
-                                    <div v-else-if="missingEpisodeStatsProblemItems.length" class="missing-episode-poster-grid" @scroll="onMissingEpisodeLazyScroll">
-                                        <div v-for="row in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" @click="openMediaDetail(row.item)">
+                                    <div v-else-if="missingEpisodeStatsProblemItems.length" ref="missingEpisodePosterGridRef" class="missing-episode-poster-grid" @scroll="onMissingEpisodeLazyScroll">
+                                        <div v-for="(row, idx) in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" :data-missing-poster-key="getMissingEpisodePosterKey(row)" @click="openMediaDetail(row.item)">
                                             <div class="missing-episode-poster-frame">
-                                                <img v-if="row.poster_url" :src="row.poster_url" :alt="row.title" loading="lazy">
-                                                <div v-else class="missing-episode-poster-placeholder"><i class="fa-solid fa-tv"></i></div>
+                                                <img v-if="isMissingEpisodePosterReady(row)" :src="row.poster_url" :alt="row.title" :loading="idx < 12 ? 'eager' : 'lazy'" decoding="async">
+                                                <div v-else class="missing-episode-poster-placeholder" :class="{lazy: row.poster_url}"><i class="fa-solid fa-tv"></i></div>
                                                 <div class="missing-episode-poster-badge" :class="row.missingCategory">
                                                     {{ row.categoryLabel }}
                                                 </div>
@@ -4963,7 +4963,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')"><i class="fa-solid fa-list-check"></i><span>缺集</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')"><i class="fa-solid fa-file-code"></i><span>STRM</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
@@ -5003,11 +5003,11 @@
                 <i class="fa-solid fa-house"></i>
                 <span>首页</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')">
-                <i class="fa-solid fa-file-code"></i>
-                <span>STRM</span>
+            <button class="mobile-tabbar-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')">
+                <i class="fa-solid fa-list-check"></i>
+                <span>缺集</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'strm_generate'].includes(tab)}" @click="toggleMobileMenu">
+            <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'missing_episode_stats'].includes(tab)}" @click="toggleMobileMenu">
                 <i class="fa-solid fa-ellipsis"></i>
                 <span>更多</span>
             </button>

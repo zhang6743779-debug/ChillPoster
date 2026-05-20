@@ -1,15 +1,19 @@
 import axios from 'axios';
-import { computed, nextTick, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 
 export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDockDrawers, mobileMenuVisible, mpConfig, showToast }) {
         // ==========================================
         // 14. 发现推荐页
         // ==========================================
-        const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 80;
-        const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 24;
-        const MISSING_EPISODE_RENDER_STEP_DESKTOP = 40;
-        const MISSING_EPISODE_RENDER_STEP_MOBILE = 16;
+        const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 36;
+        const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 16;
+        const MISSING_EPISODE_RENDER_STEP_DESKTOP = 24;
+        const MISSING_EPISODE_RENDER_STEP_MOBILE = 12;
+        const MISSING_EPISODE_EAGER_POSTER_DESKTOP = 12;
+        const MISSING_EPISODE_EAGER_POSTER_MOBILE = 6;
         const missingEpisodeRenderPage = ref(0);
+        const missingEpisodePosterGridRef = ref(null);
+        const missingEpisodeVisiblePosterKeys = ref(new Set());
 
         const discoverRows = [
             { key: 'today_picks', title: '今日推荐', icon: 'fa-solid fa-gift', source: 'tmdb', endpoint: '/api/discover/today_picks' },
@@ -413,11 +417,104 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         });
         let missingEpisodeLazyLoadLastAt = 0;
         let missingEpisodeLazyEnsurePending = false;
+        let missingEpisodePosterObserver = null;
+        let missingEpisodePosterObserverRoot = null;
+        let missingEpisodePosterRefreshToken = 0;
+
+        const getMissingEpisodePosterKey = (row = {}) => [
+            row.libraryId || '',
+            row.tmdbId || row.item?.tmdb_id || row.item?.id || row.title || '',
+            row.poster_url || '',
+        ].join('|');
+
+        const markMissingEpisodePostersVisible = (keys = []) => {
+            const nextKeys = new Set(missingEpisodeVisiblePosterKeys.value);
+            let changed = false;
+            keys.forEach(key => {
+                if (!key || nextKeys.has(key)) return;
+                nextKeys.add(key);
+                changed = true;
+            });
+            if (changed) missingEpisodeVisiblePosterKeys.value = nextKeys;
+        };
+
+        const isMissingEpisodePosterReady = (row = {}) => {
+            if (!row.poster_url) return false;
+            return missingEpisodeVisiblePosterKeys.value.has(getMissingEpisodePosterKey(row));
+        };
+
+        const primeInitialMissingEpisodePosters = () => {
+            const eagerCount = isMobile.value ? MISSING_EPISODE_EAGER_POSTER_MOBILE : MISSING_EPISODE_EAGER_POSTER_DESKTOP;
+            const keys = visibleMissingEpisodeStatsProblemItems.value
+                .filter(row => row.poster_url)
+                .slice(0, eagerCount)
+                .map(row => getMissingEpisodePosterKey(row));
+            markMissingEpisodePostersVisible(keys);
+        };
+
+        const teardownMissingEpisodePosterObserver = () => {
+            if (missingEpisodePosterObserver) {
+                missingEpisodePosterObserver.disconnect();
+                missingEpisodePosterObserver = null;
+            }
+            missingEpisodePosterObserverRoot = null;
+        };
+
+        const refreshMissingEpisodePosterObserver = () => {
+            const token = ++missingEpisodePosterRefreshToken;
+            nextTick(() => {
+                requestAnimationFrame(() => {
+                    if (token !== missingEpisodePosterRefreshToken) return;
+                    if (tab.value !== 'missing_episode_stats') return;
+                    const root = missingEpisodePosterGridRef.value || document.querySelector('.missing-episode-poster-grid');
+                    if (!root) return;
+                    primeInitialMissingEpisodePosters();
+
+                    const cards = Array.from(root.querySelectorAll('[data-missing-poster-key]'));
+                    if (!('IntersectionObserver' in window)) {
+                        markMissingEpisodePostersVisible(cards.map(card => card.dataset.missingPosterKey));
+                        return;
+                    }
+
+                    if (!missingEpisodePosterObserver || missingEpisodePosterObserverRoot !== root) {
+                        teardownMissingEpisodePosterObserver();
+                        missingEpisodePosterObserverRoot = root;
+                        missingEpisodePosterObserver = new IntersectionObserver((entries) => {
+                            const visibleKeys = [];
+                            entries.forEach(entry => {
+                                if (!entry.isIntersecting) return;
+                                const key = entry.target?.dataset?.missingPosterKey;
+                                if (key) visibleKeys.push(key);
+                                missingEpisodePosterObserver?.unobserve(entry.target);
+                            });
+                            markMissingEpisodePostersVisible(visibleKeys);
+                        }, {
+                            root,
+                            rootMargin: '360px 0px',
+                            threshold: 0.01,
+                        });
+                    }
+
+                    cards.forEach(card => {
+                        const key = card.dataset.missingPosterKey;
+                        if (!key || missingEpisodeVisiblePosterKeys.value.has(key)) return;
+                        missingEpisodePosterObserver.observe(card);
+                    });
+                });
+            });
+        };
+
+        const resetMissingEpisodePosterLazyState = () => {
+            missingEpisodeVisiblePosterKeys.value = new Set();
+            teardownMissingEpisodePosterObserver();
+            refreshMissingEpisodePosterObserver();
+        };
 
         const loadMoreMissingEpisodeItems = () => {
             if (!missingEpisodeHasMoreVisibleItems.value) return;
             missingEpisodeRenderPage.value += 1;
             ensureMissingEpisodeLazyScrollable();
+            refreshMissingEpisodePosterObserver();
         };
 
         const ensureMissingEpisodeLazyScrollable = () => {
@@ -438,6 +535,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const resetMissingEpisodeRenderedItems = () => {
             missingEpisodeRenderPage.value = 0;
+            resetMissingEpisodePosterLazyState();
             ensureMissingEpisodeLazyScrollable();
         };
 
@@ -462,6 +560,18 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         watch(() => missingEpisodeStatsProblemItems.value.length, () => {
             resetMissingEpisodeRenderedItems();
+        });
+
+        watch(() => visibleMissingEpisodeStatsProblemItems.value.length, () => {
+            refreshMissingEpisodePosterObserver();
+        });
+
+        onBeforeUnmount(() => {
+            teardownMissingEpisodePosterObserver();
+            if (missingEpisodeStatsPollTimer) {
+                clearTimeout(missingEpisodeStatsPollTimer);
+                missingEpisodeStatsPollTimer = null;
+            }
         });
 
         const isDoubanMainGrid = () => discoverActiveSource.value === 'douban';
@@ -1359,6 +1469,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         missingEpisodeStatsProblemItems,
         visibleMissingEpisodeStatsProblemItems,
         missingEpisodeHasMoreVisibleItems,
+        missingEpisodePosterGridRef,
+        getMissingEpisodePosterKey,
+        isMissingEpisodePosterReady,
         onMissingEpisodeLazyScroll,
         loadMissingEpisodeStatsShell,
         runMissingEpisodeStats,

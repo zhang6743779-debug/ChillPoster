@@ -1527,6 +1527,9 @@ createApp({
             missingEpisodeStatsProblemItems,
             visibleMissingEpisodeStatsProblemItems,
             missingEpisodeHasMoreVisibleItems,
+            missingEpisodePosterGridRef,
+            getMissingEpisodePosterKey,
+            isMissingEpisodePosterReady,
             onMissingEpisodeLazyScroll,
             loadMissingEpisodeStatsShell,
             runMissingEpisodeStats,
@@ -1713,7 +1716,7 @@ createApp({
             // [新增] 发现推荐页
             detailModal, openMediaDetail, closeDetailModal,
             missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeActiveErrorCount, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
-            visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, onMissingEpisodeLazyScroll,
+            visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, missingEpisodePosterGridRef, getMissingEpisodePosterKey, isMissingEpisodePosterReady, onMissingEpisodeLazyScroll,
             runMissingEpisodeStats, refreshMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
             setDetailSeason, toggleDetailSeasonExpanded, toggleDetailSeasonSubscription, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,
             subscribeMedia, unsubscribeMedia, getImdbLink, getTvdbLink,
