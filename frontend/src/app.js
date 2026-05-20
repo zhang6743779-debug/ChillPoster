@@ -962,7 +962,6 @@ createApp({
             if (servers.value.length > 0) {
                 await initDashboard();
                 await fetchDashboardOverview();
-                fetchLibs(0);
             }
         });
 

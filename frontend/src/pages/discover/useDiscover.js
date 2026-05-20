@@ -657,13 +657,16 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             missingEpisodeStats.progress = { current: 0, total: 0 };
         };
 
-        const applyMissingEpisodeStatsData = (data = {}) => {
+        const applyMissingEpisodeStatsData = (data = {}, options = {}) => {
+            const summaryOnly = options.summaryOnly || data.summaryOnly;
             const previousLibraryKey = missingEpisodeStats.activeLibraryKey;
             const summary = { ...emptyMissingEpisodeSummary(), ...(data.summary || {}) };
             missingEpisodeStats.ready = data.ready !== false;
             missingEpisodeStats.message = data.message || '';
             missingEpisodeStats.meta = data.meta || {};
-            missingEpisodeStats.items = data.items || [];
+            if (!summaryOnly || (Array.isArray(data.items) && data.items.length && !missingEpisodeStats.items.length)) {
+                missingEpisodeStats.items = data.items || [];
+            }
             missingEpisodeStats.libraries = data.libraries || [];
             const stillExists = missingEpisodeStats.libraries.some(lib => getMissingEpisodeLibraryKey(lib) === previousLibraryKey);
             if (stillExists) {
@@ -676,7 +679,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             missingEpisodeStats.summary = summary;
             missingEpisodeStats.progress = data.progress || { current: summary.tvCount || 0, total: summary.tvCount || 0 };
             missingEpisodeStats.loaded = true;
-            missingEpisodeStats.loading = !!data.running;
+            missingEpisodeStats.loading = summaryOnly ? true : !!data.running;
         };
 
         const pollMissingEpisodeStats = async (runId) => {
@@ -699,9 +702,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
         };
 
-        const loadMissingEpisodeStatsShell = async () => {
-            if (missingEpisodeStats.loading || missingEpisodeStats.loaded) return;
-            const runId = missingEpisodeStatsRunId;
+        const loadMissingEpisodeStatsFull = async (runId) => {
             try {
                 const res = await axios.get('/api/discover/library/missing-episode-stats');
                 if (runId !== missingEpisodeStatsRunId) return;
@@ -711,6 +712,26 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 }
             } catch (e) {
                 if (runId === missingEpisodeStatsRunId) {
+                    missingEpisodeStats.loading = false;
+                    missingEpisodeStats.error = e.response?.data?.detail || e.message || '获取媒体库失败';
+                }
+            }
+        };
+
+        const loadMissingEpisodeStatsShell = async () => {
+            if (missingEpisodeStats.loading || missingEpisodeStats.loaded) return;
+            const runId = missingEpisodeStatsRunId;
+            missingEpisodeStats.loading = true;
+            try {
+                const res = await axios.get('/api/discover/library/missing-episode-stats', {
+                    params: { summary_only: 1 },
+                });
+                if (runId !== missingEpisodeStatsRunId) return;
+                applyMissingEpisodeStatsData(res.data || {}, { summaryOnly: true });
+                loadMissingEpisodeStatsFull(runId);
+            } catch (e) {
+                if (runId === missingEpisodeStatsRunId) {
+                    missingEpisodeStats.loading = false;
                     missingEpisodeStats.error = e.response?.data?.detail || e.message || '获取媒体库失败';
                 }
             }

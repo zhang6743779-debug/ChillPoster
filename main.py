@@ -32,6 +32,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import RedirectResponse
 from contextlib import asynccontextmanager
 
@@ -313,6 +314,8 @@ async def lifespan_ui(app: FastAPI):
 
 # 创建 UI 主应用
 app = FastAPI(title="ChillPoster UI", version=PROJECT_VERSION, lifespan=lifespan_ui)
+
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 允许跨域 (UI端)
 app.add_middleware(

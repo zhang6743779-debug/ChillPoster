@@ -1801,6 +1801,8 @@ _missing_episode_cache_db_lock = threading.RLock()
 _missing_episode_cache_db_ready = False
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
 MISSING_EPISODE_STATS_CACHE_VERSION = 5
+MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 1
+MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT = 48
 _missing_episode_stats_state: dict = {
     "cache_key": "",
     "running": False,
@@ -1818,13 +1820,88 @@ def _create_missing_episode_stats_cache_schema(conn) -> None:
             version INTEGER NOT NULL,
             saved_at INTEGER NOT NULL DEFAULT 0,
             entry_count INTEGER NOT NULL DEFAULT 0,
-            payload_json TEXT NOT NULL DEFAULT '{}'
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            summary_payload_json TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE INDEX IF NOT EXISTS idx_missing_episode_stats_saved_at
             ON missing_episode_stats_cache(version, saved_at);
         """
     )
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(missing_episode_stats_cache)").fetchall()}
+    if "summary_payload_json" not in columns:
+        conn.execute("ALTER TABLE missing_episode_stats_cache ADD COLUMN summary_payload_json TEXT NOT NULL DEFAULT '{}'")
+
+
+def _slim_missing_episode_preview_item(item: dict) -> dict:
+    media_item = item.get("item") if isinstance(item.get("item"), dict) else {}
+    preview_media = {
+        "id": media_item.get("id") or item.get("tmdbId") or "",
+        "_tmdb_id": media_item.get("_tmdb_id") or item.get("tmdbId") or "",
+        "tmdb_id": media_item.get("tmdb_id") or item.get("tmdbId") or "",
+        "title": media_item.get("title") or item.get("title") or "",
+        "original_title": media_item.get("original_title") or "",
+        "year": media_item.get("year") or item.get("year") or "",
+        "poster_url": media_item.get("poster_url") or item.get("poster_url") or "",
+        "backdrop_url": media_item.get("backdrop_url") or item.get("backdrop_url") or "",
+        "rating": media_item.get("rating") or 0,
+        "overview": media_item.get("overview") or "",
+        "media_type": "tv",
+        "source": media_item.get("source") or "tmdb",
+        "subscribed": bool(media_item.get("subscribed", False)),
+        "exists_in_library": True,
+    }
+    return {
+        "tmdbId": item.get("tmdbId") or "",
+        "item": preview_media,
+        "title": item.get("title") or preview_media["title"],
+        "year": item.get("year") or preview_media["year"],
+        "poster_url": item.get("poster_url") or preview_media["poster_url"],
+        "backdrop_url": item.get("backdrop_url") or preview_media["backdrop_url"],
+        "status": item.get("status") or "",
+        "label": item.get("label") or "",
+        "missingCategory": item.get("missingCategory") or "",
+        "categoryLabel": item.get("categoryLabel") or "",
+        "tmdbStatus": item.get("tmdbStatus") or "",
+        "libraryId": item.get("libraryId") or "",
+        "libraryName": item.get("libraryName") or "",
+        "presentEpisodes": item.get("presentEpisodes") or 0,
+        "totalEpisodes": item.get("totalEpisodes") or 0,
+        "missingEpisodes": item.get("missingEpisodes") or 0,
+        "seasonBrief": item.get("seasonBrief") or "",
+    }
+
+
+def _build_missing_episode_summary_payload(payload: dict | None) -> dict:
+    if not isinstance(payload, dict):
+        return {}
+    summary_payload = dict(payload)
+    full_libraries = [lib for lib in (payload.get("libraries") or []) if isinstance(lib, dict)]
+    first_problem_lib = next((lib for lib in full_libraries if (lib.get("summary") or {}).get("missingEpisodes")), None)
+    preview_library_key = ""
+    preview_items: list[dict] = []
+    if first_problem_lib:
+        preview_library_key = str(first_problem_lib.get("libraryId") or first_problem_lib.get("libraryName") or "")
+        preview_items = [
+            _slim_missing_episode_preview_item(item)
+            for item in (first_problem_lib.get("items") or [])[:MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT]
+            if isinstance(item, dict)
+        ]
+    summary_payload["items"] = preview_items
+    summary_payload["libraries"] = []
+    for lib in full_libraries:
+        lib_key = str(lib.get("libraryId") or lib.get("libraryName") or "")
+        summary_lib = {
+            "libraryId": lib.get("libraryId", ""),
+            "libraryName": lib.get("libraryName", ""),
+            "summary": lib.get("summary") or _empty_missing_episode_summary(),
+        }
+        if lib_key == preview_library_key:
+            summary_lib["items"] = preview_items
+        summary_payload["libraries"].append(summary_lib)
+    summary_payload["summaryOnly"] = True
+    summary_payload["previewVersion"] = MISSING_EPISODE_SUMMARY_PREVIEW_VERSION
+    return summary_payload
 
 
 def _legacy_missing_episode_stats_cache_file() -> dict:
@@ -1852,23 +1929,33 @@ def _write_missing_episode_stats_cache_to_db(conn, data: dict) -> None:
     entry_count = int(meta.get("entry_count", 0) or 0)
     conn.execute(
         """
-        INSERT INTO missing_episode_stats_cache(cache_key, version, saved_at, entry_count, payload_json)
-        VALUES(?, ?, ?, ?, ?)
+        INSERT INTO missing_episode_stats_cache(cache_key, version, saved_at, entry_count, payload_json, summary_payload_json)
+        VALUES(?, ?, ?, ?, ?, ?)
         ON CONFLICT(cache_key) DO UPDATE SET
             version = excluded.version,
             saved_at = excluded.saved_at,
             entry_count = excluded.entry_count,
-            payload_json = excluded.payload_json
+            payload_json = excluded.payload_json,
+            summary_payload_json = excluded.summary_payload_json
         """,
-        (cache_key, version, saved_at, entry_count, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+        (
+            cache_key,
+            version,
+            saved_at,
+            entry_count,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            json.dumps(_build_missing_episode_summary_payload(payload), ensure_ascii=False, separators=(",", ":")),
+        ),
     )
 
 
-def _read_missing_episode_stats_cache_from_db(conn, cache_key: str | None = None) -> dict:
+def _read_missing_episode_stats_cache_from_db(conn, cache_key: str | None = None, summary_only: bool = False) -> dict:
+    payload_column = "summary_payload_json" if summary_only else "payload_json"
     if cache_key:
         row = conn.execute(
-            """
-            SELECT * FROM missing_episode_stats_cache
+            f"""
+            SELECT cache_key, version, saved_at, entry_count, {payload_column} AS payload_json
+            FROM missing_episode_stats_cache
             WHERE cache_key = ? AND version = ?
             LIMIT 1
             """,
@@ -1876,8 +1963,9 @@ def _read_missing_episode_stats_cache_from_db(conn, cache_key: str | None = None
         ).fetchone()
     else:
         row = conn.execute(
-            """
-            SELECT * FROM missing_episode_stats_cache
+            f"""
+            SELECT cache_key, version, saved_at, entry_count, {payload_column} AS payload_json
+            FROM missing_episode_stats_cache
             WHERE version = ?
             ORDER BY saved_at DESC LIMIT 1
             """,
@@ -1888,6 +1976,8 @@ def _read_missing_episode_stats_cache_from_db(conn, cache_key: str | None = None
     try:
         payload = json.loads(row["payload_json"] or "{}")
         if not isinstance(payload, dict):
+            return {}
+        if summary_only and not payload.get("summary") and not payload.get("libraries"):
             return {}
     except Exception:
         return {}
@@ -1927,11 +2017,11 @@ def _ensure_missing_episode_stats_cache_schema() -> None:
         _missing_episode_cache_db_ready = True
 
 
-def _read_missing_episode_stats_cache_file(cache_key: str | None = None) -> dict:
+def _read_missing_episode_stats_cache_file(cache_key: str | None = None, summary_only: bool = False) -> dict:
     try:
         _ensure_missing_episode_stats_cache_schema()
         with cache_db() as conn:
-            return _read_missing_episode_stats_cache_from_db(conn, cache_key)
+            return _read_missing_episode_stats_cache_from_db(conn, cache_key, summary_only=summary_only)
     except Exception as e:
         logger.debug(f"[Discover] 读取缺集统计 SQLite 缓存失败: {e}")
         return {}
@@ -2017,8 +2107,8 @@ def _save_missing_episode_stats_cache(payload: dict, cache_key: str, entries: li
         logger.warning(f"[Discover] 缺集统计缓存落盘失败: {e}")
 
 
-def _load_missing_episode_stats_cache(cache_key: str | None = None) -> dict | None:
-    data = _read_missing_episode_stats_cache_file(cache_key)
+def _load_missing_episode_stats_cache(cache_key: str | None = None, summary_only: bool = False) -> dict | None:
+    data = _read_missing_episode_stats_cache_file(cache_key, summary_only=summary_only)
     meta = data.get("_meta") if isinstance(data, dict) else {}
     if not isinstance(meta, dict) or meta.get("version") != MISSING_EPISODE_STATS_CACHE_VERSION:
         return None
@@ -2031,6 +2121,23 @@ def _load_missing_episode_stats_cache(cache_key: str | None = None) -> dict | No
     payload["running"] = False
     payload.setdefault("message", "统计完成")
     return payload
+
+
+def _load_or_backfill_missing_episode_stats_summary(cache_key: str | None, entries: list[dict]) -> dict | None:
+    cached = _load_missing_episode_stats_cache(cache_key, summary_only=True)
+    if cached and cached.get("previewVersion") == MISSING_EPISODE_SUMMARY_PREVIEW_VERSION:
+        return cached
+    full = _load_missing_episode_stats_cache(cache_key)
+    if not full:
+        return None
+    summary = _build_missing_episode_summary_payload(full)
+    try:
+        saved_key = (full.get("meta") or {}).get("missing_stats_cache_key") or cache_key
+        if saved_key:
+            _save_missing_episode_stats_cache(full, saved_key, entries)
+    except Exception as e:
+        logger.debug(f"[Discover] 缺集统计摘要缓存回填失败: {e}")
+    return summary
 
 
 def _sort_missing_episode_results(results: list[dict]) -> list[dict]:
@@ -2270,10 +2377,12 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
 def library_missing_episode_stats(
     refresh: int = Query(0, ge=0, le=1),
     start: int = Query(0, ge=0, le=1),
+    summary_only: int = Query(0, ge=0, le=1),
 ):
+    wants_summary = bool(summary_only)
     meta = get_discover_index_meta()
     if not get_discover_index_ready():
-        cached = _load_missing_episode_stats_cache()
+        cached = _load_missing_episode_stats_cache(summary_only=wants_summary)
         if cached:
             return cached
         return {
@@ -2287,11 +2396,19 @@ def library_missing_episode_stats(
     api_key = _get_tmdb_key()
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
+    if wants_summary and not start and not refresh:
+        with _missing_episode_stats_lock:
+            if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
+                return _build_missing_episode_summary_payload(_missing_episode_stats_state["payload"])
+        cached_summary = _load_missing_episode_stats_cache(summary_only=True)
+        if cached_summary and cached_summary.get("previewVersion") == MISSING_EPISODE_SUMMARY_PREVIEW_VERSION:
+            return cached_summary
     entries = get_discover_series_entries()
     cache_key = _build_missing_episode_cache_key(entries)
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
-            return _missing_episode_stats_state["payload"]
+            payload = _missing_episode_stats_state["payload"]
+            return _build_missing_episode_summary_payload(payload) if wants_summary else payload
 
     if start or refresh:
         message = "正在校准 Emby 剧集索引..." if refresh else "正在统计剧集缺集..."
@@ -2310,30 +2427,38 @@ def library_missing_episode_stats(
             daemon=True,
         )
         worker.start()
-        return initial_payload
+        return _build_missing_episode_summary_payload(initial_payload) if wants_summary else initial_payload
 
     if not refresh:
-        cached = _cache_get(cache_key)
+        cached = None if wants_summary else _cache_get(cache_key)
         if cached:
             return cached
-        cached = _load_missing_episode_stats_cache(cache_key) or _load_missing_episode_stats_cache()
+        if wants_summary:
+            cached = (
+                _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
+                or _load_or_backfill_missing_episode_stats_summary(None, entries)
+            )
+        else:
+            cached = _load_missing_episode_stats_cache(cache_key) or _load_missing_episode_stats_cache()
         if cached:
             cached_key = (cached.get("meta") or {}).get("missing_stats_cache_key") or cache_key
-            if cached_key == cache_key:
+            if cached_key == cache_key and not wants_summary:
                 _cache_set(cache_key, cached, ttl=24 * 60 * 60)
             with _missing_episode_stats_lock:
                 _missing_episode_stats_state.update({
                     "cache_key": cached_key,
                     "running": False,
-                    "payload": cached,
+                    "payload": _missing_episode_stats_state.get("payload") if wants_summary else cached,
                     "progress": cached.get("progress") or {"current": 0, "total": 0},
                     "error": "",
                 })
             return cached
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("cache_key") == cache_key and _missing_episode_stats_state.get("payload"):
-            return _missing_episode_stats_state["payload"]
-    return _build_missing_episode_progress_payload(entries, meta, running=False, message="点击开始统计")
+            payload = _missing_episode_stats_state["payload"]
+            return _build_missing_episode_summary_payload(payload) if wants_summary else payload
+    payload = _build_missing_episode_progress_payload(entries, meta, running=False, message="点击开始统计")
+    return _build_missing_episode_summary_payload(payload) if wants_summary else payload
 
 
 @router.get("/tv/{tmdb_id}/season/{season_num}")
