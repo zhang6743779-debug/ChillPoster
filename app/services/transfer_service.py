@@ -443,6 +443,12 @@ class TransferService:
     def _is_ed2k_link(self, link: str) -> bool:
         return str(link or "").lower().startswith("ed2k://")
 
+    def is_successful_115_transfer(self, result: dict) -> bool:
+        """Whether a transfer result means a 115 share was actually received."""
+        if not isinstance(result, dict):
+            return False
+        return bool(result.get("success")) and str(result.get("link_type", "115") or "115").lower() == "115"
+
     def _dedupe_links(self, links: list[str]) -> list[str]:
         seen = set()
         result = []

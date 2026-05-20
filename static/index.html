@@ -9,18 +9,18 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 
-    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="icon" type="image/png" href="./favicon.png">
     
-    <link rel="shortcut icon" href="/static/favicon.png">
+    <link rel="shortcut icon" href="./favicon.png">
     
-    <link rel="apple-touch-icon" href="/static/favicon.png">
-    <link rel="apple-touch-icon-precomposed" href="/static/favicon.png">
+    <link rel="apple-touch-icon" href="./favicon.png">
+    <link rel="apple-touch-icon-precomposed" href="./favicon.png">
 
-    <script src="/static/vue.global.js"></script>
-    <script src="/static/axios.min.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css?v=20260518telegram-target-save">
 
+  <script type="module" crossorigin src="./assets/index-C8GBR4fk.js"></script>
+  <link rel="modulepreload" crossorigin href="./assets/style-C4Z3rg6h.js">
+  <link rel="stylesheet" crossorigin href="./assets/style-Ce-j7iah.css">
 </head>
 
 <body>
@@ -36,7 +36,7 @@
                 :class="{ 'sidebar-floating': isImmersiveMode, 'visible': sidebarHover }"
                 @mouseleave="sidebarHover = false">
                 <div class="sidebar-scroll">
-                    <div class="logo"><img src="/static/favicon.png" class="logo-img" alt="Logo"> Chill Poster <span class="version-tag">{{ projectVersion }}</span></div>
+                    <div class="logo"><img src="./favicon.png" class="logo-img" alt="Logo"> Chill Poster <span class="version-tag">{{ projectVersion }}</span></div>
 
                     <div class="nav-item" :class="{active: tab === 'dashboard'}" @click="tab = 'dashboard'">
                         <i class="fa-solid fa-house"></i> 仪表盘
@@ -139,7 +139,7 @@
         <div class="dock-topbar" v-if="!isMobile && !detailModal.visible">
             <div class="dock-topbar-left">
                 <div class="dock-topbar-logo" @click="goHome">
-                    <img src="/static/favicon.png" alt="Logo">
+                    <img src="./favicon.png" alt="Logo">
                     <span>Chill Poster</span>
                     <span class="version-tag">{{ projectVersion }}</span>
                 </div>
@@ -150,6 +150,12 @@
                     <span>{{ tasksState.hasRunning ? '任务运行中' : '系统就绪' }}</span>
                     <i class="fa-solid fa-chevron-down status-chevron-xs"></i>
                 </div>
+                <button class="dock-topbar-btn dock-topbar-health-btn" @click="closeNetworkConnectivity(); openSystemHealth()" title="系统健康检查">
+                    <i class="fa-solid fa-heart-pulse" :class="{ 'fa-beat': systemHealth.loading }"></i>
+                </button>
+                <button class="dock-topbar-btn dock-topbar-network-btn" @click="closeSystemHealth(); openNetworkConnectivity()" title="网络连通性测试">
+                    <i class="fa-solid fa-network-wired" :class="{ 'fa-beat': networkConnectivity.loading || networkConnectivity.activeTargetId }"></i>
+                </button>
                 <button class="dock-topbar-btn" @click="openConsoleLog" title="容器日志">
                     <i class="fa-solid fa-terminal"></i>
                 </button>
@@ -220,6 +226,14 @@
                 </div>
 
                 <div class="header-inline-actions">
+                    <button class="icon-btn icon-btn-health" @click="closeNetworkConnectivity(); openSystemHealth()" title="系统健康检查">
+                        <i class="fa-solid fa-heart-pulse" :class="{ 'fa-beat': systemHealth.loading }"></i>
+                    </button>
+
+                    <button class="icon-btn icon-btn-network" @click="closeSystemHealth(); openNetworkConnectivity()" title="网络连通性测试">
+                        <i class="fa-solid fa-network-wired" :class="{ 'fa-beat': networkConnectivity.loading || networkConnectivity.activeTargetId }"></i>
+                    </button>
+
                     <button class="icon-btn" @click="openConsoleLog" title="查看后台容器日志">
                         <i class="fa-solid fa-terminal icon-btn-terminal"></i>
                     </button>
@@ -1417,11 +1431,11 @@
                                         <i class="fa-solid fa-tv"></i>
                                         <div>当前媒体库没有可统计的电视剧。</div>
                                     </div>
-                                    <div v-else-if="missingEpisodeStatsProblemItems.length" class="missing-episode-poster-grid" @scroll="onMissingEpisodeLazyScroll">
-                                        <div v-for="row in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" @click="openMediaDetail(row.item)">
+                                    <div v-else-if="missingEpisodeStatsProblemItems.length" ref="missingEpisodePosterGridRef" class="missing-episode-poster-grid" @scroll="onMissingEpisodeLazyScroll">
+                                        <div v-for="(row, idx) in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" :data-missing-poster-key="getMissingEpisodePosterKey(row)" @click="openMediaDetail(row.item)">
                                             <div class="missing-episode-poster-frame">
-                                                <img v-if="row.poster_url" :src="row.poster_url" :alt="row.title" loading="lazy">
-                                                <div v-else class="missing-episode-poster-placeholder"><i class="fa-solid fa-tv"></i></div>
+                                                <img v-if="isMissingEpisodePosterReady(row)" :src="row.poster_url" :alt="row.title" :loading="idx < 12 ? 'eager' : 'lazy'" decoding="async">
+                                                <div v-else class="missing-episode-poster-placeholder" :class="{lazy: row.poster_url}"><i class="fa-solid fa-tv"></i></div>
                                                 <div class="missing-episode-poster-badge" :class="row.missingCategory">
                                                     {{ row.categoryLabel }}
                                                 </div>
@@ -1456,82 +1470,119 @@
                         </div>
                     </div>
 
-                    <div v-else-if="tab === 'resource_transfer'" key="resource_transfer" class="scroll-view">
-                        <div class="content-shell shell-lg">
-                            <div class="server-toolbar mb-20">
-                                <h2><i class="fa-solid fa-cloud-arrow-down icon-brand-bell"></i> 资源转存</h2>
-                            </div>
+                    <div v-else-if="tab === 'resource_transfer'" key="resource_transfer" class="scroll-view transfer-page">
+                        <div class="content-shell shell-xl transfer-shell">
+                            <section class="transfer-overview">
+                                <div class="transfer-overview-main">
+                                    <div class="transfer-icon-box">
+                                        <i class="fa-solid fa-cloud-arrow-down"></i>
+                                    </div>
+                                    <div class="transfer-title-block">
+                                        <div class="transfer-eyebrow">115 资源流转</div>
+                                        <h2>资源转存</h2>
+                                        <p>粘贴分享链接后立即发起转存，企业微信和 Telegram 监听记录会统一汇总在这里。</p>
+                                    </div>
+                                </div>
+                                <div class="transfer-overview-stats">
+                                    <div class="transfer-stat">
+                                        <span>{{ transferHistoryStats.total }}</span>
+                                        <label>记录</label>
+                                    </div>
+                                    <div class="transfer-stat transfer-stat-success">
+                                        <span>{{ transferHistoryStats.success }}</span>
+                                        <label>成功</label>
+                                    </div>
+                                    <div class="transfer-stat transfer-stat-error">
+                                        <span>{{ transferHistoryStats.failed }}</span>
+                                        <label>失败</label>
+                                    </div>
+                                </div>
+                            </section>
 
-                            <!-- 手动转存 -->
-                            <div class="card mb-15">
-                                <div class="card-header"><i class="fa-solid fa-link"></i> 手动转存</div>
-                                <div class="card-body">
-                                    <div class="form-row-tight mb-12">
+                            <section class="transfer-workbench">
+                                <div class="transfer-panel transfer-manual-panel" :class="{ 'transfer-manual-panel--wide': config302.standard_topology }">
+                                    <div class="transfer-panel-head">
+                                        <div>
+                                            <div class="transfer-panel-title"><i class="fa-solid fa-link"></i> 手动转存</div>
+                                            <div class="transfer-panel-sub">当前目录：{{ transferDirLabel }}</div>
+                                        </div>
+                                        <div class="transfer-channel-row">
+                                            <span class="transfer-source-badge transfer-source-badge--wechat"><i class="fa-brands fa-weixin"></i> 企业微信</span>
+                                            <span class="transfer-source-badge transfer-source-badge--telegram"><i class="fa-brands fa-telegram"></i> Telegram</span>
+                                        </div>
+                                    </div>
+                                    <div class="transfer-manual-form">
                                         <input
                                             v-model="transferInput"
                                             type="text"
-                                            placeholder="粘贴 115 分享链接..."
-                                            class="form-row-grow"
+                                            placeholder="粘贴 115 分享链接，回车即可转存"
+                                            class="transfer-link-input"
                                             @keyup.enter="manualTransfer"
                                         />
-                                        <button class="btn btn-primary" @click="manualTransfer" :disabled="transferLoading">
-                                            <i class="fa-solid fa-cloud-arrow-down"></i>
-                                            {{ transferLoading ? '转存中...' : '转存' }}
+                                        <button class="btn btn-primary transfer-submit-btn" @click="manualTransfer" :disabled="transferLoading">
+                                            <i class="fa-solid" :class="transferLoading ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i>
+                                            {{ transferLoading ? '转存中' : '开始转存' }}
                                         </button>
                                     </div>
-                                    <div v-if="transferResult" :class="transferResult.success ? 'transfer-result-success' : 'transfer-result-error'">
-                                        {{ transferResult.message }}
+                                    <div v-if="transferResult" class="transfer-result-banner" :class="transferResult.success ? 'is-success' : 'is-error'">
+                                        <i class="fa-solid" :class="transferResult.success ? 'fa-circle-check' : 'fa-circle-xmark'"></i>
+                                        <span>{{ transferResult.message }}</span>
                                     </div>
                                 </div>
-                            </div>
 
-                            <!-- 配置信息 -->
-                            <div class="card mb-15" v-if="!config302.standard_topology">
-                                <div class="card-header">
-                                    <span><i class="fa-solid fa-gear"></i> 转存配置</span>
-                                    <div class="resource-actions">
-                                        <button class="btn btn-green btn-sm" @click="saveTransferConfig"><i class="fa-solid fa-check"></i> 保存</button>
-                                    </div>
-                                </div>
-                                <div class="card-body card-body-compact">
-                                    <div class="form-stack">
-                                        <template v-if="!config302.standard_topology">
-                                        <div class="form-row-tight">
-                                            <label class="form-row-label">转存目录</label>
-                                            <input class="form-control form-row-grow" v-model="transferConfigForm.dir" placeholder="留空则使用根目录">
-                                            <button class="btn btn-ghost btn-sm" @click="browseTransferDir()">
-                                                <i class="fa-solid" :class="transferDirBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
-                                                {{ transferDirBrowser.visible ? '关闭浏览' : '浏览 115 文件夹' }}
-                                            </button>
+                                <div class="transfer-panel transfer-config-panel" v-if="!config302.standard_topology">
+                                    <div class="transfer-panel-head">
+                                        <div>
+                                            <div class="transfer-panel-title"><i class="fa-solid fa-folder-tree"></i> 转存目录</div>
+                                            <div class="transfer-panel-sub">留空时默认保存到根目录。</div>
                                         </div>
-                                        <!-- 目录浏览器 -->
-                                        <div v-if="transferDirBrowser.visible" class="cleanup-browser mt-15">
-                                            <div class="cleanup-browser-header">
-                                                <button class="btn btn-ghost btn-sm" @click="transferDirUp" :disabled="transferDirBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
-                                                <span>{{ transferDirBrowser.currentPath }}</span>
-                                                <button class="btn btn-primary btn-sm" @click="applyTransferDir" :disabled="transferDirBrowser.currentCid === '0'">选择当前目录</button>
-                                                <button class="btn btn-ghost btn-sm" @click="transferDirBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
-                                            </div>
-                                            <div class="cleanup-browser-list">
-                                                <div v-if="transferDirBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
-                                                <div v-else-if="transferDirBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
-                                                <div v-else v-for="dir in transferDirBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectTransferDir(dir)">
-                                                    <i class="fa-solid fa-folder"></i>
-                                                    <span>{{ dir.name }}</span>
-                                                    <i class="fa-solid fa-chevron-right"></i>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        </template>
-                                        <div><strong>接收渠道:</strong> 企业微信 / Telegram</div>
+                                        <button class="btn btn-green btn-sm btn-nowrap" @click="saveTransferConfig">
+                                            <i class="fa-solid fa-check"></i> 保存
+                                        </button>
                                     </div>
-                                </div>
-                            </div>
+                                    <div class="transfer-path-editor">
+                                        <input class="transfer-path-input" v-model="transferConfigForm.dir" placeholder="根目录">
+                                        <button class="btn btn-ghost btn-sm btn-nowrap" @click="browseTransferDir()">
+                                            <i class="fa-solid" :class="transferDirBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                            {{ transferDirBrowser.visible ? '关闭浏览' : '浏览文件夹' }}
+                                        </button>
+                                    </div>
+                                    <div class="transfer-path-preview">
+                                        <i class="fa-solid fa-location-dot"></i>
+                                        <span>{{ transferDirLabel }}</span>
+                                    </div>
 
-                            <!-- 转存记录 -->
-                            <div class="card">
-                                <div class="card-header">
-                                    <span><i class="fa-solid fa-clock-rotate-left"></i> 转存记录</span>
+                                    <div v-if="transferDirBrowser.visible" class="cleanup-browser transfer-dir-browser">
+                                        <div class="cleanup-browser-header transfer-dir-browser-head">
+                                            <button class="btn btn-ghost btn-sm" @click="transferDirUp" :disabled="transferDirBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ transferDirBrowser.currentPath }}</span>
+                                            <button class="btn btn-primary btn-sm" @click="applyTransferDir" :disabled="transferDirBrowser.currentCid === '0'">选择当前目录</button>
+                                            <button class="btn btn-ghost btn-sm" @click="transferDirBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="transferDirBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="transferDirBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                            <div v-else v-for="dir in transferDirBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectTransferDir(dir)">
+                                                <i class="fa-solid fa-folder"></i>
+                                                <span>{{ dir.name }}</span>
+                                                <i class="fa-solid fa-chevron-right"></i>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+
+                            <section class="transfer-panel transfer-history-panel">
+                                <div class="transfer-panel-head transfer-history-head">
+                                    <div>
+                                        <div class="transfer-panel-title"><i class="fa-solid fa-clock-rotate-left"></i> 转存记录</div>
+                                        <div class="transfer-panel-sub">
+                                            <span v-if="transferHistory.length">
+                                                显示 {{ transferHistoryRange.start }}-{{ transferHistoryRange.end }} / {{ transferHistoryRange.total }} 条
+                                            </span>
+                                            <span v-else>按最新记录排序，长名称和链接会自动收起。</span>
+                                        </div>
+                                    </div>
                                     <div class="resource-actions">
                                         <button class="btn btn-secondary btn-sm" @click="loadTransferHistory">
                                             <i class="fa-solid fa-rotate"></i> 刷新
@@ -1541,40 +1592,69 @@
                                         </button>
                                     </div>
                                 </div>
-                                <div class="card-body card-body-flush">
-                                    <div v-if="transferHistory.length === 0" class="empty-state-card">
-                                        暂无转存记录
-                                    </div>
-                                    <table v-else class="data-table data-table-full">
-                                        <thead>
-                                            <tr>
-                                                <th class="table-cell-head">时间</th>
-                                                <th class="table-cell-head">来源</th>
-                                                <th class="table-cell-head">名称</th>
-                                                <th class="table-cell-head">状态</th>
-                                                <th class="table-cell-head">链接</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            <tr v-for="(item, idx) in transferHistory" :key="idx">
-                                                <td class="table-cell table-cell-nowrap">{{ item.time }}</td>
-                                                <td class="table-cell">
-                                                    <span class="source-badge" :class="item.source === '企业微信' ? 'source-badge-blue' : item.source === 'Telegram' ? 'source-badge-purple' : 'source-badge-gray'">
-                                                        {{ item.source }}
-                                                    </span>
-                                                </td>
-                                                <td class="table-cell table-cell-truncate-200">{{ item.name || '-' }}</td>
-                                                <td class="table-cell">
-                                                    <span :class="item.success ? 'transfer-status-success' : 'transfer-status-error'">{{ item.status }}</span>
-                                                </td>
-                                                <td class="table-cell table-cell-truncate-250">
-                                                    <a :href="item.link" target="_blank" class="link-accent">{{ item.link }}</a>
-                                                </td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
+
+                                <div v-if="transferHistory.length === 0" class="transfer-empty-state">
+                                    <i class="fa-solid fa-box-open"></i>
+                                    <span>暂无转存记录</span>
                                 </div>
-                            </div>
+                                <div v-else class="transfer-history-list">
+                                    <div v-for="(item, idx) in paginatedTransferHistory" :key="`${item.time}_${item.link}_${idx}`" class="transfer-history-row" :class="'is-' + getTransferStatusClass(item)">
+                                        <div class="transfer-history-time">
+                                            <i class="fa-regular fa-clock"></i>
+                                            <span>{{ item.time }}</span>
+                                        </div>
+                                        <div class="transfer-history-source">
+                                            <span class="transfer-source-badge" :class="'transfer-source-badge--' + getTransferSourceClass(item)">
+                                                {{ getTransferSourceText(item) }}
+                                            </span>
+                                            <small v-if="getTransferSourceDetail(item)" class="transfer-source-detail" :title="getTransferSourceDetail(item)">
+                                                {{ getTransferSourceDetail(item) }}
+                                            </small>
+                                        </div>
+                                        <div class="transfer-history-name" :title="item.name || '-'">
+                                            <strong>{{ item.name || '-' }}</strong>
+                                            <small>{{ item.status || '-' }}</small>
+                                        </div>
+                                        <div class="transfer-history-link">
+                                            <span class="transfer-status-pill" :class="'transfer-status-pill--' + getTransferStatusClass(item)">
+                                                <i class="fa-solid" :class="getTransferStatusClass(item) === 'success' ? 'fa-circle-check' : getTransferStatusClass(item) === 'error' ? 'fa-circle-xmark' : 'fa-circle-info'"></i>
+                                                {{ item.status || '-' }}
+                                            </span>
+                                            <a v-if="item.link" :href="item.link" target="_blank" class="transfer-link" :title="item.link">
+                                                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                                                <span>{{ item.link }}</span>
+                                            </a>
+                                            <span v-else class="transfer-link transfer-link-empty">无链接</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div v-if="transferHistory.length > 0" class="transfer-pagination">
+                                    <div class="transfer-page-info">
+                                        每页
+                                        <select v-model.number="transferPageSize" class="transfer-page-size">
+                                            <option :value="8">8 条</option>
+                                            <option :value="12">12 条</option>
+                                            <option :value="20">20 条</option>
+                                            <option :value="50">50 条</option>
+                                        </select>
+                                    </div>
+                                    <div class="transfer-page-controls">
+                                        <button class="transfer-page-btn" @click="setTransferPage(1)" :disabled="transferPage === 1" title="第一页">
+                                            <i class="fa-solid fa-angles-left"></i>
+                                        </button>
+                                        <button class="transfer-page-btn" @click="setTransferPage(transferPage - 1)" :disabled="transferPage === 1" title="上一页">
+                                            <i class="fa-solid fa-chevron-left"></i>
+                                        </button>
+                                        <span class="transfer-page-current">{{ transferPage }} / {{ transferPageCount }}</span>
+                                        <button class="transfer-page-btn" @click="setTransferPage(transferPage + 1)" :disabled="transferPage === transferPageCount" title="下一页">
+                                            <i class="fa-solid fa-chevron-right"></i>
+                                        </button>
+                                        <button class="transfer-page-btn" @click="setTransferPage(transferPageCount)" :disabled="transferPage === transferPageCount" title="最后一页">
+                                            <i class="fa-solid fa-angles-right"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </section>
                         </div>
                     </div>
 
@@ -3806,14 +3886,22 @@
                                             </div>
                                         </div>
                                         <div class="docker-image-display" :class="{ changed: dockerManager.imageDrafts[container.id] && dockerManager.imageDrafts[container.id] !== container.image }">
-                                            <span>镜像版本</span>
+                                            <div class="docker-image-label"><i class="fa-solid fa-layer-group"></i><span>镜像</span></div>
                                             <strong :title="dockerManager.imageDrafts[container.id] || container.image">{{ dockerManager.imageDrafts[container.id] || container.image }}</strong>
                                         </div>
                                         <div class="docker-meta-list">
                                             <div><i class="fa-solid fa-network-wired"></i><span>{{ container.ports_text || '未映射端口' }}</span></div>
-                                            <div><i class="fa-solid fa-microchip"></i><span>CPU {{ container.cpu_percent || 0 }}%</span></div>
-                                            <div><i class="fa-solid fa-memory"></i><span>{{ formatDockerBytes(container.memory_usage) }} / {{ formatDockerBytes(container.memory_limit) }}</span></div>
                                             <div><i class="fa-solid fa-clock"></i><span>{{ container.status }}</span></div>
+                                        </div>
+                                        <div class="docker-resource-row">
+                                            <div class="docker-resource-tile">
+                                                <div class="docker-resource-head"><i class="fa-solid fa-microchip"></i><span>CPU</span><strong>{{ container.cpu_percent || 0 }}%</strong></div>
+                                                <div class="docker-resource-bar"><span :style="{ width: Math.min(100, Math.max(0, container.cpu_percent || 0)) + '%' }"></span></div>
+                                            </div>
+                                            <div class="docker-resource-tile">
+                                                <div class="docker-resource-head"><i class="fa-solid fa-memory"></i><span>内存</span><strong>{{ formatDockerBytes(container.memory_usage) }}</strong></div>
+                                                <div class="docker-resource-bar memory"><span :style="{ width: Math.min(100, Math.max(0, container.memory_percent || 0)) + '%' }"></span></div>
+                                            </div>
                                         </div>
                                         <div class="docker-card-actions">
                                             <button v-if="container.state !== 'running'" class="docker-action-btn success" @click="runDockerContainerAction(container, 'start')" title="启动"><i class="fa-solid fa-play"></i><span>启动</span></button>
@@ -4179,14 +4267,13 @@
                             <button class="log-level-btn" :class="{active: consoleLogState.levelFilter === 'ERROR'}" @click="changeConsoleLogLevel('ERROR')">ERROR</button>
                         </div>
                         <div class="console-log-levels console-log-category-group">
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'PLAYBACK_302'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'PLAYBACK_302' ? 'ALL' : 'PLAYBACK_302')">播放302</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'MEDIA_ORGANIZE'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'MEDIA_ORGANIZE' ? 'ALL' : 'MEDIA_ORGANIZE')">媒体整理</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'DRIVE_115'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'DRIVE_115' ? 'ALL' : 'DRIVE_115')">115网盘</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'STRM'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'STRM' ? 'ALL' : 'STRM')">STRM</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'NOTIFY'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'NOTIFY' ? 'ALL' : 'NOTIFY')">通知</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'SCHEDULER'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'SCHEDULER' ? 'ALL' : 'SCHEDULER')">任务调度</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'DIAGNOSTIC'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'DIAGNOSTIC' ? 'ALL' : 'DIAGNOSTIC')">错误诊断</button>
-                            <button class="log-level-btn" :class="{active: consoleLogState.categoryFilter === 'TMDB_SCRAPE'}" @click="changeConsoleLogCategory(consoleLogState.categoryFilter === 'TMDB_SCRAPE' ? 'ALL' : 'TMDB_SCRAPE')">TMDB刮削</button>
+                            <button v-for="option in logCategoryOptions"
+                                    :key="option.value"
+                                    class="log-level-btn"
+                                    :class="{active: consoleLogState.categoryFilter === option.value}"
+                                    @click="changeConsoleLogCategory(consoleLogState.categoryFilter === option.value ? 'ALL' : option.value)">
+                                {{ option.label }}
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -4283,75 +4370,16 @@
             </div>
         </transition>
 
-        <transition name="fade">
-            <div v-if="selectState.visible" class="confirm-mask">
-                <div class="confirm-box confirm-box-sm">
-                    <div class="confirm-header">
-                        <div class="confirm-title">{{ selectState.title }}</div>
-                    </div>
-                    <div class="confirm-desc">{{ selectState.msg }}</div>
-                    <div class="confirm-select-actions">
-                        <button v-for="(opt, idx) in selectState.options" :key="idx"
-                            class="btn btn-ghost confirm-option-btn"
-                            @click="handleSelect(opt.value)">
-                            {{ opt.label }}
-                        </button>
-                    </div>
-                    <div class="confirm-actions">
-                        <button class="btn btn-secondary" @click="closeSelectDialog">取消</button>
-                    </div>
-                </div>
-            </div>
-        </transition>
-
-        <transition name="fade">
-            <div v-if="confirmState.visible" class="confirm-mask">
-                <div class="confirm-box">
-                    <div class="confirm-header">
-                        <div class="confirm-icon-box" :class="confirmState.type">
-                            <i class="fa-solid" :class="confirmState.icon"></i>
-                        </div>
-                        <div class="confirm-title">{{ confirmState.title }}</div>
-                    </div>
-                    <div class="confirm-desc">{{ confirmState.msg }}</div>
-                    <div class="confirm-actions">
-                        <button class="btn btn-secondary" @click="handleConfirm(false)">取消</button>
-                        <button class="btn" :class="confirmState.confirmBtnClass" @click="handleConfirm(true)">{{ confirmState.confirmText }}</button>
-                    </div>
-                </div>
-            </div>
-        </transition>
-
-        <transition name="fade">
-            <div v-if="numberDialogState.visible" class="confirm-mask">
-                <div class="confirm-box">
-                    <div class="confirm-header">
-                        <div class="confirm-icon-box info">
-                            <i class="fa-solid fa-percent"></i>
-                        </div>
-                        <div class="confirm-title">{{ numberDialogState.title }}</div>
-                    </div>
-                    <div class="confirm-desc confirm-desc-plain">{{ numberDialogState.msg }}</div>
-                    <div class="confirm-input-row">
-                        <input
-                            v-model="numberDialogState.value"
-                            type="number"
-                            min="0"
-                            max="99.99"
-                            step="0.01"
-                            class="form-control confirm-input"
-                            :placeholder="numberDialogState.placeholder"
-                            @keyup.enter="handleNumberDialog(true)"
-                        >
-                        <span class="confirm-input-suffix">{{ numberDialogState.suffix }}</span>
-                    </div>
-                    <div class="confirm-actions">
-                        <button class="btn btn-secondary" @click="closeNumberDialog">取消</button>
-                        <button class="btn btn-primary" @click="handleNumberDialog(true)">确定</button>
-                    </div>
-                </div>
-            </div>
-        </transition>
+        <feedback-dialogs
+            :select-state="selectState"
+            :confirm-state="confirmState"
+            :number-dialog-state="numberDialogState"
+            :handle-select="handleSelect"
+            :close-select-dialog="closeSelectDialog"
+            :handle-confirm="handleConfirm"
+            :handle-number-dialog="handleNumberDialog"
+            :close-number-dialog="closeNumberDialog"
+        ></feedback-dialogs>
 
         <!-- ======== 桌面端 Dock 栏 ======== -->
         <div v-if="detailModal.visible" class="discover-overlay detail-overlay-top detail-overlay-fullscreen" @click.self="closeDetailModal">
@@ -4764,14 +4792,146 @@
             </div>
         </template>
 
-        <div class="toast-container">
-            <transition-group name="toast">
-                <div v-for="toast in toasts" :key="toast.id" class="toast-message" :class="toast.type">
-                    <i class="fa-solid" :class="toast.icon"></i>
-                    <span>{{ toast.msg }}</span>
-                </div>
-            </transition-group>
-        </div>
+        <transition name="system-health-fade">
+            <div v-if="systemHealth.visible" class="system-health-overlay" @click.self="closeSystemHealth">
+                <section class="system-health-panel" :class="'state-' + systemHealth.status">
+                    <div class="system-health-header">
+                        <div class="system-health-title">
+                            <i class="fa-solid fa-gear"></i>
+                            <span>健康检查</span>
+                        </div>
+                        <button class="settings-drawer-close" @click="closeSystemHealth" title="关闭">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+
+                    <div class="system-health-summary">
+                        <div class="system-health-summary-head">
+                            <div>
+                                <div class="system-health-headline">
+                                    <i class="fa-solid" :class="systemHealth.loading ? 'fa-spinner fa-spin' : getSystemHealthStatusIcon(systemHealth.status === 'checking' ? 'warning' : systemHealth.status)"></i>
+                                    <span>{{ systemHealthHeadline }}</span>
+                                </div>
+                                <div class="system-health-meta">{{ systemHealthMetaText }}</div>
+                            </div>
+                            <span class="system-health-percent">{{ Math.round(systemHealth.progress) }}%</span>
+                        </div>
+                        <div class="system-health-progress">
+                            <div class="system-health-progress-fill" :style="{ width: systemHealth.progress + '%' }"></div>
+                        </div>
+                        <div class="system-health-stats">
+                            <div>
+                                <strong>{{ systemHealth.summary.total }}</strong>
+                                <span>总模块数</span>
+                            </div>
+                            <div>
+                                <strong>{{ systemHealth.summary.ok }}</strong>
+                                <span>正常</span>
+                            </div>
+                            <div>
+                                <strong>{{ systemHealth.summary.warning }}</strong>
+                                <span>提醒</span>
+                            </div>
+                            <div>
+                                <strong>{{ systemHealth.summary.error }}</strong>
+                                <span>错误</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="system-health-list">
+                        <div v-if="systemHealth.loading && systemHealth.items.length === 0" class="system-health-loading">
+                            <div class="system-health-skeleton" v-for="i in 6" :key="'health_skeleton_' + i"></div>
+                        </div>
+                        <div v-for="item in systemHealth.items" :key="item.id" class="system-health-item" :class="'health-' + item.status">
+                            <div class="system-health-item-icon">
+                                <i class="fa-solid" :class="item.icon || getSystemHealthStatusIcon(item.status)"></i>
+                            </div>
+                            <div class="system-health-item-body">
+                                <div class="system-health-item-title">
+                                    <span>{{ item.label }} - {{ getSystemHealthStatusLabel(item.status) }}</span>
+                                    <span class="system-health-badge">{{ getSystemHealthStatusLabel(item.status) }}</span>
+                                </div>
+                                <div class="system-health-item-message">{{ item.message }}</div>
+                                <div v-if="item.detail" class="system-health-item-detail">{{ item.detail }}</div>
+                            </div>
+                            <i class="fa-solid system-health-state-icon" :class="getSystemHealthStatusIcon(item.status)"></i>
+                        </div>
+                    </div>
+
+                    <div class="system-health-actions">
+                        <button class="btn btn-secondary btn-sm" @click="runSystemHealthCheck" :disabled="systemHealth.loading">
+                            <i class="fa-solid fa-rotate-right" :class="{ 'fa-spin': systemHealth.loading }"></i>
+                            {{ systemHealth.loading ? '检查中...' : '重新检查' }}
+                        </button>
+                    </div>
+                </section>
+            </div>
+        </transition>
+
+        <transition name="system-health-fade">
+            <div v-if="networkConnectivity.visible" class="system-health-overlay network-connectivity-overlay" @click.self="closeNetworkConnectivity">
+                <section class="system-health-panel network-connectivity-panel" :class="'state-' + networkConnectivity.status">
+                    <div class="system-health-header">
+                        <div class="system-health-title">
+                            <i class="fa-solid fa-display"></i>
+                            <span>网速连通性测试</span>
+                        </div>
+                        <button class="settings-drawer-close" @click="closeNetworkConnectivity" title="关闭">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+
+                    <div class="network-connectivity-status">
+                        <div>
+                            <div class="network-connectivity-headline">
+                                <i :class="networkConnectivity.loading ? 'fa-solid fa-spinner fa-spin' : getNetworkStatusIcon(networkConnectivity.status === 'checking' ? 'warning' : networkConnectivity.status)"></i>
+                                <span>{{ networkConnectivityHeadline }}</span>
+                            </div>
+                            <div class="network-connectivity-meta">{{ networkConnectivityMetaText }}</div>
+                        </div>
+                        <div class="network-connectivity-counts">
+                            <span>{{ networkConnectivity.summary.ok }}</span>
+                            <small>/ {{ networkConnectivity.summary.total }}</small>
+                        </div>
+                    </div>
+
+                    <div class="network-connectivity-list">
+                        <div v-if="networkConnectivity.loading && networkConnectivity.items.length === 0" class="network-connectivity-loading">
+                            <div class="network-connectivity-skeleton" v-for="i in 9" :key="'network_skeleton_' + i"></div>
+                        </div>
+                        <div v-for="item in networkConnectivity.items" :key="item.id" class="network-connectivity-row" :class="'network-' + item.status">
+                            <div class="network-target-logo">
+                                <i :class="item.icon || 'fa-solid fa-globe'"></i>
+                            </div>
+                            <div class="network-target-body">
+                                <div class="network-target-host" :title="item.host">{{ item.host }}</div>
+                                <div class="network-target-meta">
+                                    <span class="network-target-dot"></span>
+                                    <span>{{ getNetworkStatusLabel(item.status) }}</span>
+                                    <span v-if="item.latency_ms !== null && item.latency_ms !== undefined">{{ item.latency_ms }} ms</span>
+                                    <span class="network-target-source">{{ item.label }}</span>
+                                    <span v-if="item.proxy_enabled" class="network-proxy-tag">代理</span>
+                                </div>
+                                <div v-if="item.status !== 'ok' && item.message" class="network-target-message">{{ item.message }}</div>
+                            </div>
+                            <button class="network-target-test-btn" @click="runNetworkConnectivityTest(item.id)" :disabled="networkConnectivity.loading || networkConnectivity.activeTargetId === item.id" title="重新检测此项">
+                                <i :class="networkConnectivity.activeTargetId === item.id ? 'fa-solid fa-spinner fa-spin' : 'fa-solid fa-plug'"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="system-health-actions">
+                        <button class="btn btn-secondary btn-sm" @click="runNetworkConnectivityTest()" :disabled="networkConnectivity.loading || networkConnectivity.activeTargetId">
+                            <i class="fa-solid fa-rotate-right" :class="{ 'fa-spin': networkConnectivity.loading }"></i>
+                            {{ networkConnectivity.loading ? '检测中...' : '重新检测' }}
+                        </button>
+                    </div>
+                </section>
+            </div>
+        </transition>
+
+        <toast-stack :toasts="toasts"></toast-stack>
 
         <!-- 移动端主入口导航 + 更多菜单 -->
         <transition name="mobile-more-backdrop">
@@ -4806,7 +4966,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')"><i class="fa-solid fa-list-check"></i><span>缺集</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')"><i class="fa-solid fa-file-code"></i><span>STRM</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
@@ -4846,11 +5006,11 @@
                 <i class="fa-solid fa-house"></i>
                 <span>首页</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')">
-                <i class="fa-solid fa-file-code"></i>
-                <span>STRM</span>
+            <button class="mobile-tabbar-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')">
+                <i class="fa-solid fa-list-check"></i>
+                <span>缺集</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'strm_generate'].includes(tab)}" @click="toggleMobileMenu">
+            <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'missing_episode_stats'].includes(tab)}" @click="toggleMobileMenu">
                 <i class="fa-solid fa-ellipsis"></i>
                 <span>更多</span>
             </button>
@@ -4858,6 +5018,6 @@
 
         <!-- 移动端抽屉菜单 (已替换为主入口 + 更多菜单) -->
 
-    </div> <script src="/static/app.js?v=20260518telegram-target-save"></script>
+    </div> 
 </body>
 </html>

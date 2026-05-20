@@ -137,6 +137,52 @@ class TelegramNotifyService:
         transfer_dir = str(self.config.get("transfer_dir", "") or "").strip()
         return transfer_dir or None
 
+    def _normalize_remote_dir(self, path: str) -> str:
+        path = str(path or "").strip()
+        if not path or path.isdigit():
+            return path
+        return "/" + "/".join(part for part in path.strip("/").split("/") if part)
+
+    def _monitor_uses_system_transfer_dir(self) -> bool:
+        """Whether Telegram account monitoring writes into the system transfer directory."""
+        if self.config.get("transfer_dir_mode") != "custom":
+            return True
+
+        transfer_dir = str(self.config.get("transfer_dir", "") or "").strip()
+        if not transfer_dir:
+            return True
+
+        try:
+            from app.routers.config_302 import get_config_302_sync
+            cfg = get_config_302_sync()
+        except Exception as e:
+            logger.warning(f"[Telegram账号] 读取系统转存目录配置失败，按自定义目录处理: {e}")
+            return False
+
+        candidates: list[tuple[str, str]] = []
+        drives = cfg.get("drives", []) if isinstance(cfg, dict) else []
+        if isinstance(drives, list) and drives:
+            drive_cfg = drives[0] if isinstance(drives[0], dict) else {}
+            candidates.append((
+                self._normalize_remote_dir(str(drive_cfg.get("transfer_dir", "") or "")),
+                str(drive_cfg.get("transfer_dir_cid", "") or ""),
+            ))
+
+        topology = cfg.get("standard_topology", {}) if isinstance(cfg, dict) else {}
+        if isinstance(topology, dict):
+            candidates.append((
+                self._normalize_remote_dir(str(topology.get("transfer_dir", "") or "")),
+                str(topology.get("transfer_dir_cid", "") or ""),
+            ))
+
+        normalized_transfer_dir = self._normalize_remote_dir(transfer_dir)
+        for candidate_dir, candidate_cid in candidates:
+            if normalized_transfer_dir and candidate_dir and normalized_transfer_dir == candidate_dir:
+                return True
+            if transfer_dir.isdigit() and candidate_cid and transfer_dir == candidate_cid:
+                return True
+        return False
+
     def _load_config(self) -> dict:
         """加载配置"""
         config = None
@@ -1284,7 +1330,10 @@ class TelegramNotifyService:
                     },
                 )
             )
+            should_trigger_organize = False
             for result in results:
+                if transfer_service.is_successful_115_transfer(result):
+                    should_trigger_organize = True
                 reply = result.get("message", "转存完成")
                 if chat_id:
                     self.send_message(reply, chat_id=chat_id, parse_mode="")
@@ -1298,6 +1347,13 @@ class TelegramNotifyService:
                     )
                 except Exception as e:
                     logger.error(f"[Telegram通知] 发送转存通知失败: {e}")
+            if should_trigger_organize:
+                from app.services.media_organize_core import schedule_auto_organize_after_transfer
+                schedule_auto_organize_after_transfer(
+                    drive_index=0,
+                    source="telegram_bot",
+                    reason="Telegram 机器人转存成功",
+                )
         except Exception as e:
             logger.error(f"[Telegram通知] 处理资源消息失败: {e}", exc_info=True)
         finally:
@@ -1396,7 +1452,10 @@ class TelegramNotifyService:
                     "source_id": event_chat_id,
                 },
             )
+            should_trigger_organize = False
             for result in results:
+                if transfer_service.is_successful_115_transfer(result):
+                    should_trigger_organize = True
                 try:
                     from app.routers.wechat_notify import send_to_all_channels
                     await asyncio.to_thread(
@@ -1407,6 +1466,16 @@ class TelegramNotifyService:
                     )
                 except Exception as e:
                     logger.error(f"[Telegram账号] 发送转存通知失败: {e}")
+            if should_trigger_organize:
+                if self._monitor_uses_system_transfer_dir():
+                    from app.services.media_organize_core import schedule_auto_organize_after_transfer
+                    schedule_auto_organize_after_transfer(
+                        drive_index=0,
+                        source="telegram_monitor",
+                        reason="Telegram 监听使用系统转存目录",
+                    )
+                else:
+                    logger.info("[Telegram账号] 监听使用非系统转存目录，跳过转存后自动整理")
         except Exception as e:
             logger.error(f"[Telegram账号] 处理资源消息失败: {e}", exc_info=True)
 

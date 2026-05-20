@@ -256,7 +256,10 @@ async def wechat_callback_message(request: Request):
         async def _process_and_notify():
             try:
                 results = await transfer_service.process_links(links, source="wechat")
+                should_trigger_organize = False
                 for result in results:
+                    if transfer_service.is_successful_115_transfer(result):
+                        should_trigger_organize = True
                     await asyncio.to_thread(
                         partial(
                             send_to_all_channels,
@@ -264,6 +267,13 @@ async def wechat_callback_message(request: Request):
                             description=result.get("message", ""),
                             notify_type="resource_transfer",
                         )
+                    )
+                if should_trigger_organize:
+                    from app.services.media_organize_core import schedule_auto_organize_after_transfer
+                    schedule_auto_organize_after_transfer(
+                        drive_index=0,
+                        source="wechat",
+                        reason="企业微信转存成功",
                     )
             except Exception as e:
                 logger.error(f"[WeChat] 转存后台任务异常: {e}", exc_info=True)

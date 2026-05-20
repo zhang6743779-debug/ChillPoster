@@ -1091,6 +1091,36 @@ async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries:
             await asyncio.sleep(1)
 
 
+def schedule_auto_organize_after_transfer(drive_index: int = 0, source: str = "", reason: str = "") -> bool:
+    """Schedule media organize on the FastAPI main loop after a successful transfer."""
+    main_loop = _state._main_event_loop
+    if not main_loop or main_loop.is_closed() or not main_loop.is_running():
+        logger.warning(f"[转存] 无法触发媒体整理，主事件循环未就绪: source={source or '-'}")
+        return False
+
+    async def _runner():
+        try:
+            logger.info(f"[转存] 115 分享转存成功，准备触发媒体整理: source={source or '-'} reason={reason or '-'}")
+            run_id, status = await _trigger_auto_organize_and_wait(drive_index)
+            if run_id:
+                logger.info(f"[转存] 转存后媒体整理完成: source={source or '-'} run_id={run_id} status={status}")
+            else:
+                logger.warning(f"[转存] 转存后媒体整理未启动: source={source or '-'} reason={status or 'unknown'}")
+        except Exception as e:
+            logger.error(f"[转存] 转存后触发媒体整理失败: source={source or '-'} error={e}", exc_info=True)
+
+    future = asyncio.run_coroutine_threadsafe(_runner(), main_loop)
+
+    def _log_future_error(done_future):
+        try:
+            done_future.result()
+        except Exception as e:
+            logger.error(f"[转存] 转存后媒体整理调度异常: source={source or '-'} error={e}", exc_info=True)
+
+    future.add_done_callback(_log_future_error)
+    return True
+
+
 def _schedule_or_refresh_source_poll(drive_index: int, source_dir: str, target_dir: str, source_cid: str, *, phase: str = "pre_run"):
     session_key = _build_source_poll_session_key(drive_index, source_cid)
     now = _time.time()

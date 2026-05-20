@@ -7163,7 +7163,22 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     flex-direction: column;
     gap: 12px;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
+}
+.missing-episode-sidebar::-webkit-scrollbar {
+    width: 6px;
+}
+.missing-episode-sidebar::-webkit-scrollbar-track {
+    background: transparent;
+}
+.missing-episode-sidebar::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.22);
+    border-radius: 999px;
+}
+.missing-episode-sidebar:hover::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.36);
 }
 .missing-episode-results {
     padding: 16px;
@@ -7281,7 +7296,7 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
 }
 .missing-episode-library-panel {
     min-height: 0;
-    flex: 1;
+    flex: 0 0 auto;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -7294,8 +7309,10 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     display: flex;
     flex-direction: column;
     gap: 8px;
-    flex: 1;
+    flex: 0 0 auto;
     min-height: 0;
+    height: min(360px, 46vh);
+    max-height: min(360px, 46vh);
     overflow: auto;
     padding-right: 2px;
 }
