@@ -2470,6 +2470,7 @@ class StrmService:
                 _apply_tmdb_fallbacks(tmdb_plans, scraping_config, tmdb_api_key, stats, "全量", cancel_event)
 
             elapsed = perf_counter() - start_time
+            stats["elapsed_seconds"] = elapsed
             if cancelled:
                 _update_progress(run_id, f"STRM: {task_name} (已取消)", 100, "stopped", detail=stats.copy())
                 logger.info(f"[STRM] 阶段3取消：{task_name} | 耗时 {elapsed:.1f}s")

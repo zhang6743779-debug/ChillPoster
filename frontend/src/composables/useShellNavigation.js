@@ -9,7 +9,8 @@ export function useShellNavigation({ tab, allSearchItems, onResize }) {
         sidebarHover.value = false;
     };
 
-    const isMobile = ref(window.innerWidth < 769);
+    const isMobileViewport = () => window.innerWidth < 769;
+    const isMobile = ref(isMobileViewport());
     const isStandaloneWebApp = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
     document.documentElement.classList.toggle('standalone-webapp', isStandaloneWebApp);
 
@@ -29,13 +30,14 @@ export function useShellNavigation({ tab, allSearchItems, onResize }) {
     const THEME_STORAGE_KEY = 'chillposter-theme';
 
     const applyTheme = (nextTheme) => {
-        const normalizedTheme = nextTheme === 'light' ? 'light' : 'dark';
+        const normalizedTheme = !isMobileViewport() && nextTheme === 'light' ? 'light' : 'dark';
         theme.value = normalizedTheme;
         document.documentElement.dataset.theme = normalizedTheme;
         localStorage.setItem(THEME_STORAGE_KEY, normalizedTheme);
     };
 
     const resolveInitialTheme = () => {
+        if (isMobileViewport()) return 'dark';
         const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
         if (savedTheme === 'light' || savedTheme === 'dark') {
             return savedTheme;
@@ -44,6 +46,10 @@ export function useShellNavigation({ tab, allSearchItems, onResize }) {
     };
 
     const toggleTheme = () => {
+        if (isMobileViewport()) {
+            applyTheme('dark');
+            return;
+        }
         applyTheme(theme.value === 'light' ? 'dark' : 'light');
     };
 
@@ -235,11 +241,14 @@ export function useShellNavigation({ tab, allSearchItems, onResize }) {
     };
 
     const handleResize = () => {
-        const nextIsMobile = window.innerWidth < 769;
+        const nextIsMobile = isMobileViewport();
         if (nextIsMobile && !isMobile.value) {
             closeDesktopOverlays();
         }
         isMobile.value = nextIsMobile;
+        if (nextIsMobile && theme.value !== 'dark') {
+            applyTheme('dark');
+        }
         if (typeof onResize === 'function') {
             onResize();
         }

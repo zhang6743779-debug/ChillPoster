@@ -310,16 +310,75 @@ createApp({
             hydrateTaskLogs,
             addLog,
             clearLogs,
+            clearTaskHistoryCategory,
             stopTask,
             startPolling,
             stopPolling,
             toggleTaskLog,
+            openTaskCategoryLog,
+            closeTaskCategoryLog,
         } = useTaskProgress({
             showToast,
             showConfirm,
             onRssFinished: () => refreshAllLibraries(),
             onBackupFinished: () => fetchSuites(),
         });
+
+        const dashboardTaskCategoryConfig = [
+            { key: 'media_organize', title: '媒体整理', desc: '扫描整理媒体目录', icon: 'fa-folder-tree', action: '手动整理' },
+            { key: 'strm', title: 'STRM 同步', desc: '全量同步 STRM 文件', icon: 'fa-file-code', action: '全量同步' },
+            { key: 'cover', title: '封面任务', desc: '封面生成、应用与备份', icon: 'fa-images', action: '运行任务' },
+            { key: 'rss', title: 'RSS 同步', desc: '订阅任务同步记录', icon: 'fa-rss', action: '查看' },
+            { key: 'system', title: '系统任务', desc: '升级、健康检查等后台任务', icon: 'fa-shield-heart', action: '查看' },
+        ];
+        const activeTaskEntries = computed(() => Object.entries(tasksState.activeTasks || {}));
+        const getTaskCategoryKey = (task = {}, runId = '') => {
+            const taskType = String(task.task_type || '').trim();
+            const name = String(task.name || '').trim();
+            const id = String(runId || '').trim();
+            if (taskType === 'media_organize' || id.startsWith('organize_') || name.includes('整理')) return 'media_organize';
+            if (taskType === 'strm' || name.includes('STRM')) return 'strm';
+            if (taskType === 'rss' || id.startsWith('rss_run_') || name.startsWith('RSS')) return 'rss';
+            if (taskType === 'upgrade' || name.includes('升级')) return 'system';
+            if (taskType === 'backup' || taskType === 'preset_task' || name.includes('封面') || name.includes('备份') || name.startsWith('任务:')) return 'cover';
+            return 'system';
+        };
+        const getTaskStatusLabel = (status) => {
+            if (status === 'running') return '运行中';
+            if (status === 'finished') return '成功';
+            if (status === 'stopped') return '已取消';
+            if (status === 'error') return '失败';
+            return '空闲';
+        };
+        const getTaskStatusClass = (status) => {
+            if (status === 'running') return 'running';
+            if (status === 'finished') return 'success';
+            if (status === 'stopped') return 'warning';
+            if (status === 'error') return 'error';
+            return 'idle';
+        };
+        const dashboardTaskCategories = computed(() => dashboardTaskCategoryConfig.map(config => {
+            const active = activeTaskEntries.value
+                .filter(([id, task]) => getTaskCategoryKey(task, id) === config.key)
+                .map(([id, task]) => ({ id, ...task }));
+            const history = tasksState.taskHistory.filter(item => item.category === config.key);
+            const latest = history[0] || null;
+            const running = active.find(item => item.status === 'running') || active[0] || null;
+            const status = running ? 'running' : (latest?.status || 'idle');
+            return {
+                ...config,
+                running,
+                status,
+                statusLabel: getTaskStatusLabel(status),
+                statusClass: getTaskStatusClass(status),
+                historyCount: history.length,
+                latest,
+                summary: running?.name || latest?.summary || '暂无运行记录',
+                time: running ? '实时' : (latest?.time || '--'),
+            };
+        }));
+        const selectedTaskCategory = computed(() => dashboardTaskCategories.value.find(item => item.key === tasksState.selectedTaskCategory) || dashboardTaskCategoryConfig[0]);
+        const selectedTaskCategoryHistory = computed(() => tasksState.taskHistory.filter(item => item.category === tasksState.selectedTaskCategory));
 
         // ==========================================
         // 3. 任务与核心逻辑
@@ -549,6 +608,32 @@ createApp({
             resetMovieFormat,
             resetTvFormat,
         } = useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, showToast, showNumberDialog });
+
+        const runDashboardTaskCategory = async (category) => {
+            if (category === 'media_organize') {
+                await runOrganize();
+                return;
+            }
+            if (category === 'strm') {
+                if (!Array.isArray(strmConfig.sync_tasks) || strmConfig.sync_tasks.length === 0) {
+                    showToast('暂无 STRM 同步任务，请先配置同步任务', 'warning');
+                    return;
+                }
+                await startStrmSync(0, 'full');
+                return;
+            }
+            if (category === 'cover') {
+                tab.value = 'auto';
+                showToast('已打开封面任务页面，可选择任务运行', 'info');
+                return;
+            }
+            if (category === 'rss') {
+                tab.value = 'rss';
+                showToast('已打开 RSS 任务页面，可选择订阅任务运行', 'info');
+                return;
+            }
+            openTaskCategoryLog(category);
+        };
 
         // 从服务器列表导入 (传入具体的目标对象)
         const importEmbyInfo = async (targetEmbyObj) => {
@@ -1531,26 +1616,41 @@ createApp({
             openMediaDetail,
             closeDetailModal,
             handleDetailPopstate,
+            missingEpisodeCompareModal,
             missingEpisodeStats,
             missingEpisodeLibraries,
             missingEpisodeActiveLibrary,
             missingEpisodeActiveSummary,
             missingEpisodeActiveErrorCount,
+            missingEpisodeActionableMissingCount,
+            missingEpisodeActionableEpisodeCount,
             missingEpisodeSearchActive,
             missingEpisodeStatsProblemItems,
             visibleMissingEpisodeStatsProblemItems,
             missingEpisodeHasMoreVisibleItems,
             missingEpisodePosterGridRef,
+            missingEpisodeLoadMoreSentinel,
             getMissingEpisodePosterKey,
+            getMissingEpisodePosterCategoryLabel,
             isMissingEpisodePosterReady,
-            onMissingEpisodeLazyScroll,
+            countLocalEpisodes,
+            formatLocalSeasonBrief,
+            getLocalSeasonRows,
+            getTmdbSeasonRows,
+            formatEpisodeNumber,
+            isEpisodeListed,
+            openMissingEpisodeCard,
+            openMissingEpisodeCompareDetail,
+            canOpenMissingEpisodeEmby,
+            getMissingEpisodeEmbyUrl,
+            openMissingEpisodeEmby,
+            closeMissingEpisodeCompare,
             loadMissingEpisodeStatsShell,
             runMissingEpisodeStats,
             refreshMissingEpisodeStats,
             calibrateMissingEpisodeStats,
             setMissingEpisodeLibrary,
             setMissingEpisodeFilter,
-            setMissingEpisodeStatusFilter,
             setMissingEpisodeSort,
             openDiscoverFromMissingStats,
             setDetailSeason,
@@ -1602,7 +1702,7 @@ createApp({
             mainGridScrollRoot,
             loadMainGrid,
             resetMainGrid,
-        } = useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDockDrawers, mobileMenuVisible, mpConfig, showToast });
+        } = useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDockDrawers, mobileMenuVisible, mpConfig, config302, servers, ensureDashboardServerId, showToast });
 
         return {
             tab, pageTitle, servers, fontList, presetList, layoutGroups, config,
@@ -1620,7 +1720,9 @@ createApp({
             layoutList, fetchLayouts, fetchLayoutAndPresets, filteredPresets,
             currentSchema, accountForm, updateAccount, updatingAccount,
             transServerIdx, loadTransFromLib, editingTaskId, editTask, cancelEdit, runSavedTask,
-            tasksState, toggleTaskLog, accordions, toggleAccordion, showCreateTask, clearLogs,
+            tasksState, activeTaskEntries, dashboardTaskCategories, selectedTaskCategory, selectedTaskCategoryHistory,
+            getTaskStatusLabel, getTaskStatusClass, runDashboardTaskCategory,
+            toggleTaskLog, openTaskCategoryLog, closeTaskCategoryLog, accordions, toggleAccordion, showCreateTask, clearLogs, clearTaskHistoryCategory,
             dashboardStats, dashboardRecentItems, dashboardVisibleRecentItems, dashboardRecentPlaybacks, dashboardVisibleRecentPlaybacks, dashboardVisibleMediaLibraries, dashboardMediaStats,
             onDashboardLazyScroll,
             dashboardDeviceMetrics, dashboardDeviceMetricsLoaded, dashboardDeviceMetricsPulse, dashboardDeviceMetricCards,
@@ -1728,10 +1830,10 @@ createApp({
             fetchMpConfig, saveMpConfig, testMpConnection,
 
             // [新增] 发现推荐页
-            detailModal, openMediaDetail, closeDetailModal,
-            missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeActiveErrorCount, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
-            visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, missingEpisodePosterGridRef, getMissingEpisodePosterKey, isMissingEpisodePosterReady, onMissingEpisodeLazyScroll,
-            runMissingEpisodeStats, refreshMissingEpisodeStats, calibrateMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
+            detailModal, missingEpisodeCompareModal, openMediaDetail, closeDetailModal,
+            missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeActiveErrorCount, missingEpisodeActionableMissingCount, missingEpisodeActionableEpisodeCount, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
+            visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, missingEpisodePosterGridRef, missingEpisodeLoadMoreSentinel, getMissingEpisodePosterKey, getMissingEpisodePosterCategoryLabel, isMissingEpisodePosterReady, countLocalEpisodes, formatLocalSeasonBrief, getLocalSeasonRows, getTmdbSeasonRows, formatEpisodeNumber, isEpisodeListed, openMissingEpisodeCard, openMissingEpisodeCompareDetail, canOpenMissingEpisodeEmby, getMissingEpisodeEmbyUrl, openMissingEpisodeEmby, closeMissingEpisodeCompare,
+            runMissingEpisodeStats, refreshMissingEpisodeStats, calibrateMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
             setDetailSeason, toggleDetailSeasonExpanded, toggleDetailSeasonSubscription, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,
             subscribeMedia, unsubscribeMedia, getImdbLink, getTvdbLink,
             gridModal, gridModalEl, gridSentinel, openRowGrid, closeGridModal,

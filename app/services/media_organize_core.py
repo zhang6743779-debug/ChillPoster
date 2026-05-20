@@ -2043,7 +2043,7 @@ async def _run_organize_async(run_id: str, req):
                             _c, _fi, _fn, _e, _td, _v, _tc, _cd, _ow, category_path=_cp, target_path_base=_tb, subtitles_by_parent=_sp, main_loop=_state._main_event_loop, library_task_key=_ltk
                         ))
                         notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
-                        results.append({"file": file_name, "status": result["status"], "message": result.get("message", "")})
+                        results.append({"file": file_name, "status": result["status"], "message": result.get("message", ""), "media_type": media_type})
                         if result["status"] == "success":
                             success_count += 1
                             _send_organize_notify(_build_organize_notify_payload(
@@ -2247,7 +2247,7 @@ async def _run_organize_async(run_id: str, req):
                 batch_notify = None
                 for plan_item, result in zip(plan_items, batch_results):
                     file_name = (plan_item.get("vf") or {}).get("name", "")
-                    results.append({"file": file_name, "status": result.get("status", "error"), "message": result.get("message", "")})
+                    results.append({"file": file_name, "status": result.get("status", "error"), "message": result.get("message", ""), "media_type": plan_item.get("media_type", "tv")})
                     if result.get("status") == "success":
                         success_count += 1
                         batch_success += 1
@@ -2748,6 +2748,8 @@ async def _run_organize_async(run_id: str, req):
         )
         other_skipped_count = max(0, skipped_count - categorized_skipped_count)
         failed_results = [r for r in results if r.get("status") == "error"]
+        movie_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "movie")
+        tv_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "tv")
         elapsed = _time.time() - _org_start
         logger.info(
             f"[MediaOrganize] 整理完成: 成功 {success_count}/{total_files} | 失败 {failed_count} | "
@@ -2794,6 +2796,9 @@ async def _run_organize_async(run_id: str, req):
             "trailer_skipped": trailer_skipped_count,
             "other_skipped": other_skipped_count,
             "strm": strm_generated_count,
+            "movies": movie_success_count,
+            "tv_episodes": tv_success_count,
+            "elapsed_seconds": elapsed,
         }
         await _run_finish_maintenance("整理结束清理后", include_refresh=True)
         update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
@@ -2813,13 +2818,17 @@ async def _run_organize_async(run_id: str, req):
             pass
         _processed = len(results)
         _failed = _count_error_results(results)
+        skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+        elapsed = _time.time() - locals().get("_org_start", _time.time())
+        movie_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "movie")
+        tv_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "tv")
         update_task_progress(run_id, f"整理已取消: 已处理 {_processed}/{scanned_video_count}", 100, "stopped")
         ACTIVE_TASKS[run_id]["detail"] = {
             "total": scanned_video_count, "success": success_count, "failed": _failed, "strm": strm_generated_count,
+            "skipped": skipped_count, "movies": movie_success_count, "tv_episodes": tv_success_count,
+            "elapsed_seconds": elapsed, "stopped": True,
         }
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
-        skipped_count = sum(1 for r in results if r.get("status") == "skipped")
-        elapsed = _time.time() - locals().get("_org_start", _time.time())
         _send_organize_task_notify(
             status="stopped",
             total_files=scanned_video_count,

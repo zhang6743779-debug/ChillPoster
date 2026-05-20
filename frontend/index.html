@@ -420,7 +420,7 @@
                                 <div class="dashboard-section-head dashboard-task-card-head">
                                     <div>
                                         <div class="dashboard-section-title">任务动态</div>
-                                        <div class="dashboard-section-sub">当前任务队列与最近操作记录</div>
+                                        <div class="dashboard-section-sub">按任务类型查看运行历史</div>
                                     </div>
                                     <div class="dashboard-task-status" :class="{ 'dashboard-task-status--live': tasksState.hasRunning }">
                                         <span class="dashboard-task-status-dot"></span>
@@ -428,41 +428,31 @@
                                     </div>
                                 </div>
                                 <div class="dashboard-task-body">
-                                    <div class="dashboard-task-queue">
-                                        <div class="dashboard-task-block-head">
-                                            <span>当前任务队列</span>
-                                        </div>
-                                        <div class="dashboard-task-queue-list">
-                                            <div v-if="!tasksState.hasRunning" class="dashboard-empty-state dashboard-task-empty">无正在运行的任务</div>
-                                            <div v-else>
-                                                <div v-for="(task, id) in tasksState.activeTasks" :key="id" class="progress-item dashboard-progress-item">
-                                                    <div class="prog-info">
-                                                        <span class="prog-name" :title="task.name">{{ task.name }}</span>
-                                                        <div class="prog-meta">
-                                                            <span>{{ task.percent }}%</span>
-                                                            <i v-if="task.status === 'running'" class="fa-solid fa-circle-stop prog-stop-btn" title="停止任务" @click.stop="stopTask(id)"></i>
-                                                        </div>
-                                                    </div>
-                                                    <div class="prog-bar-bg">
-                                                        <div class="prog-bar-fill" :class="{finished: task.status==='finished', error: task.status==='error'}" :style="{width: task.percent + '%'}"></div>
-                                                    </div>
+                                    <div class="dashboard-task-list">
+                                        <div v-for="category in dashboardTaskCategories" :key="category.key" class="dashboard-task-row" :class="'dashboard-task-row--' + category.statusClass">
+                                            <button type="button" class="dashboard-task-row-icon" @click="openTaskCategoryLog(category.key)" :title="category.title + '日志'">
+                                                <i class="fa-solid" :class="category.running ? 'fa-spinner fa-spin' : category.icon"></i>
+                                            </button>
+                                            <div class="dashboard-task-row-main">
+                                                <div class="dashboard-task-row-title" :title="category.summary">{{ category.title }}</div>
+                                                <div class="dashboard-task-row-sub">
+                                                    <span>{{ category.desc }}</span>
+                                                    <span>{{ category.summary }}</span>
+                                                </div>
+                                                <div v-if="category.running" class="dashboard-task-row-progress">
+                                                    <div class="dashboard-task-row-progress-fill" :style="{ width: (category.running.percent || 0) + '%' }"></div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    </div>
-                                    <div class="dashboard-task-log">
-                                        <div class="dashboard-task-block-head">
-                                            <span>操作记录</span>
-                                            <span class="log-clickable-muted" @click="clearLogs" title="清空"><i class="fa-solid fa-trash-can"></i></span>
-                                        </div>
-                                        <div class="dashboard-task-log-list">
-                                            <div v-if="tasksState.logs.length === 0" class="dashboard-empty-state dashboard-task-empty">暂无日志</div>
-                                            <div v-else class="dashboard-task-log-entries">
-                                                <div v-for="(log, idx) in tasksState.logs.slice(0, 8)" :key="idx" class="log-item dashboard-log-item" :class="log.type">
-                                                    <i class="fa-solid" :class="log.type==='success'?'fa-check-circle':(log.type==='error'?'fa-exclamation-circle':'fa-info-circle')"></i>
-                                                    <span class="log-message-truncate" :title="log.msg">{{ log.msg }}</span>
-                                                    <span class="log-time">{{ log.time }}</span>
-                                                </div>
+                                            <div class="dashboard-task-row-actions">
+                                                <span class="dashboard-task-row-pill" :class="category.statusClass">{{ category.statusLabel }}</span>
+                                                <button type="button" class="dashboard-task-action-btn" @click="openTaskCategoryLog(category.key)" title="查看日志">
+                                                    <i class="fa-solid fa-list-ul"></i>
+                                                    <span>查看日志</span>
+                                                </button>
+                                                <button type="button" class="dashboard-task-action-btn" @click="runDashboardTaskCategory(category.key)" :title="category.action">
+                                                    <i class="fa-solid fa-play"></i>
+                                                    <span>运行</span>
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
@@ -533,6 +523,41 @@
                                 <div class="wall-track">
                                     <div v-for="(item, i) in row" :key="`r${rowIndex}-${i}-${item.id || item.name || item.cover_url}`" class="wall-item" @click="openDashboardLibrary(item)">
                                         <img :src="item.cover_url" loading="lazy">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-if="tasksState.categoryLogVisible" class="dashboard-task-history-overlay" @click.self="closeTaskCategoryLog">
+                            <div class="dashboard-task-history-panel">
+                                <div class="dashboard-task-history-head">
+                                    <div>
+                                        <div class="dashboard-task-history-kicker">运行日志</div>
+                                        <div class="dashboard-task-history-title">{{ selectedTaskCategory.title }}</div>
+                                        <div class="dashboard-task-history-sub">{{ selectedTaskCategory.desc }}</div>
+                                    </div>
+                                    <div class="dashboard-task-history-actions">
+                                        <button type="button" class="dashboard-task-action-btn" @click="runDashboardTaskCategory(selectedTaskCategory.key)">
+                                            <i class="fa-solid fa-play"></i>
+                                            <span>运行</span>
+                                        </button>
+                                        <button type="button" class="dashboard-task-action-icon" @click="clearTaskHistoryCategory(selectedTaskCategory.key)" title="清空此分类日志">
+                                            <i class="fa-solid fa-trash-can"></i>
+                                        </button>
+                                        <button type="button" class="dashboard-task-action-icon" @click="closeTaskCategoryLog" title="关闭">
+                                            <i class="fa-solid fa-xmark"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div v-if="selectedTaskCategoryHistory.length === 0" class="dashboard-task-history-empty">暂无该任务类型的运行日志</div>
+                                <div v-else class="dashboard-task-history-list">
+                                    <div v-for="item in selectedTaskCategoryHistory" :key="item.run_id" class="dashboard-task-history-item" :class="'dashboard-task-history-item--' + getTaskStatusClass(item.status)">
+                                        <div class="dashboard-task-history-status">
+                                            <span class="dashboard-task-row-pill" :class="getTaskStatusClass(item.status)">{{ getTaskStatusLabel(item.status) }}</span>
+                                            <span>{{ item.time }}</span>
+                                        </div>
+                                        <div class="dashboard-task-history-name" :title="item.name">{{ item.name }}</div>
+                                        <div class="dashboard-task-history-summary">{{ item.summary }}</div>
                                     </div>
                                 </div>
                             </div>
@@ -1240,11 +1265,16 @@
                     <div v-else-if="tab === 'missing_episode_stats'" key="missing_episode_stats" class="scroll-view missing-episode-page">
                         <div class="content-shell shell-lg missing-episode-shell">
                             <div class="missing-episode-topbar">
-                                <div class="missing-episode-title-block">
-                                    <h2><i class="fa-solid fa-list-check"></i> 缺集统计</h2>
-                                    <div class="missing-episode-subtitle">{{ missingEpisodeActiveLibrary?.libraryName || 'Emby 剧集库' }}</div>
-                                </div>
                                 <div class="missing-episode-actions-stack">
+                                    <label class="missing-episode-search-control" title="搜索缺集剧集">
+                                        <span class="missing-episode-search-label"><i class="fa-solid fa-magnifying-glass"></i></span>
+                                        <div class="missing-episode-search-box">
+                                            <input v-model.trim="missingEpisodeStats.searchQuery" type="search" placeholder="全局搜索标题 / 年份 / TMDB">
+                                            <button v-if="missingEpisodeStats.searchQuery" type="button" @click="missingEpisodeStats.searchQuery = ''" title="清空搜索">
+                                                <i class="fa-solid fa-xmark"></i>
+                                            </button>
+                                        </div>
+                                    </label>
                                     <div class="missing-episode-actions">
                                         <button class="btn btn-primary" @click="refreshMissingEpisodeStats" :disabled="missingEpisodeStats.loading" title="使用当前 Emby 剧集索引快速重算缺集">
                                             <i v-if="missingEpisodeStats.loading" class="fa-solid fa-spinner fa-spin"></i>
@@ -1258,15 +1288,6 @@
                                             <i class="fa-solid fa-compass"></i> 返回发现
                                         </button>
                                     </div>
-                                    <label class="missing-episode-search-control" title="搜索缺集剧集">
-                                        <span class="missing-episode-search-label"><i class="fa-solid fa-magnifying-glass"></i></span>
-                                        <div class="missing-episode-search-box">
-                                            <input v-model.trim="missingEpisodeStats.searchQuery" type="search" placeholder="全局搜索标题 / 年份 / TMDB">
-                                            <button v-if="missingEpisodeStats.searchQuery" type="button" @click="missingEpisodeStats.searchQuery = ''" title="清空搜索">
-                                                <i class="fa-solid fa-xmark"></i>
-                                            </button>
-                                        </div>
-                                    </label>
                                 </div>
                             </div>
 
@@ -1276,18 +1297,26 @@
                                     <div class="missing-episode-mobile-chip-scroll">
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'all'}" @click="setMissingEpisodeFilter('all')">
                                             全部缺集
-                                            <strong>{{ missingEpisodeActiveSummary.missingEpisodes || 0 }}</strong>
+                                            <strong>{{ missingEpisodeActionableMissingCount || 0 }}</strong>
                                         </button>
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'airing_recent_missing'}" @click="setMissingEpisodeFilter('airing_recent_missing')">
-                                            连载缺最近
+                                            连载未缺集
                                             <strong>{{ missingEpisodeActiveSummary.airingRecentMissingCount || 0 }}</strong>
+                                        </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'airing_aired_missing'}" @click="setMissingEpisodeFilter('airing_aired_missing')">
+                                            连载已播缺集
+                                            <strong>{{ missingEpisodeActiveSummary.airingAiredMissingCount || 0 }}</strong>
                                         </button>
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'ended_missing'}" @click="setMissingEpisodeFilter('ended_missing')">
                                             完结缺集
                                             <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
                                         </button>
-                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')" v-if="missingEpisodeActiveErrorCount">
-                                            统计异常
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'complete'}" @click="setMissingEpisodeFilter('complete')">
+                                            完整入库
+                                            <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
+                                        </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
+                                            异常入库
                                             <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
                                         </button>
                                     </div>
@@ -1305,15 +1334,6 @@
                                             <span>{{ lib.libraryName || '未分类媒体库' }}</span>
                                             <strong>{{ lib.summary?.missingEpisodes || 0 }}</strong>
                                         </button>
-                                    </div>
-                                </div>
-                                <div class="missing-episode-mobile-control-group">
-                                    <div class="missing-episode-mobile-control-title">状态</div>
-                                    <div class="missing-episode-mobile-chip-scroll">
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'problem'}" @click="setMissingEpisodeStatusFilter('problem')">已入库缺集</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'exists'}" @click="setMissingEpisodeStatusFilter('exists')">完整入库</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'error'}" @click="setMissingEpisodeStatusFilter('error')">异常</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                     </div>
                                 </div>
                                 <div class="missing-episode-mobile-control-group">
@@ -1355,11 +1375,11 @@
 
                                     <div class="missing-episode-summary-grid">
                                         <div class="missing-episode-summary-card partial">
-                                            <span>已入库缺集</span>
-                                            <strong>{{ missingEpisodeActiveSummary.partialCount }}</strong>
+                                            <span>缺集电视剧数量</span>
+                                            <strong>{{ missingEpisodeActionableMissingCount }}</strong>
                                         </div>
                                         <div class="missing-episode-summary-card error">
-                                            <span>异常</span>
+                                            <span>异常入库</span>
                                             <strong>{{ missingEpisodeActiveErrorCount }}</strong>
                                         </div>
                                         <div class="missing-episode-summary-card exists">
@@ -1368,7 +1388,7 @@
                                         </div>
                                         <div class="missing-episode-summary-card total">
                                             <span>缺失集数</span>
-                                            <strong>{{ missingEpisodeActiveSummary.missingEpisodes }}</strong>
+                                            <strong>{{ missingEpisodeActionableEpisodeCount }}</strong>
                                         </div>
                                     </div>
 
@@ -1377,27 +1397,28 @@
                                         <div class="missing-episode-filter-strip">
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'all'}" @click="setMissingEpisodeFilter('all')">
                                                 全部缺集
-                                                <strong>{{ missingEpisodeActiveSummary.missingEpisodes || 0 }}</strong>
+                                                <strong>{{ missingEpisodeActionableMissingCount || 0 }}</strong>
                                             </button>
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'airing_recent_missing'}" @click="setMissingEpisodeFilter('airing_recent_missing')">
-                                                连载缺最近
+                                                连载未缺集
                                                 <strong>{{ missingEpisodeActiveSummary.airingRecentMissingCount || 0 }}</strong>
+                                            </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'airing_aired_missing'}" @click="setMissingEpisodeFilter('airing_aired_missing')">
+                                                连载已播缺集
+                                                <strong>{{ missingEpisodeActiveSummary.airingAiredMissingCount || 0 }}</strong>
                                             </button>
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'ended_missing'}" @click="setMissingEpisodeFilter('ended_missing')">
                                                 完结缺集
                                                 <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
                                             </button>
-                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')" v-if="missingEpisodeActiveErrorCount">
-                                                统计异常
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'complete'}" @click="setMissingEpisodeFilter('complete')">
+                                                完整入库
+                                                <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
+                                            </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
+                                                异常入库
                                                 <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
                                             </button>
-                                        </div>
-                                        <div class="missing-episode-panel-title">状态</div>
-                                        <div class="missing-episode-chip-grid">
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'problem'}" @click="setMissingEpisodeStatusFilter('problem')">已入库缺集</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'exists'}" @click="setMissingEpisodeStatusFilter('exists')">完整入库</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'error'}" @click="setMissingEpisodeStatusFilter('error')">异常</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.statusFilter === 'all'}" @click="setMissingEpisodeStatusFilter('all')">全部</button>
                                         </div>
                                         <div class="missing-episode-panel-title">排序</div>
                                         <div class="missing-episode-chip-grid sort">
@@ -1452,22 +1473,21 @@
                                         <i class="fa-solid fa-tv"></i>
                                         <div>当前媒体库没有可统计的电视剧。</div>
                                     </div>
-                                    <div v-else-if="missingEpisodeStatsProblemItems.length" ref="missingEpisodePosterGridRef" class="missing-episode-poster-grid" @scroll="onMissingEpisodeLazyScroll">
-                                        <div v-for="(row, idx) in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" :data-missing-poster-key="getMissingEpisodePosterKey(row)" @click="openMediaDetail(row.item)">
+                                    <div v-else-if="missingEpisodeStatsProblemItems.length" ref="missingEpisodePosterGridRef" class="missing-episode-poster-grid">
+                                        <div v-for="(row, idx) in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" :data-missing-poster-key="getMissingEpisodePosterKey(row)" @click="openMissingEpisodeCard(row)">
                                             <div class="missing-episode-poster-frame">
-                                                <img v-if="isMissingEpisodePosterReady(row)" :src="row.poster_url" :alt="row.title" loading="eager" decoding="async">
+                                                <img v-if="isMissingEpisodePosterReady(row)" :src="row.poster_url" :alt="row.title" loading="lazy" decoding="async">
                                                 <div v-else class="missing-episode-poster-placeholder" :class="{lazy: row.poster_url}"><i class="fa-solid fa-tv"></i></div>
-                                                <div class="missing-episode-poster-badge" :class="row.missingCategory">
-                                                    {{ row.categoryLabel }}
-                                                </div>
                                             </div>
                                             <div class="missing-episode-poster-info">
                                                 <div class="missing-episode-poster-title" :title="row.title">
                                                     {{ row.title }}
                                                 </div>
-                                                <div class="missing-episode-poster-year" v-if="row.year">{{ row.year }}</div>
-                                                <div class="missing-episode-poster-status" :class="row.status">
-                                                    {{ row.label }}
+                                                <div class="missing-episode-poster-meta-row">
+                                                    <div class="missing-episode-poster-year" v-if="row.year">{{ row.year }}</div>
+                                                    <div class="missing-episode-poster-status" :class="row.status">
+                                                        {{ getMissingEpisodePosterCategoryLabel(row) }}
+                                                    </div>
                                                 </div>
                                                 <div class="missing-episode-poster-missing" v-if="row.totalEpisodes">
                                                     缺 {{ row.missingEpisodes }} / {{ row.totalEpisodes }} 集
@@ -1477,7 +1497,7 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div v-if="missingEpisodeHasMoreVisibleItems" class="missing-episode-lazy-more">
+                                        <div v-if="missingEpisodeHasMoreVisibleItems" ref="missingEpisodeLoadMoreSentinel" class="missing-episode-lazy-more">
                                             <i class="fa-solid fa-spinner fa-spin"></i>
                                             <span>继续滚动加载</span>
                                         </div>
@@ -4422,6 +4442,126 @@
             :close-number-dialog="closeNumberDialog"
         ></feedback-dialogs>
 
+        <transition name="fade">
+            <div v-if="missingEpisodeCompareModal.visible" class="discover-overlay detail-overlay-top missing-episode-compare-overlay" @click.self="closeMissingEpisodeCompare">
+                <section class="missing-episode-compare-panel">
+                    <button class="modal-close-btn missing-episode-compare-close" @click="closeMissingEpisodeCompare"><i class="fa-solid fa-xmark"></i></button>
+                    <div class="missing-episode-compare-head">
+                        <div class="missing-episode-compare-kicker">异常入库对比</div>
+                        <span class="detail-library-badge error">需要核对</span>
+                    </div>
+                    <div class="missing-episode-compare-media">
+                        <img v-if="missingEpisodeCompareModal.row?.poster_url" class="missing-episode-compare-poster" :src="missingEpisodeCompareModal.row.poster_url" :alt="missingEpisodeCompareModal.row.title">
+                        <div v-else class="missing-episode-compare-poster-placeholder"><i class="fa-solid fa-tv"></i></div>
+                        <div class="missing-episode-compare-info">
+                            <div class="missing-episode-compare-title">媒体信息</div>
+                            <div class="missing-episode-compare-info-main">
+                                <div>
+                                    <h4>{{ missingEpisodeCompareModal.row?.title || missingEpisodeCompareModal.row?.item?.title || missingEpisodeCompareModal.row?.localItem?.title || '未知标题' }}</h4>
+                                    <p v-if="missingEpisodeCompareModal.row?.item?.original_title">{{ missingEpisodeCompareModal.row.item.original_title }}</p>
+                                </div>
+                                <div class="missing-episode-compare-action-stack">
+                                    <button type="button" class="missing-episode-compare-detail-btn" @click="openMissingEpisodeCompareDetail">
+                                        <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                                        <span>详情页</span>
+                                    </button>
+                                    <button
+                                        v-if="canOpenMissingEpisodeEmby(missingEpisodeCompareModal.row)"
+                                        type="button"
+                                        class="missing-episode-compare-emby-btn"
+                                        @click="openMissingEpisodeEmby"
+                                    >
+                                        <i class="fa-solid fa-server"></i>
+                                        <span>Emby</span>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="missing-episode-compare-meta">
+                                <span>{{ missingEpisodeCompareModal.row?.year || missingEpisodeCompareModal.row?.localItem?.year || '未知年份' }}</span>
+                                <span>{{ missingEpisodeCompareModal.row?.localItem?.libraryName || missingEpisodeCompareModal.row?.libraryName || '未分类媒体库' }}</span>
+                                <span>{{ missingEpisodeCompareModal.row?.tmdbStatus || '未知状态' }}</span>
+                                <span>{{ countLocalEpisodes(missingEpisodeCompareModal.row?.localItem?.seasons) }} 集已入库</span>
+                                <span>{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
+                                <span v-if="missingEpisodeCompareModal.row?.extraLocalEpisodes">本地多 {{ missingEpisodeCompareModal.row.extraLocalEpisodes }} 集</span>
+                                <span>{{ missingEpisodeCompareModal.row?.label || '异常入库' }}</span>
+                            </div>
+                            <div class="missing-episode-compare-id-row">
+                                <span v-if="missingEpisodeCompareModal.row?.localItem?.embyId" class="missing-episode-compare-id">Emby ID: {{ missingEpisodeCompareModal.row.localItem.embyId }}</span>
+                                <span v-if="missingEpisodeCompareModal.row?.tmdbId" class="missing-episode-compare-id">TMDB ID: {{ missingEpisodeCompareModal.row.tmdbId }}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="missing-episode-compare-section local">
+                        <div class="missing-episode-compare-section-head">
+                            <div>
+                                <div class="missing-episode-compare-title">已入库条目</div>
+                                <strong>{{ missingEpisodeCompareModal.row?.localItem?.title || '未知标题' }}</strong>
+                            </div>
+                            <span>{{ formatLocalSeasonBrief(missingEpisodeCompareModal.row?.localItem?.seasons) }}</span>
+                        </div>
+                        <div v-if="getLocalSeasonRows(missingEpisodeCompareModal.row).length" class="missing-episode-season-list">
+                            <div v-for="season in getLocalSeasonRows(missingEpisodeCompareModal.row)" :key="'local-' + season.season" class="missing-episode-season-row">
+                                <div class="missing-episode-season-head">
+                                    <span>S{{ String(season.season).padStart(2, '0') }}</span>
+                                    <small v-if="season.extraEpisodes.length">{{ season.episodes.length }} 集 · 异常 {{ season.extraEpisodes.length }} 集</small>
+                                    <small v-else>{{ season.episodes.length }} 集</small>
+                                </div>
+                                <div class="missing-episode-chip-list">
+                                    <span
+                                        v-for="episode in season.episodes"
+                                        :key="'local-' + season.season + '-' + episode"
+                                        class="missing-episode-chip"
+                                        :class="{ local: !isEpisodeListed(season.extraEpisodes, episode), extra: isEpisodeListed(season.extraEpisodes, episode) }"
+                                    >{{ formatEpisodeNumber(episode) }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-else class="missing-episode-compare-empty">暂无已入库季集信息</div>
+                    </div>
+                    <div class="missing-episode-compare-section tmdb">
+                        <div class="missing-episode-compare-section-head">
+                            <div>
+                                <div class="missing-episode-compare-title">TMDB 条目</div>
+                                <strong>{{ missingEpisodeCompareModal.row?.title || missingEpisodeCompareModal.row?.item?.title || '未知标题' }}</strong>
+                            </div>
+                            <span>{{ missingEpisodeCompareModal.row?.seasonBrief || '暂无 TMDB 季集统计' }}</span>
+                        </div>
+                        <div v-if="getTmdbSeasonRows(missingEpisodeCompareModal.row).length" class="missing-episode-season-list">
+                            <div v-for="season in getTmdbSeasonRows(missingEpisodeCompareModal.row)" :key="'tmdb-' + season.season" class="missing-episode-season-row">
+                                <div class="missing-episode-season-head">
+                                    <span>S{{ String(season.season).padStart(2, '0') }}</span>
+                                    <small>{{ season.present }}/{{ season.total }} 已入库 · {{ season.missing }} 缺失</small>
+                                </div>
+                                <div class="missing-episode-chip-list">
+                                    <span
+                                        v-for="episode in season.episodes"
+                                        :key="'tmdb-' + season.season + '-' + episode"
+                                        class="missing-episode-chip"
+                                        :class="{
+                                            exists: isEpisodeListed(season.presentEpisodes, episode),
+                                            'aired-missing': isEpisodeListed(season.airedMissingEpisodes, episode),
+                                            missing: isEpisodeListed(season.missingEpisodes, episode) && !isEpisodeListed(season.airedMissingEpisodes, episode)
+                                        }"
+                                    >{{ formatEpisodeNumber(episode) }}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div v-else class="missing-episode-compare-empty">暂无 TMDB 季集信息，刷新统计后会补齐展开条目</div>
+                        <div class="missing-episode-chip-legend">
+                            <span><i class="exists"></i>已入库</span>
+                            <span><i class="aired-missing"></i>已播缺失</span>
+                            <span><i class="extra"></i>本地多出</span>
+                            <span><i class="missing"></i>未入库/未播</span>
+                        </div>
+                    </div>
+                    <div class="missing-episode-compare-note">
+                        <i class="fa-solid fa-circle-info"></i>
+                        <span>如果标题、年份、季号或集数对不上，可能是 Emby 剧集识别错、绑定到了错误的 TMDB 条目，也可能是 TMDB 自身季集信息有误；本地多出的集号也会标为异常。请先核对媒体库识别与 TMDB 条目，修正后重新刷新统计。</span>
+                    </div>
+                </section>
+            </div>
+        </transition>
+
         <!-- ======== 桌面端 Dock 栏 ======== -->
         <div v-if="detailModal.visible" class="discover-overlay detail-overlay-top detail-overlay-fullscreen" @click.self="closeDetailModal">
             <div class="discover-detail-panel">
@@ -5039,17 +5179,17 @@
                 <i class="fa-solid fa-compass"></i>
                 <span>发现</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: tab === 'media_organize'}" @click="selectMobileTab('media_organize')">
-                <i class="fa-solid fa-folder-tree"></i>
-                <span>整理</span>
+            <button class="mobile-tabbar-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')">
+                <i class="fa-solid fa-list-check"></i>
+                <span>缺集</span>
             </button>
             <button class="mobile-tabbar-item mobile-tabbar-action" :class="{active: tab === 'dashboard'}" @click="selectMobileTab('dashboard')">
                 <i class="fa-solid fa-house"></i>
                 <span>首页</span>
             </button>
-            <button class="mobile-tabbar-item" :class="{active: tab === 'missing_episode_stats'}" @click="selectMobileTab('missing_episode_stats')">
-                <i class="fa-solid fa-list-check"></i>
-                <span>缺集</span>
+            <button class="mobile-tabbar-item" :class="{active: tab === 'media_organize'}" @click="selectMobileTab('media_organize')">
+                <i class="fa-solid fa-folder-tree"></i>
+                <span>整理</span>
             </button>
             <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'missing_episode_stats'].includes(tab)}" @click="toggleMobileMenu">
                 <i class="fa-solid fa-ellipsis"></i>
