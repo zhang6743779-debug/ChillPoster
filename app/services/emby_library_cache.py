@@ -12,6 +12,7 @@ from core.configs import EMBY_DISCOVER_INDEX_FILE
 from core.cache_db import cache_db
 from core.emby_client import EmbyClient
 from app.routers.config_302 import get_emby_config_by_index_sync
+from app.services.realtime_events import publish_realtime_event
 
 logger = logging.getLogger("EmbyLibCache")
 
@@ -1420,7 +1421,132 @@ def upsert_discover_series_entry(
         _save_discover_index_file(payload)
     except Exception as e:
         logger.warning(f"[EmbyLibCache] Emby 可用性索引增量落盘失败: {e}")
+    publish_realtime_event("discover_index_updated", {
+        "action": "added",
+        "media_type": "tv",
+        "tmdb_id": tmdb_id,
+        "library_id": library_id,
+        "emby_id": str(emby_id or ""),
+        "exists": True,
+    })
     return entry
+
+
+def upsert_discover_movie_entry(
+    *,
+    server_idx: int = 0,
+    library_id: str = "",
+    library_name: str = "",
+    emby_id: str = "",
+    tmdb_id: str = "",
+    title: str = "",
+    original_title: str = "",
+    year: str = "",
+) -> bool:
+    """Incrementally update one Movie in the persisted discover index."""
+    tmdb_id = str(tmdb_id or "").strip()
+    if not tmdb_id:
+        return False
+    item = {
+        "emby_id": str(emby_id or ""),
+        "tmdb_id": tmdb_id,
+        "media_type": "movie",
+        "title": str(title or ""),
+        "original_title": str(original_title or ""),
+        "year": str(year or "")[:4],
+        "library_id": str(library_id or "").strip(),
+        "library_name": str(library_name or "") or "未分类媒体库",
+    }
+    now = _now_ts()
+    discover_key = f"{tmdb_id}:movie"
+    with _discover_index_lock:
+        _discover_items[discover_key] = item
+        _discover_index[f"tmdb:{tmdb_id}:movie"] = tmdb_id
+        for field in ("title", "original_title"):
+            norm = _normalize_for_discover(item.get(field, "") or "")
+            if not norm:
+                continue
+            if item.get("year"):
+                _discover_index[f"title:{norm}:{item['year']}:movie"] = tmdb_id
+            _discover_index.setdefault(f"title:{norm}:movie", tmdb_id)
+        _discover_index_meta.update({
+            "version": DISCOVER_INDEX_VERSION,
+            "updated_at": now,
+            "server_idx": int(server_idx or 0),
+            "item_count": len(_discover_items),
+            "index_key_count": len(_discover_index),
+            "series_count": len(_discover_series_index),
+            "reason": "webhook:incremental_movie",
+        })
+        payload = {
+            "_meta": dict(_discover_index_meta),
+            "discover_index": dict(_discover_index),
+            "series_index": _serialize_discover_series_index(_discover_series_index),
+            "items": dict(_discover_items),
+        }
+    try:
+        _save_discover_index_file(payload)
+    except Exception as e:
+        logger.warning(f"[EmbyLibCache] Emby 可用性索引电影增量落盘失败: {e}")
+        return False
+    publish_realtime_event("discover_index_updated", {
+        "action": "added",
+        "media_type": "movie",
+        "tmdb_id": tmdb_id,
+        "library_id": item.get("library_id", ""),
+        "emby_id": str(emby_id or ""),
+        "exists": True,
+    })
+    return True
+
+
+def remove_discover_movie_entry(*, tmdb_id: str = "", library_id: str = "") -> bool:
+    """Remove one Movie from the discover index when webhook has enough identity data."""
+    tmdb_id = str(tmdb_id or "").strip()
+    if not tmdb_id:
+        return False
+    removed = False
+    now = _now_ts()
+    with _discover_index_lock:
+        discover_key = f"{tmdb_id}:movie"
+        if discover_key in _discover_items:
+            removed = True
+            _discover_items.pop(discover_key, None)
+        _discover_index.pop(f"tmdb:{tmdb_id}:movie", None)
+        stale_title_keys = [
+            key for key, value in _discover_index.items()
+            if str(value) == tmdb_id and str(key).endswith(":movie")
+        ]
+        for key in stale_title_keys:
+            _discover_index.pop(key, None)
+        if not removed:
+            return False
+        _discover_index_meta.update({
+            "version": DISCOVER_INDEX_VERSION,
+            "updated_at": now,
+            "item_count": len(_discover_items),
+            "index_key_count": len(_discover_index),
+            "series_count": len(_discover_series_index),
+            "reason": "webhook:remove_movie",
+        })
+        payload = {
+            "_meta": dict(_discover_index_meta),
+            "discover_index": dict(_discover_index),
+            "series_index": _serialize_discover_series_index(_discover_series_index),
+            "items": dict(_discover_items),
+        }
+    try:
+        _save_discover_index_file(payload)
+    except Exception as e:
+        logger.warning(f"[EmbyLibCache] Emby 可用性索引电影删除落盘失败: {e}")
+    publish_realtime_event("discover_index_updated", {
+        "action": "removed",
+        "media_type": "movie",
+        "tmdb_id": tmdb_id,
+        "library_id": str(library_id or ""),
+        "exists": False,
+    })
+    return True
 
 
 def remove_discover_series_entry(*, tmdb_id: str = "", library_id: str = "") -> bool:
@@ -1467,6 +1593,13 @@ def remove_discover_series_entry(*, tmdb_id: str = "", library_id: str = "") -> 
         _save_discover_index_file(payload)
     except Exception as e:
         logger.warning(f"[EmbyLibCache] Emby 可用性索引删除落盘失败: {e}")
+    publish_realtime_event("discover_index_updated", {
+        "action": "removed",
+        "media_type": "tv",
+        "tmdb_id": tmdb_id,
+        "library_id": library_id,
+        "exists": False,
+    })
     return True
 
 

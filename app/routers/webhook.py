@@ -16,6 +16,40 @@ from core.logger import logger
 router = APIRouter(tags=["Webhook"])
 
 
+def _default_webhook_config() -> dict:
+    return {
+        "enabled": False,
+        "engine": "classic",
+        "preset": "",
+        "mode": "random",
+        "delete_sync_enabled": True,
+    }
+
+
+def _normalize_webhook_config(data: dict | None = None) -> dict:
+    config = {**_default_webhook_config(), **(data if isinstance(data, dict) else {})}
+    config["delete_sync_enabled"] = True
+    return config
+
+
+def _is_emby_test_notification(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    values = [
+        data.get("Event"),
+        data.get("Title"),
+        data.get("Description"),
+        data.get("Name"),
+        data.get("Message"),
+    ]
+    text = " ".join(str(value or "") for value in values).lower()
+    if "test" in text or "测试" in text:
+        return True
+    if not data.get("Item") and not data.get("Event"):
+        return True
+    return False
+
+
 def _extract_tmdb_id_from_webhook_item(item_data: dict) -> str:
     provider_ids = item_data.get("ProviderIds") or {}
     for key in ("Tmdb", "TMDb", "TheMovieDb", "themoviedb"):
@@ -31,13 +65,19 @@ def _extract_tmdb_id_from_webhook_item(item_data: dict) -> str:
 
 def _sync_missing_episode_stats_for_series(client: EmbyClient, matched_lib: dict, server_idx: int, series_id: str, series_info: dict | None = None) -> bool:
     if not series_id:
+        logger.info("[Webhook] 缺集统计缓存未更新: 缺少 SeriesId")
         return False
     try:
         series_info = series_info or client.get_item_info(series_id)
         if not series_info:
+            logger.info(f"[Webhook] 缺集统计缓存未更新: 无法读取剧集信息 Series={series_id}")
             return False
         tmdb_id = str(series_info.get("tmdb_id") or "").strip()
         if not tmdb_id:
+            logger.info(
+                f"[Webhook] 缺集统计缓存未更新: 剧集缺少 TMDB ID "
+                f"Series={series_id} title={series_info.get('name') or ''}"
+            )
             return False
         seasons = client.get_series_episode_counts_by_id(series_id)
         from app.services.emby_library_cache import upsert_discover_series_entry
@@ -53,11 +93,55 @@ def _sync_missing_episode_stats_for_series(client: EmbyClient, matched_lib: dict
             seasons=seasons,
         )
         if not entry:
+            logger.info(f"[Webhook] 缺集统计缓存未更新: 剧集索引写入失败 Series={series_id} TMDB={tmdb_id}")
             return False
         from app.routers.discover import sync_missing_episode_stats_entry
-        return sync_missing_episode_stats_entry(entry)
+        patched = sync_missing_episode_stats_entry(entry)
+        if not patched:
+            logger.info(
+                f"[Webhook] 缺集统计缓存未更新: 未找到可更新的缺集统计缓存 "
+                f"Series={series_id} TMDB={tmdb_id} Library={matched_lib.get('name') or ''}"
+            )
+        return patched
     except Exception as e:
-        logger.debug(f"[Webhook] 缺集统计单剧增量更新失败: {e}")
+        logger.warning(f"[Webhook] 缺集统计单剧增量更新失败: Series={series_id} error={e}")
+        return False
+
+
+def _sync_discover_movie_index_for_item(client: EmbyClient, matched_lib: dict, server_idx: int, item_id: str, item_data: dict | None = None) -> bool:
+    if not item_id:
+        logger.info("[Webhook] 发现页电影索引未更新: 缺少 ItemId")
+        return False
+    item_data = item_data or {}
+    try:
+        item_info = client.get_item_info(item_id)
+        tmdb_id = str((item_info or {}).get("tmdb_id") or "").strip()
+        if not tmdb_id:
+            tmdb_id = _extract_tmdb_id_from_webhook_item(item_data)
+        if not tmdb_id:
+            logger.info(
+                f"[Webhook] 发现页电影索引未更新: 电影缺少 TMDB ID "
+                f"Item={item_id} title={(item_info or {}).get('name') or item_data.get('Name') or ''}"
+            )
+            return False
+        from app.services.emby_library_cache import upsert_discover_movie_entry
+        patched = upsert_discover_movie_entry(
+            server_idx=server_idx,
+            library_id=str(matched_lib.get("id") or ""),
+            library_name=str(matched_lib.get("name") or ""),
+            emby_id=str(item_id or ""),
+            tmdb_id=tmdb_id,
+            title=(item_info or {}).get("name") or item_data.get("Name") or "",
+            original_title=(item_info or {}).get("original_title") or item_data.get("OriginalTitle") or "",
+            year=str((item_info or {}).get("year") or item_data.get("ProductionYear") or ""),
+        )
+        if patched:
+            logger.info(f"[Webhook] 发现页电影索引已增量写入: Item={item_id} TMDB={tmdb_id}")
+        else:
+            logger.info(f"[Webhook] 发现页电影索引未更新: 写入失败 Item={item_id} TMDB={tmdb_id}")
+        return patched
+    except Exception as e:
+        logger.warning(f"[Webhook] 发现页电影索引增量更新失败: Item={item_id} error={e}")
         return False
 
 
@@ -92,44 +176,38 @@ def _sync_missing_episode_stats_for_removed_item(client: EmbyClient, matched_lib
             if removed:
                 from app.routers.discover import sync_missing_episode_stats_entry
                 return sync_missing_episode_stats_entry(remove=True, tmdb_id=tmdb_id, library_id=str((matched_lib or {}).get("id") or ""))
+    if item_type == "Movie":
+        tmdb_id = _extract_tmdb_id_from_webhook_item(item_data)
+        if tmdb_id:
+            from app.services.emby_library_cache import remove_discover_movie_entry
+            return remove_discover_movie_entry(
+                tmdb_id=tmdb_id,
+                library_id=str((matched_lib or {}).get("id") or ""),
+            )
     return False
 
 @router.get("/api/webhook/config")
 def get_webhook_config():
-    default_config = {
-        "enabled": False,
-        "engine": "classic",
-        "preset": "",
-        "mode": "random",
-        "delete_sync_enabled": False,
-    }
     if os.path.exists(WEBHOOK_CONFIG_FILE):
         try:
             with open(WEBHOOK_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return {**default_config, **(data if isinstance(data, dict) else {})}
+            return _normalize_webhook_config(data)
         except: pass
-    return default_config
+    return _default_webhook_config()
 
 @router.post("/api/webhook/config")
 def save_webhook_config(cfg: WebhookConfigModel):
     try:
+        data = cfg.model_dump()
+        data["delete_sync_enabled"] = True
         with open(WEBHOOK_CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cfg.model_dump(), f, indent=4, ensure_ascii=False)
+            json.dump(data, f, indent=4, ensure_ascii=False)
         return {"status": "ok"}
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/webhook")
 async def emby_webhook_trigger(request: Request):
-    if not os.path.exists(WEBHOOK_CONFIG_FILE):
-        return {"status": "ignored", "reason": "No Webhook Config"}
-    
-    try:
-        with open(WEBHOOK_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            wh_config = json.load(f)
-    except:
-        return {"status": "error", "reason": "Config Read Error"}
-
     try:
         content_type = request.headers.get("content-type", "")
         data = {}
@@ -145,11 +223,28 @@ async def emby_webhook_trigger(request: Request):
         return {"status": "error", "reason": f"Payload Error: {e}"}
 
     event_type = data.get("Event", "")
+
+    if _is_emby_test_notification(data):
+        logger.info(
+            "[Webhook] webhook接收到emby测试通知: "
+            f"event={event_type or 'unknown'} title={data.get('Title', '')} "
+            f"description={str(data.get('Description', ''))[:120]}"
+        )
+        return {"status": "ok", "action": "emby_test_notification"}
+
+    wh_config = _default_webhook_config()
+    if os.path.exists(WEBHOOK_CONFIG_FILE):
+        try:
+            with open(WEBHOOK_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                wh_config = _normalize_webhook_config(json.load(f))
+        except:
+            return {"status": "error", "reason": "Config Read Error"}
+
     allowed_events = ["library.new", "item.added", "library.scan_complete"]
     delete_events = ["item.removed", "library.deleted", "deep.delete"]
 
     webhook_enabled = bool(wh_config.get("enabled", False))
-    delete_sync_enabled = bool(wh_config.get("delete_sync_enabled", False))
+    delete_sync_enabled = True
 
     if not webhook_enabled and not (delete_sync_enabled and event_type in delete_events):
         return {"status": "ignored", "reason": "Webhook Disabled"}
@@ -217,6 +312,7 @@ async def emby_webhook_trigger(request: Request):
     targets = []
     servers = get_emby_configs_sync()
     stats_patched_count = 0
+    discover_index_patched_count = 0
 
     preset_name = wh_config.get("preset")
 
@@ -257,6 +353,28 @@ async def emby_webhook_trigger(request: Request):
 
             if matched_lib:
                 item_type_for_stats = item_data.get("Type", "")
+                try:
+                    series_id_for_stats = ""
+                    if item_type_for_stats == "Episode":
+                        series_id_for_stats = str(item_data.get("SeriesId") or "")
+                    elif item_type_for_stats == "Series":
+                        series_id_for_stats = str(target_item_id or "")
+                    if series_id_for_stats:
+                        patched = _sync_missing_episode_stats_for_series(client, matched_lib, svr_idx, series_id_for_stats)
+                        if patched:
+                            stats_patched_count += 1
+                            logger.info(f"[Webhook] 缺集统计缓存已增量写入: Series={series_id_for_stats}")
+                    elif item_type_for_stats in {"Episode", "Series"}:
+                        logger.info(
+                            f"[Webhook] 缺集统计缓存未更新: 入库事件缺少 SeriesId "
+                            f"type={item_type_for_stats} item={target_item_id}"
+                        )
+                    elif item_type_for_stats == "Movie":
+                        if _sync_discover_movie_index_for_item(client, matched_lib, svr_idx, str(target_item_id or ""), item_data):
+                            discover_index_patched_count += 1
+                except Exception as index_err:
+                    logger.warning(f"[Webhook] 入库索引增量更新失败: {index_err}")
+
                 # 发送入库通知
                 try:
                     item_name = item_data.get("Name", "未知媒体")
@@ -451,20 +569,6 @@ async def emby_webhook_trigger(request: Request):
                 except Exception as notify_err:
                     logger.debug(f"[Webhook] 发送入库通知失败: {notify_err}")
 
-                try:
-                    series_id_for_stats = ""
-                    if item_type_for_stats == "Episode":
-                        series_id_for_stats = str(item_data.get("SeriesId") or "")
-                    elif item_type_for_stats == "Series":
-                        series_id_for_stats = str(target_item_id or "")
-                    if series_id_for_stats:
-                        patched = _sync_missing_episode_stats_for_series(client, matched_lib, svr_idx, series_id_for_stats)
-                        if patched:
-                            stats_patched_count += 1
-                            logger.info(f"[Webhook] 缺集统计已增量更新: Series={series_id_for_stats}")
-                except Exception as stats_err:
-                    logger.debug(f"[Webhook] 缺集统计增量更新失败: {stats_err}")
-
                 targets.append({
                     "url": svr['url'],
                     "key": svr['key'],
@@ -488,6 +592,7 @@ async def emby_webhook_trigger(request: Request):
             "action": "missing_episode_incremental_update",
             "targets_matched": len(targets),
             "stats_patched": stats_patched_count,
+            "discover_index_patched": discover_index_patched_count,
             "reason": "No Preset Selected",
         }
 
@@ -507,4 +612,9 @@ async def emby_webhook_trigger(request: Request):
         )
         triggered_count += 1
 
-    return {"status": "queued", "targets_debounced": triggered_count}
+    return {
+        "status": "queued",
+        "targets_debounced": triggered_count,
+        "stats_patched": stats_patched_count,
+        "discover_index_patched": discover_index_patched_count,
+    }

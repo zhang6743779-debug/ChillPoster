@@ -13,8 +13,9 @@ export function useShellNavigation({ tab, allSearchItems, onResize }) {
     const isStandaloneWebApp = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
     document.documentElement.classList.toggle('standalone-webapp', isStandaloneWebApp);
 
-    const openPanels = ref([]);
-    const focusedPanel = ref(null);
+    const initialPanelId = tab.value && tab.value !== 'dashboard' ? tab.value : null;
+    const openPanels = ref(initialPanelId ? [initialPanelId] : []);
+    const focusedPanel = ref(initialPanelId);
     const showSettingsDrawer = ref(false);
     const showCoverDrawer = ref(false);
     const showStorageDrawer = ref(false);

@@ -35,8 +35,12 @@ createApp({
     setup() {
         const ACTIVE_TAB_STORAGE_KEY = 'chillposter-active-tab';
         const getInitialTab = () => {
-            const savedTab = localStorage.getItem(ACTIVE_TAB_STORAGE_KEY);
-            return savedTab && savedTab.trim() ? savedTab : 'dashboard';
+            try {
+                localStorage.removeItem(ACTIVE_TAB_STORAGE_KEY);
+                const hashTab = decodeURIComponent((window.location.hash || '').replace(/^#/, '')).trim();
+                return allValidTabs.has(hashTab) ? hashTab : 'dashboard';
+            } catch (_) {}
+            return 'dashboard';
         };
         const tab = ref(getInitialTab());
         const servers = ref([]);
@@ -787,7 +791,15 @@ createApp({
         // 监听tab变化更新指示器
         watch(tab, (newTab) => {
             try {
-                localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, newTab);
+                const cleanUrl = `${window.location.pathname}${window.location.search}`;
+                if (newTab && newTab !== 'dashboard' && allValidTabs.has(newTab)) {
+                    const nextHash = `#${encodeURIComponent(newTab)}`;
+                    if (window.location.hash !== nextHash) {
+                        window.history.replaceState(null, '', `${cleanUrl}${nextHash}`);
+                    }
+                } else if (window.location.hash) {
+                    window.history.replaceState(null, '', cleanUrl);
+                }
             } catch (_) {}
 
             if (tab.value === 'dashboard' && dashboardCovers.value.length > 0) {
@@ -1533,6 +1545,7 @@ createApp({
             loadMissingEpisodeStatsShell,
             runMissingEpisodeStats,
             refreshMissingEpisodeStats,
+            calibrateMissingEpisodeStats,
             setMissingEpisodeLibrary,
             setMissingEpisodeFilter,
             setMissingEpisodeStatusFilter,
@@ -1716,7 +1729,7 @@ createApp({
             detailModal, openMediaDetail, closeDetailModal,
             missingEpisodeStats, missingEpisodeLibraries, missingEpisodeActiveLibrary, missingEpisodeActiveSummary, missingEpisodeActiveErrorCount, missingEpisodeSearchActive, missingEpisodeStatsProblemItems,
             visibleMissingEpisodeStatsProblemItems, missingEpisodeHasMoreVisibleItems, missingEpisodePosterGridRef, getMissingEpisodePosterKey, isMissingEpisodePosterReady, onMissingEpisodeLazyScroll,
-            runMissingEpisodeStats, refreshMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
+            runMissingEpisodeStats, refreshMissingEpisodeStats, calibrateMissingEpisodeStats, setMissingEpisodeLibrary, setMissingEpisodeFilter, setMissingEpisodeStatusFilter, setMissingEpisodeSort, openDiscoverFromMissingStats,
             setDetailSeason, toggleDetailSeasonExpanded, toggleDetailSeasonSubscription, loadSeasonEpisodes, getSeasonLibraryState, getDetailLibraryState, isEpisodeInLibrary,
             subscribeMedia, unsubscribeMedia, getImdbLink, getTvdbLink,
             gridModal, gridModalEl, gridSentinel, openRowGrid, closeGridModal,

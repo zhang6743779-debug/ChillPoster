@@ -113,7 +113,7 @@ class WebhookConfigModel(BaseModel):
     engine: str = "classic"
     preset: str = ""
     mode: str = "random"
-    delete_sync_enabled: bool = False
+    delete_sync_enabled: bool = True
 
 class WechatNotifyConfigModel(BaseModel):
     enabled: bool = False

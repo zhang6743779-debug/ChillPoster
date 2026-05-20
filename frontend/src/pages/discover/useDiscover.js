@@ -301,6 +301,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const mainGridScrollRoot = ref(null);
         let mainGridObserver = null;
         let mainGridObserverRetryTimer = null;
+        let discoverRealtimeEventSource = null;
         let _mainGridGen = 0;
         const mainGridPrefetch = reactive({ pages: {} });
         const MAIN_GRID_PREFETCH_AHEAD = 2;
@@ -336,8 +337,21 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         });
         let missingEpisodeStatsRunId = 0;
         let missingEpisodeStatsPollTimer = null;
+        const MISSING_EPISODE_ALL_LIBRARY_KEY = '__all_libraries__';
         const getMissingEpisodeLibraryKey = (lib = {}) => lib.libraryId || lib.libraryName || '';
-        const missingEpisodeLibraries = computed(() => missingEpisodeStats.libraries || []);
+        const missingEpisodeLibraries = computed(() => {
+            const libraries = missingEpisodeStats.libraries || [];
+            if (!libraries.length) return [];
+            return [
+                {
+                    libraryId: MISSING_EPISODE_ALL_LIBRARY_KEY,
+                    libraryName: '全部媒体库',
+                    summary: missingEpisodeStats.summary || emptyMissingEpisodeSummary(),
+                    items: missingEpisodeStats.items || [],
+                },
+                ...libraries,
+            ];
+        });
         const missingEpisodeActiveLibrary = computed(() => {
             const libraries = missingEpisodeLibraries.value;
             if (!libraries.length) return null;
@@ -568,6 +582,10 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         onBeforeUnmount(() => {
             teardownMissingEpisodePosterObserver();
+            if (discoverRealtimeEventSource) {
+                discoverRealtimeEventSource.close();
+                discoverRealtimeEventSource = null;
+            }
             if (missingEpisodeStatsPollTimer) {
                 clearTimeout(missingEpisodeStatsPollTimer);
                 missingEpisodeStatsPollTimer = null;
@@ -668,13 +686,12 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 missingEpisodeStats.items = data.items || [];
             }
             missingEpisodeStats.libraries = data.libraries || [];
-            const stillExists = missingEpisodeStats.libraries.some(lib => getMissingEpisodeLibraryKey(lib) === previousLibraryKey);
-            if (stillExists) {
+            const stillExists = previousLibraryKey === MISSING_EPISODE_ALL_LIBRARY_KEY
+                || missingEpisodeStats.libraries.some(lib => getMissingEpisodeLibraryKey(lib) === previousLibraryKey);
+            if (previousLibraryKey && stillExists) {
                 missingEpisodeStats.activeLibraryKey = previousLibraryKey;
             } else {
-                const firstProblemLib = missingEpisodeStats.libraries.find(lib => (lib.summary?.missingEpisodes || 0) > 0);
-                const firstLib = firstProblemLib || missingEpisodeStats.libraries[0];
-                missingEpisodeStats.activeLibraryKey = firstLib ? getMissingEpisodeLibraryKey(firstLib) : '';
+                missingEpisodeStats.activeLibraryKey = missingEpisodeStats.libraries.length ? MISSING_EPISODE_ALL_LIBRARY_KEY : '';
             }
             missingEpisodeStats.summary = summary;
             missingEpisodeStats.progress = data.progress || { current: summary.tvCount || 0, total: summary.tvCount || 0 };
@@ -737,15 +754,15 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
         };
 
-        const runMissingEpisodeStats = async (force = false) => {
+        const runMissingEpisodeStats = async (refreshIndex = false, forceRun = refreshIndex) => {
             if (missingEpisodeStats.loading) return;
-            if (missingEpisodeStats.loaded && !force) return;
+            if (missingEpisodeStats.loaded && !forceRun) return;
             resetMissingEpisodeStats();
             const runId = missingEpisodeStatsRunId;
             missingEpisodeStats.loading = true;
             try {
                 const res = await axios.get('/api/discover/library/missing-episode-stats', {
-                    params: { start: 1, refresh: force ? 1 : 0 },
+                    params: { start: 1, refresh: refreshIndex ? 1 : 0 },
                 });
                 if (runId !== missingEpisodeStatsRunId) return;
                 applyMissingEpisodeStatsData(res.data || {});
@@ -764,6 +781,10 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const refreshMissingEpisodeStats = () => {
+            runMissingEpisodeStats(false, true);
+        };
+
+        const calibrateMissingEpisodeStats = () => {
             runMissingEpisodeStats(true);
         };
 
@@ -1476,6 +1497,102 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             searchTotalPages.value = 1;
         };
 
+        const mediaTypesMatch = (left, right) => {
+            const normalize = (value) => String(value || 'movie') === 'series' ? 'tv' : String(value || 'movie');
+            return normalize(left) === normalize(right);
+        };
+
+        const applyLibraryEventToItems = (items = [], payload = {}) => {
+            const tmdbId = String(payload.tmdb_id || '');
+            if (!tmdbId) return false;
+            const mediaType = payload.media_type || 'movie';
+            const exists = payload.exists !== false;
+            let changed = false;
+            (items || []).forEach(item => {
+                if (!item || String(getItemTmdbId(item) || '') !== tmdbId) return;
+                if (!mediaTypesMatch(item.media_type || 'movie', mediaType)) return;
+                item.exists_in_library = exists;
+                changed = true;
+            });
+            return changed;
+        };
+
+        const filterItemsByActiveLibraryStatus = (items = []) => {
+            const status = String(activeSourceFilters.value?.[LIBRARY_STATUS_FILTER_KEY] ?? '');
+            if (!status) return items;
+            return items.filter(item => status === 'exists' ? !!item.exists_in_library : !item.exists_in_library);
+        };
+
+        const refreshDetailLibraryStateFromEvent = async (payload = {}) => {
+            if (!detailModal.visible) return;
+            const tmdbId = String(payload.tmdb_id || '');
+            const mediaType = payload.media_type || 'movie';
+            const exists = payload.exists !== false;
+            const detailTmdbId = String(detailModal.detail?.tmdb_id || detailModal.item?._tmdb_id || detailModal.item?.id || '');
+            const detailMediaType = detailModal.detail?.media_type || detailModal.item?.media_type || 'movie';
+            if (!tmdbId || tmdbId !== detailTmdbId || !mediaTypesMatch(detailMediaType, mediaType)) return;
+            if (detailModal.item) detailModal.item.exists_in_library = exists;
+            if (detailModal.detail) detailModal.detail.exists_in_library = exists;
+            if (mediaTypesMatch(mediaType, 'tv')) await loadLibrarySeriesStatus(tmdbId);
+        };
+
+        const handleDiscoverIndexUpdated = async (payload = {}) => {
+            const hasStatusFilter = !!String(activeSourceFilters.value?.[LIBRARY_STATUS_FILTER_KEY] ?? '');
+            if (tab.value === 'media_subscribe' && hasStatusFilter && !mainGridLoading.value) {
+                loadMainGrid(true);
+            } else {
+                applyLibraryEventToItems(mainGridItems.value, payload);
+            }
+
+            applyLibraryEventToItems(gridModal.items, payload);
+            gridModal.items = filterItemsByActiveLibraryStatus(gridModal.items);
+
+            applyLibraryEventToItems(searchMovieResults.value, payload);
+            applyLibraryEventToItems(searchTvResults.value, payload);
+            searchMovieResults.value = filterItemsByActiveLibraryStatus(searchMovieResults.value);
+            searchTvResults.value = filterItemsByActiveLibraryStatus(searchTvResults.value);
+
+            if (detailModal.detail) {
+                applyLibraryEventToItems(detailModal.detail.recommendation_items || [], payload);
+                applyLibraryEventToItems(detailModal.detail.similar_items || [], payload);
+            }
+            await refreshDetailLibraryStateFromEvent(payload);
+        };
+
+        const refreshMissingEpisodeStatsFromCache = async () => {
+            if (!missingEpisodeStats.loaded || missingEpisodeStats.loading) return;
+            const runId = ++missingEpisodeStatsRunId;
+            try {
+                const res = await axios.get('/api/discover/library/missing-episode-stats');
+                if (runId !== missingEpisodeStatsRunId) return;
+                applyMissingEpisodeStatsData(res.data || {});
+                missingEpisodeStats.loading = false;
+            } catch (e) {
+                if (runId === missingEpisodeStatsRunId) {
+                    missingEpisodeStats.error = e.response?.data?.detail || e.message || '刷新缓存失败';
+                }
+            }
+        };
+
+        const setupDiscoverRealtimeEvents = () => {
+            if (discoverRealtimeEventSource || typeof EventSource === 'undefined') return;
+            discoverRealtimeEventSource = new EventSource('/api/discover/events');
+            discoverRealtimeEventSource.addEventListener('discover_index_updated', (event) => {
+                try {
+                    handleDiscoverIndexUpdated(JSON.parse(event.data || '{}')).catch(e => {
+                        console.error('处理发现页索引事件失败:', e);
+                    });
+                } catch (e) {
+                    console.error('处理发现页索引事件失败:', e);
+                }
+            });
+            discoverRealtimeEventSource.addEventListener('missing_episode_stats_updated', () => {
+                refreshMissingEpisodeStatsFromCache();
+            });
+        };
+
+        setupDiscoverRealtimeEvents();
+
     return {
         detailModal,
         openMediaDetail,
@@ -1497,6 +1614,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         loadMissingEpisodeStatsShell,
         runMissingEpisodeStats,
         refreshMissingEpisodeStats,
+        calibrateMissingEpisodeStats,
         setMissingEpisodeLibrary,
         setMissingEpisodeFilter,
         setMissingEpisodeStatusFilter,

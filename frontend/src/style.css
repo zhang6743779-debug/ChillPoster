@@ -7928,6 +7928,21 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     flex-direction: column;
     gap: 9px;
 }
+.missing-episode-control-panel .missing-episode-filter-strip {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+.missing-episode-control-panel .missing-episode-filter-btn {
+    min-height: 36px;
+    border-radius: 10px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 700;
+}
+.missing-episode-control-panel .missing-episode-filter-btn strong {
+    font-size: 13px;
+}
 .missing-episode-chip-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

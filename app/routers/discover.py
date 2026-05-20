@@ -7,9 +7,11 @@ import sys
 import time
 import types
 import json
+import asyncio
 import hashlib
 import logging
 import random
+import queue
 import importlib.util
 import threading
 from collections import OrderedDict
@@ -22,7 +24,7 @@ import requests
 from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import Response, RedirectResponse, StreamingResponse
 
-from core.configs import global_config, MISSING_EPISODE_STATS_CACHE_FILE
+from core.configs import global_config, MISSING_EPISODE_STATS_CACHE_FILE, RSS_TASKS_FILE
 from core.cache_db import cache_db
 from app.services.emby_library_cache import (
     build_discover_index,
@@ -33,11 +35,34 @@ from app.services.emby_library_cache import (
     get_discover_series_status,
     lookup_discover_tmdb_id,
 )
+from app.services.realtime_events import format_sse_event, publish_realtime_event, subscribe_realtime_events
 from core import tmdb
 from core.douban import DoubanApi
 
 logger = logging.getLogger("Discover")
 router = APIRouter(prefix="/api/discover", tags=["Discover"])
+
+
+@router.get("/events")
+async def discover_realtime_events():
+    async def event_generator():
+        with subscribe_realtime_events() as q:
+            yield "event: init\ndata: {}\n\n"
+            while True:
+                try:
+                    event = await asyncio.to_thread(q.get, True, 25)
+                    yield format_sse_event(event)
+                except queue.Empty:
+                    yield ": ping\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 # ========== 内存缓存 ==========
 _cache: Dict[str, tuple] = {}  # key -> (data, expiry_timestamp)
@@ -1796,11 +1821,53 @@ def _build_missing_episode_libraries_from_entries(entries: list[dict]) -> list[d
     return libraries
 
 
+def _get_rss_real_library_names(server_idx: int | str | None = None) -> set[str]:
+    try:
+        if not os.path.exists(RSS_TASKS_FILE):
+            return set()
+        with open(RSS_TASKS_FILE, "r", encoding="utf-8") as f:
+            tasks = json.load(f)
+        if not isinstance(tasks, list):
+            return set()
+        target_server_idx = int(server_idx or 0)
+        names = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            try:
+                task_server_idx = int(task.get("target_server_idx", 0) or 0)
+            except Exception:
+                task_server_idx = 0
+            if task_server_idx != target_server_idx:
+                continue
+            name = str(task.get("name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+    except Exception as e:
+        logger.debug(f"[Discover] 读取 RSS 真实库列表失败: {e}")
+        return set()
+
+
+def _filter_rss_real_library_entries(entries: list[dict], meta: dict | None = None) -> list[dict]:
+    rss_library_names = _get_rss_real_library_names((meta or {}).get("server_idx", 0))
+    if not rss_library_names:
+        return entries
+    filtered = [
+        entry for entry in entries
+        if str(entry.get("library_name") or "").strip() not in rss_library_names
+    ]
+    skipped = len(entries) - len(filtered)
+    if skipped:
+        logger.info(f"[Discover] 缺集统计已跳过 RSS 真实库 {skipped} 条")
+    return filtered
+
+
 _missing_episode_stats_lock = threading.RLock()
 _missing_episode_cache_db_lock = threading.RLock()
 _missing_episode_cache_db_ready = False
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
-MISSING_EPISODE_STATS_CACHE_VERSION = 5
+MISSING_EPISODE_STATS_CACHE_VERSION = 6
 MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 2
 MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT = 48
 _missing_episode_stats_state: dict = {
@@ -2145,6 +2212,32 @@ def _load_missing_episode_stats_cache(cache_key: str | None = None, summary_only
     return payload
 
 
+def _load_latest_missing_episode_stats_payload_any_version() -> tuple[dict | None, int]:
+    """Read the latest full stats payload only as an incremental-update base."""
+    try:
+        _ensure_missing_episode_stats_cache_schema()
+        with cache_db() as conn:
+            row = conn.execute(
+                """
+                SELECT version, payload_json
+                FROM missing_episode_stats_cache
+                ORDER BY saved_at DESC LIMIT 1
+                """
+            ).fetchone()
+        if not row:
+            return None, 0
+        payload = json.loads(row["payload_json"] or "{}")
+        if not isinstance(payload, dict) or payload.get("running"):
+            return None, int(row["version"] or 0)
+        payload = dict(payload)
+        payload["running"] = False
+        payload.setdefault("message", "统计完成")
+        return payload, int(row["version"] or 0)
+    except Exception as e:
+        logger.debug(f"[Discover] 读取旧版缺集统计缓存失败: {e}")
+        return None, 0
+
+
 def _load_or_backfill_missing_episode_stats_summary(cache_key: str | None, entries: list[dict]) -> dict | None:
     cached = _load_missing_episode_stats_cache(cache_key, summary_only=True)
     if cached and cached.get("previewVersion") == MISSING_EPISODE_SUMMARY_PREVIEW_VERSION:
@@ -2213,7 +2306,7 @@ def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict
                 force=True,
             )
             meta = get_discover_index_meta()
-            entries = get_discover_series_entries()
+            entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
             cache_key = _build_missing_episode_cache_key(entries)
             total = len(entries)
             payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
@@ -2340,15 +2433,22 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
     """Patch the persisted missing-episode statistics for one Series."""
     cached_payload = _load_missing_episode_stats_cache()
     if not cached_payload:
+        cached_payload, legacy_version = _load_latest_missing_episode_stats_payload_any_version()
+        if cached_payload:
+            logger.info(f"[Discover] 缺集统计单剧缓存使用旧版完整缓存作为底稿: v{legacy_version}")
+    if not cached_payload:
         with _missing_episode_stats_lock:
             cached_payload = _missing_episode_stats_state.get("payload")
     if not isinstance(cached_payload, dict) or cached_payload.get("running"):
+        logger.info("[Discover] 缺集统计单剧缓存未更新: 当前没有已完成的缺集统计缓存")
         return False
 
-    entries = get_discover_series_entries()
+    meta = get_discover_index_meta()
+    entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
     entry_keys = {_missing_episode_entry_key(item) for item in entries}
     target_key = _missing_episode_entry_key(entry or {"tmdb_id": tmdb_id, "library_id": library_id})
     if target_key == ("", ""):
+        logger.info("[Discover] 缺集统计单剧缓存未更新: 缺少 TMDB ID 和媒体库 ID")
         return False
     target_tmdb_id, target_library_id = target_key
 
@@ -2364,10 +2464,15 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
     if not remove:
         if not entry:
             entry = next((item for item in entries if _missing_episode_entry_key(item) == target_key), None)
-        if not entry:
+        if not entry or _missing_episode_entry_key(entry) not in entry_keys:
+            logger.info(
+                f"[Discover] 缺集统计单剧缓存未更新: 目标剧集不在当前统计索引中 "
+                f"TMDB={target_tmdb_id} Library={target_library_id}"
+            )
             return False
         api_key = _get_tmdb_key()
         if not api_key:
+            logger.info("[Discover] 缺集统计单剧缓存未更新: 未配置 TMDB API Key")
             return False
         results.append(_build_missing_episode_stat(entry, api_key))
 
@@ -2376,7 +2481,6 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
     for item in results:
         _accumulate_missing_episode_summary(summary, item)
     summary["tvCount"] = len(entries)
-    meta = get_discover_index_meta()
     cache_key = _build_missing_episode_cache_key(entries)
     final_payload = {
         "ready": True,
@@ -2392,6 +2496,17 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
     _cache_set(cache_key, final_payload, ttl=24 * 60 * 60)
     _save_missing_episode_stats_cache(final_payload, cache_key, entries)
     _store_missing_episode_progress(final_payload, cache_key)
+    publish_realtime_event("missing_episode_stats_updated", {
+        "action": "removed" if remove else "updated",
+        "media_type": "tv",
+        "tmdb_id": target_tmdb_id,
+        "library_id": target_library_id,
+        "cache_key": cache_key,
+    })
+    logger.info(
+        f"[Discover] 缺集统计单剧缓存已写入: TMDB={target_tmdb_id} "
+        f"Library={target_library_id or 'all'} remove={remove}"
+    )
     return True
 
 
@@ -2418,15 +2533,15 @@ def library_missing_episode_stats(
     api_key = _get_tmdb_key()
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
+    entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
+    cache_key = _build_missing_episode_cache_key(entries)
     if wants_summary and not start and not refresh:
         with _missing_episode_stats_lock:
             if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
                 return _build_missing_episode_summary_payload(_missing_episode_stats_state["payload"])
-        cached_summary = _load_missing_episode_stats_cache(summary_only=True)
+        cached_summary = _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
         if cached_summary and cached_summary.get("previewVersion") == MISSING_EPISODE_SUMMARY_PREVIEW_VERSION:
             return cached_summary
-    entries = get_discover_series_entries()
-    cache_key = _build_missing_episode_cache_key(entries)
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
             payload = _missing_episode_stats_state["payload"]
@@ -2456,12 +2571,9 @@ def library_missing_episode_stats(
         if cached:
             return cached
         if wants_summary:
-            cached = (
-                _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
-                or _load_or_backfill_missing_episode_stats_summary(None, entries)
-            )
+            cached = _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
         else:
-            cached = _load_missing_episode_stats_cache(cache_key) or _load_missing_episode_stats_cache()
+            cached = _load_missing_episode_stats_cache(cache_key)
         if cached:
             cached_key = (cached.get("meta") or {}).get("missing_stats_cache_key") or cache_key
             if cached_key == cache_key and not wants_summary:

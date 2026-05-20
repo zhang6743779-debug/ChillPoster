@@ -10,7 +10,7 @@ export function useWebhookConfig({ presetList, validateSelections, showToast }) 
         engine: 'classic',
         preset: '',
         mode: 'random',
-        delete_sync_enabled: false
+        delete_sync_enabled: true
     });
     const webhookUrl = ref(window.location.origin + '/api/webhook');
 
@@ -18,12 +18,14 @@ export function useWebhookConfig({ presetList, validateSelections, showToast }) 
         try {
             const res = await axios.get('/api/webhook/config');
             Object.assign(webhookConfig, res.data);
+            webhookConfig.delete_sync_enabled = true;
             validateSelections();
         } catch(e) {}
     };
 
     const saveWebhookConfig = async () => {
         try {
+            webhookConfig.delete_sync_enabled = true;
             await axios.post('/api/webhook/config', webhookConfig);
             showToast('Webhook 配置已保存', 'success');
         } catch(e) {
@@ -35,6 +37,7 @@ export function useWebhookConfig({ presetList, validateSelections, showToast }) 
         const newState = event.target.checked;
         const oldState = webhookConfig.enabled;
         webhookConfig.enabled = newState;
+        webhookConfig.delete_sync_enabled = true;
         try {
             await axios.post('/api/webhook/config', webhookConfig);
             showToast(newState ? 'Webhook 已启用' : 'Webhook 已关闭', newState ? 'success' : 'info');
