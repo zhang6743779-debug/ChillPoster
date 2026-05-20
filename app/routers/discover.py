@@ -1801,7 +1801,7 @@ _missing_episode_cache_db_lock = threading.RLock()
 _missing_episode_cache_db_ready = False
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
 MISSING_EPISODE_STATS_CACHE_VERSION = 5
-MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 1
+MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 2
 MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT = 48
 _missing_episode_stats_state: dict = {
     "cache_key": "",
@@ -1872,6 +1872,29 @@ def _slim_missing_episode_preview_item(item: dict) -> dict:
     }
 
 
+def _missing_episode_preview_sort_items(items: list[dict]) -> list[dict]:
+    def num(value) -> int:
+        try:
+            return int(float(str(value or 0).strip() or 0))
+        except Exception:
+            return 0
+
+    def year(item: dict) -> int:
+        return num(str(item.get("year") or "")[:4])
+
+    problem_items = [item for item in items if isinstance(item, dict) and item.get("status") == "partial"]
+    if not problem_items:
+        problem_items = [item for item in items if isinstance(item, dict)]
+    return sorted(
+        problem_items,
+        key=lambda item: (
+            -year(item),
+            -num(item.get("missingEpisodes")),
+            str(item.get("title") or ""),
+        ),
+    )
+
+
 def _build_missing_episode_summary_payload(payload: dict | None) -> dict:
     if not isinstance(payload, dict):
         return {}
@@ -1884,8 +1907,7 @@ def _build_missing_episode_summary_payload(payload: dict | None) -> dict:
         preview_library_key = str(first_problem_lib.get("libraryId") or first_problem_lib.get("libraryName") or "")
         preview_items = [
             _slim_missing_episode_preview_item(item)
-            for item in (first_problem_lib.get("items") or [])[:MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT]
-            if isinstance(item, dict)
+            for item in _missing_episode_preview_sort_items(first_problem_lib.get("items") or [])[:MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT]
         ]
     summary_payload["items"] = preview_items
     summary_payload["libraries"] = []
