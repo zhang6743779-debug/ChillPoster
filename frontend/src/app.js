@@ -1477,6 +1477,7 @@ createApp({
             telegramLoginForm,
             telegramDialogs,
             telegramDialogSearch,
+            telegramDialogPickerOpen,
             selectedTelegramDialogs,
             filteredTelegramDialogs,
             telegramTransferDirBrowser,
@@ -1499,6 +1500,7 @@ createApp({
             signInTelegramAccount,
             logoutTelegramAccount,
             fetchTelegramDialogs,
+            openTelegramDialogPicker,
             isTelegramDialogSelected,
             toggleTelegramDialog,
             removeTelegramSelectedDialog,
@@ -1690,12 +1692,12 @@ createApp({
             notificationTypes, notificationChannels, templateLabels, toggleNotifyType, templateVars, resetWechatTemplate, resetTelegramTemplate, wrapVar,
 
             // [新增] Telegram通知配置
-            telegramNotifyConfig, telegramStatus, telegramLoginForm, telegramDialogs, telegramDialogSearch, selectedTelegramDialogs, filteredTelegramDialogs, telegramTransferDirBrowser,
+            telegramNotifyConfig, telegramStatus, telegramLoginForm, telegramDialogs, telegramDialogSearch, telegramDialogPickerOpen, selectedTelegramDialogs, filteredTelegramDialogs, telegramTransferDirBrowser,
             telegramNotifyTesting, telegramNotifySending, telegramNotifySaving, telegramTemplateTesting,
             telegramCodeSending, telegramSigningIn, telegramLoggingOut, telegramDialogsLoading, telegramDialogsSaving, telegramDialogsDirty,
             fetchTelegramNotifyConfig, saveTelegramNotifyConfig, testTelegramNotify, sendTelegramTestMsg, testTelegramTemplate,
             sendTelegramLoginCode, signInTelegramAccount, logoutTelegramAccount, fetchTelegramDialogs,
-            isTelegramDialogSelected, toggleTelegramDialog, removeTelegramSelectedDialog, saveTelegramDialogs, toggleTelegramNotifyType,
+            openTelegramDialogPicker, isTelegramDialogSelected, toggleTelegramDialog, removeTelegramSelectedDialog, saveTelegramDialogs, toggleTelegramNotifyType,
             browseTelegramTransferDir, selectTelegramTransferDir, telegramTransferDirUp, applyTelegramTransferDir, saveTelegramTransferSettings,
             
             // 新增移动端变量
