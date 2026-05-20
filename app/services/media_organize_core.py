@@ -2830,7 +2830,7 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
                                   episodes: list[tuple], success_count: int, total_size: int,
                                   elapsed_seconds: float, library_location: str = "") -> dict:
     source = tmdb_data.get("series_details") if "series_details" in tmdb_data else tmdb_data
-    title = source.get("name" if media_type == "tv" else "title", "")
+    title = variables.get("title") or source.get("name" if media_type == "tv" else "title", "")
     season_episode = ""
     episode_ranges = ""
     if media_type == "tv":
