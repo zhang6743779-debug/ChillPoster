@@ -144,6 +144,7 @@ def _resolve_delete_scope(payload: dict) -> dict:
     item_type = str(item.get("Type") or "")
     item_path = _normalize_path(str(item.get("Path") or ""))
     desc_path = _extract_description_item_path(str(payload.get("Description") or ""))
+    title = str(payload.get("Title") or "")
 
     if event_type == "deep.delete":
         source_path = desc_path or item_path
@@ -154,6 +155,21 @@ def _resolve_delete_scope(payload: dict) -> dict:
         if item_type in ("Season", "Series"):
             return {"kind": "folder", "item_type": item_type, "emby_path": source_path}
         return {"kind": "", "item_type": item_type, "emby_path": source_path, "message": f"不支持的 deep.delete 类型: {item_type}"}
+
+    if event_type in ("library.deleted", "item.removed"):
+        if item_type == "Movie":
+            return {"kind": "folder", "item_type": item_type, "emby_path": _dirname(item_path) if _is_video_path(item_path) else item_path}
+        if item_type == "Episode":
+            return {"kind": "file", "item_type": item_type, "emby_path": item_path}
+        if item_type == "Season":
+            return {"kind": "folder", "item_type": item_type, "emby_path": item_path}
+        if item_type == "Series":
+            # Emby may send Series summaries for partial episode deletes, e.g.
+            # "ChillFlix 从 某剧 中删除了 2 项目"; do not treat those as full-series deletes.
+            if re.search(r"从\s+.+?\s+中删除了\s+\d+\s*项目", title):
+                return {"kind": "", "item_type": item_type, "emby_path": item_path, "message": f"跳过剧集局部删除汇总: {title}"}
+            if item_path:
+                return {"kind": "folder", "item_type": item_type, "emby_path": item_path}
 
     return {"kind": "", "item_type": item_type, "emby_path": item_path, "message": f"跳过事件: {event_type}/{item_type}"}
 
