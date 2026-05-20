@@ -277,6 +277,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         const telegramLoginForm = reactive({ code: '', password: '', showPassword: false });
         const telegramDialogs = ref([]);
         const telegramDialogSearch = ref('');
+        const telegramDialogPickerOpen = ref(false);
         const telegramNotifyTesting = ref(false);
         const telegramNotifySending = ref(false);
         const telegramNotifySaving = ref(false);
@@ -309,7 +310,6 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
             if (!Array.isArray(telegramNotifyConfig.selected_dialogs)) telegramNotifyConfig.selected_dialogs = [];
             markTelegramDialogsSaved();
             await fetchTelegramStatus();
-            if (telegramStatus.authorized) await fetchTelegramDialogs();
         };
 
         const toggleTelegramNotifyType = (typeKey) => {
@@ -372,6 +372,10 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         };
 
         const sendTelegramLoginCode = async () => {
+            if (!telegramNotifyConfig.api_id || !telegramNotifyConfig.api_hash || !telegramNotifyConfig.phone) {
+                showToast('请先填写 API ID、API Hash 和手机号', 'error');
+                return;
+            }
             telegramCodeSending.value = true;
             try {
                 const res = await axios.post('/api/telegram-notify/send-code', {
@@ -400,7 +404,6 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
                     telegramLoginForm.code = '';
                     telegramLoginForm.password = '';
                     await fetchTelegramStatus();
-                    await fetchTelegramDialogs();
                 } else if (status === 'need_password') {
                     showToast(res.data.message || '请输入两步验证密码', 'info');
                 } else {
@@ -441,6 +444,13 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
                 showToast('加载群组/频道失败: ' + (e.response?.data?.detail || e.message), 'error');
             } finally {
                 telegramDialogsLoading.value = false;
+            }
+        };
+
+        const openTelegramDialogPicker = async () => {
+            telegramDialogPickerOpen.value = true;
+            if (telegramStatus.authorized && telegramDialogs.value.length === 0) {
+                await fetchTelegramDialogs();
             }
         };
 
@@ -652,6 +662,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         telegramLoginForm,
         telegramDialogs,
         telegramDialogSearch,
+        telegramDialogPickerOpen,
         selectedTelegramDialogs,
         filteredTelegramDialogs,
         telegramTransferDirBrowser,
@@ -674,6 +685,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         signInTelegramAccount,
         logoutTelegramAccount,
         fetchTelegramDialogs,
+        openTelegramDialogPicker,
         isTelegramDialogSelected,
         toggleTelegramDialog,
         removeTelegramSelectedDialog,

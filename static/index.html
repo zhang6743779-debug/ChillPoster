@@ -2927,10 +2927,6 @@
                             <div class="card mb-15">
                                 <div class="card-header">
                                     <div class="card-title-l"><i class="fa-solid fa-user-check icon-brand-telegram-alt"></i> 账号监听接入</div>
-                                    <label class="ios-switch" title="使用Telegram账号监听已选择的群组和频道">
-                                        <input type="checkbox" v-model="telegramNotifyConfig.account_monitor_enabled">
-                                        <span class="ios-slider"></span>
-                                    </label>
                                 </div>
                                 <div class="card-body">
                                     <div class="status-badge mb-12">
@@ -2989,18 +2985,15 @@
                                     <div class="hint notify-hint-box">
                                         <i class="fa-solid fa-info-circle"></i> Telegram 使用全局代理设置，请在「基本配置」中配置代理
                                     </div>
-                                    <div class="form-actions-end">
+                                    <div class="form-actions-end telegram-account-actions">
                                         <button class="btn btn-ghost" @click="sendTelegramLoginCode" :disabled="telegramCodeSending">
                                             <i class="fa-solid" :class="telegramCodeSending ? 'fa-spinner fa-spin' : 'fa-paper-plane'"></i> 发送验证码
                                         </button>
-                                        <button class="btn btn-ghost" @click="signInTelegramAccount" :disabled="telegramSigningIn">
+                                        <button class="btn btn-primary" @click="signInTelegramAccount" :disabled="telegramSigningIn">
                                             <i class="fa-solid" :class="telegramSigningIn ? 'fa-spinner fa-spin' : 'fa-right-to-bracket'"></i> 登录
                                         </button>
-                                        <button class="btn btn-ghost" @click="logoutTelegramAccount" :disabled="telegramLoggingOut || !telegramStatus.authorized">
-                                            <i class="fa-solid" :class="telegramLoggingOut ? 'fa-spinner fa-spin' : 'fa-right-from-bracket'"></i> 退出
-                                        </button>
-                                        <button class="btn btn-primary" @click="saveTelegramNotifyConfig" :disabled="telegramNotifySaving">
-                                            <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
+                                        <button v-if="telegramStatus.authorized" class="btn btn-ghost" @click="logoutTelegramAccount" :disabled="telegramLoggingOut">
+                                            <i class="fa-solid" :class="telegramLoggingOut ? 'fa-spinner fa-spin' : 'fa-right-from-bracket'"></i> 退出登录
                                         </button>
                                     </div>
                                 </div>
@@ -3016,9 +3009,13 @@
                                         <span class="hint" :class="{ 'text-warning': telegramDialogsDirty }">
                                             {{ telegramDialogsDirty ? '有未保存更改' : '已保存' }} · 已选择 {{ telegramNotifyConfig.selected_dialogs.length }} 个目标
                                         </span>
-                                        <button class="btn btn-primary btn-sm" @click="saveTelegramDialogs('监听目标已保存')" :disabled="telegramDialogsSaving">
-                                            <i class="fa-solid" :class="telegramDialogsSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存监听目标
-                                        </button>
+                                        <label class="telegram-monitor-switch" title="使用 Telegram 账号监听已选择的群组和频道">
+                                            <span>{{ telegramNotifyConfig.account_monitor_enabled ? '监听开启' : '监听关闭' }}</span>
+                                            <span class="ios-switch">
+                                                <input type="checkbox" v-model="telegramNotifyConfig.account_monitor_enabled">
+                                                <span class="ios-slider"></span>
+                                            </span>
+                                        </label>
                                     </div>
                                 </div>
                                 <div class="card-body">
@@ -3065,18 +3062,17 @@
                                                 {{ telegramNotifyConfig.transfer_dir_mode === 'custom' ? 'Telegram 监听到的资源会转存到这个目录' : 'Telegram 监听到的资源会使用「资源转存」里的系统转存目录' }}
                                             </div>
                                         </div>
-                                        <div>
-                                            <label><i class="fa-solid fa-magnifying-glass icon-brand-telegram-alt"></i> 筛选</label>
-                                            <input type="text" v-model="telegramDialogSearch" placeholder="搜索群组或频道">
-                                        </div>
                                     </div>
-                                    <div class="form-actions-end mb-12">
-                                        <button class="btn btn-primary" @click="saveTelegramTransferSettings" :disabled="telegramNotifySaving">
-                                            <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存目录设置
-                                        </button>
-                                        <button class="btn btn-ghost" @click="fetchTelegramDialogs" :disabled="telegramDialogsLoading || !telegramStatus.authorized">
-                                            <i class="fa-solid" :class="telegramDialogsLoading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新列表
-                                        </button>
+                                    <div class="telegram-monitor-actions mb-12">
+                                        <span class="hint">保存会同时更新监听目标、开关和转存目录</span>
+                                        <div class="telegram-monitor-actions-right">
+                                            <button class="btn btn-ghost" @click="openTelegramDialogPicker" :disabled="!telegramStatus.authorized">
+                                                <i class="fa-solid fa-list-check"></i> 选择目标
+                                            </button>
+                                            <button class="btn btn-primary" @click="saveTelegramTransferSettings" :disabled="telegramNotifySaving">
+                                                <i class="fa-solid" :class="telegramNotifySaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存监听设置
+                                            </button>
+                                        </div>
                                     </div>
                                     <div class="telegram-selected-panel mb-12">
                                         <div class="telegram-selected-head">
@@ -3106,10 +3102,30 @@
                                             </button>
                                         </div>
                                     </div>
-                                    <div v-if="telegramDialogs.length === 0" class="empty-state-card">
+                                </div>
+                            </div>
+                        </div>
+                        <div v-if="telegramDialogPickerOpen" class="modal-mask modal-mask-elevated">
+                            <div class="modal-container telegram-dialog-picker-modal">
+                                <div class="modal-header">
+                                    <div class="modal-title-text"><i class="fa-solid fa-list-check icon-brand-telegram-alt"></i> 选择监听目标</div>
+                                    <button class="icon-btn" @click="telegramDialogPickerOpen = false"><i class="fa-solid fa-xmark"></i></button>
+                                </div>
+                                <div class="modal-body telegram-dialog-picker-body">
+                                    <div class="telegram-dialog-picker-toolbar">
+                                        <div>
+                                            <label><i class="fa-solid fa-magnifying-glass icon-brand-telegram-alt"></i> 筛选</label>
+                                            <input type="text" v-model="telegramDialogSearch" placeholder="搜索群组或频道">
+                                        </div>
+                                        <button class="icon-btn telegram-refresh-btn" @click="fetchTelegramDialogs" :disabled="telegramDialogsLoading || !telegramStatus.authorized" title="刷新列表">
+                                            <i class="fa-solid" :class="telegramDialogsLoading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i>
+                                        </button>
+                                    </div>
+                                    <div v-if="telegramDialogsLoading" class="empty-state-card">正在加载群组和频道...</div>
+                                    <div v-else-if="telegramDialogs.length === 0" class="empty-state-card">
                                         {{ telegramStatus.authorized ? '暂无群组或频道' : '登录后加载群组和频道' }}
                                     </div>
-                                    <div v-else class="telegram-dialog-list">
+                                    <div v-else class="telegram-dialog-list telegram-dialog-list-modal">
                                         <label v-for="dialog in filteredTelegramDialogs" :key="dialog.id"
                                                class="telegram-dialog-item"
                                                :class="{ 'telegram-dialog-item-selected': isTelegramDialogSelected(dialog) }">
@@ -3133,6 +3149,10 @@
                                             </span>
                                         </label>
                                     </div>
+                                </div>
+                                <div class="modal-footer">
+                                    <span class="hint">已选择 {{ telegramNotifyConfig.selected_dialogs.length }} 个目标</span>
+                                    <button class="btn btn-primary" @click="telegramDialogPickerOpen = false">完成</button>
                                 </div>
                             </div>
                         </div>
