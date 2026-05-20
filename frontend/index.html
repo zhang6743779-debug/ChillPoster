@@ -1045,6 +1045,19 @@
                                     </select>
                                 </div>
 
+                                <div class="panel-note-soft mt-15">
+                                    <div class="setting-row between">
+                                        <div>
+                                            <label class="mt-0">Emby 删除同步 115</label>
+                                            <div class="input-tip">仅处理媒体深度删除事件，并且必须命中媒体库缓存中的 115 路径与 ID。</div>
+                                        </div>
+                                        <label class="ios-switch">
+                                            <input type="checkbox" v-model="webhookConfig.delete_sync_enabled">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                    </div>
+                                </div>
+
                                 <div class="form-actions-end mt-25">
                                     <button class="btn btn-primary" @click="saveWebhookConfig" :disabled="!webhookConfig.preset">
                                         <i class="fa-solid fa-save"></i> 保存配置

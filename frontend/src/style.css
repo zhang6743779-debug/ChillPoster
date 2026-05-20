@@ -4078,6 +4078,9 @@ html[data-theme="light"] .transfer-history-row:hover {
 .form-row-tight { display: flex; gap: 8px; }
 .form-row-tight > * { min-width: 0; }
 .form-row-grow { flex: 1; }
+.setting-row { display: flex; align-items: center; gap: 14px; }
+.setting-row.between { justify-content: space-between; }
+.setting-row > div:first-child { min-width: 0; }
 .color-input-row { display: flex; gap: 10px; }
 .color-swatch-input { width: 50px; padding: 0; height: 36px; }
 .color-swatch-input.compact { width: 40px; }

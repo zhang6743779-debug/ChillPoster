@@ -954,6 +954,23 @@ def get_task_item_by_id(task_key: str, item_id: str | int) -> dict | None:
         return _row_to_item(row) if row else None
 
 
+def get_task_item_by_path(task_key: str, path: str) -> dict | None:
+    task_key = str(task_key or "")
+    normalized_path = _normalize_remote_path(path).rstrip("/")
+    if not task_key or not normalized_path:
+        return None
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM media_items
+            WHERE task_key = ? AND path_norm = ?
+            LIMIT 1
+            """,
+            (task_key, normalized_path),
+        ).fetchone()
+        return _row_to_item(row) if row else None
+
+
 def remove_task_item_by_id(task_key: str, item_id: str | int, meta: dict | None = None) -> int:
     task_key = str(task_key or "")
     item_id = str(item_id or "")

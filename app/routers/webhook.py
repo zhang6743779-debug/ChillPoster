@@ -96,12 +96,20 @@ def _sync_missing_episode_stats_for_removed_item(client: EmbyClient, matched_lib
 
 @router.get("/api/webhook/config")
 def get_webhook_config():
+    default_config = {
+        "enabled": False,
+        "engine": "classic",
+        "preset": "",
+        "mode": "random",
+        "delete_sync_enabled": False,
+    }
     if os.path.exists(WEBHOOK_CONFIG_FILE):
         try:
             with open(WEBHOOK_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            return {**default_config, **(data if isinstance(data, dict) else {})}
         except: pass
-    return {"enabled": False, "engine": "classic", "preset": "", "mode": "random"}
+    return default_config
 
 @router.post("/api/webhook/config")
 def save_webhook_config(cfg: WebhookConfigModel):
@@ -141,7 +149,7 @@ async def emby_webhook_trigger(request: Request):
 
     event_type = data.get("Event", "")
     allowed_events = ["library.new", "item.added", "library.scan_complete"]
-    delete_events = ["item.removed", "library.deleted"]
+    delete_events = ["item.removed", "library.deleted", "deep.delete"]
 
     if event_type not in allowed_events and event_type not in delete_events:
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
@@ -151,6 +159,15 @@ async def emby_webhook_trigger(request: Request):
     item_path = item_data.get("Path") 
 
     if event_type in delete_events:
+        delete_sync_result = None
+        try:
+            from app.services.emby_delete_sync import sync_emby_delete_to_115
+            delete_sync_result = sync_emby_delete_to_115(data, wh_config)
+            if delete_sync_result and delete_sync_result.get("status") not in ("disabled", "skipped"):
+                logger.info(f"[Webhook] Emby删除同步115结果: {delete_sync_result}")
+        except Exception as e:
+            logger.error(f"[Webhook] Emby删除同步115失败: {e}", exc_info=True)
+
         patched = False
         servers = get_emby_configs_sync()
         for svr_idx, svr in enumerate(servers):
@@ -170,7 +187,12 @@ async def emby_webhook_trigger(request: Request):
                 patched = _sync_missing_episode_stats_for_removed_item(client, matched_lib, svr_idx, item_data, target_item_id) or patched
             except Exception as e:
                 logger.debug(f"[Webhook] 删除事件缺集统计增量处理失败: {e}")
-        return {"status": "ok", "action": "missing_episode_incremental_delete", "patched": patched}
+        return {
+            "status": "ok",
+            "action": "missing_episode_incremental_delete",
+            "patched": patched,
+            "delete_sync": delete_sync_result,
+        }
     
     if not item_path and target_item_id:
         logger.debug(f"[Webhook] payload缺少路径，准备回查: {target_item_id}")

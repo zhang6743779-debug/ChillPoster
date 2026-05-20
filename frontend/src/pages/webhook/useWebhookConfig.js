@@ -9,7 +9,8 @@ export function useWebhookConfig({ presetList, validateSelections, showToast }) 
         enabled: false,
         engine: 'classic',
         preset: '',
-        mode: 'random'
+        mode: 'random',
+        delete_sync_enabled: false
     });
     const webhookUrl = ref(window.location.origin + '/api/webhook');
 
