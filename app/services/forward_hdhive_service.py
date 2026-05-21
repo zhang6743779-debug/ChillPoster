@@ -375,6 +375,67 @@ class ForwardHDHiveService:
         filtered.sort(key=self._sort_resource_key)
         return filtered
 
+    def _append_tag(self, tags: list[str], value: Any) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        normalized = {
+            "4k": "4K",
+            "8k": "8K",
+            "1080p": "1080P",
+            "720p": "720P",
+            "2160p": "2160P",
+            "webrip": "WEBRip",
+            "web-dl": "WEB-DL",
+            "webdl": "WEB-DL",
+            "web": "WEB",
+            "hdr": "HDR",
+            "dv": "DV",
+            "h265": "H265",
+            "h.265": "H265",
+            "hevc": "HEVC",
+            "h264": "H264",
+            "h.264": "H264",
+            "avc": "AVC",
+            "remux": "REMUX",
+        }.get(text.lower(), text)
+        if normalized not in tags:
+            tags.append(normalized)
+
+    def _join_tags(self, tags: list[str]) -> str:
+        result: list[str] = []
+        for tag in tags:
+            self._append_tag(result, tag)
+        return "|".join(result)
+
+    def _resource_tags(self, item: dict[str, Any]) -> str:
+        tags: list[str] = []
+        values = item.get("video_resolution")
+        if isinstance(values, list):
+            for value in values:
+                self._append_tag(tags, value)
+        elif values:
+            self._append_tag(tags, values)
+
+        values = item.get("source")
+        if isinstance(values, list):
+            for value in values:
+                for part in re.split(r"[/,，\s]+", str(value or "")):
+                    self._append_tag(tags, part)
+        elif values:
+            for part in re.split(r"[/,，\s]+", str(values or "")):
+                self._append_tag(tags, part)
+
+        for key in ("subtitle_language", "subtitle_type"):
+            values = item.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    self._append_tag(tags, value)
+            elif values:
+                self._append_tag(tags, values)
+        self._append_tag(tags, "HDHive")
+        return self._join_tags(tags)
+
     def _describe_resource(self, item: dict[str, Any]) -> str:
         parts = []
         tag_parts = []
@@ -412,6 +473,50 @@ class ForwardHDHiveService:
         if size:
             parts.append(f"单集 {size}GB")
         return " | ".join(parts) + "\nAY|SVIP"
+
+    def _aiying_tags(self, item: dict[str, Any]) -> str:
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("category", "name", "notes")
+        )
+        tags: list[str] = []
+        patterns = [
+            (r"\b8k\b", "8K"),
+            (r"\b4k\b|uhd", "4K"),
+            (r"2160p", "2160P"),
+            (r"1080p", "1080P"),
+            (r"720p", "720P"),
+            (r"web[- ]?dl|webdl", "WEB-DL"),
+            (r"webrip", "WEBRip"),
+            (r"\bweb\b", "WEB"),
+            (r"blu[- ]?ray|bluray", "BluRay"),
+            (r"remux", "REMUX"),
+            (r"\bhdr\b", "HDR"),
+            (r"dolby vision|\bdv\b", "DV"),
+            (r"h[ .]?265", "H265"),
+            (r"hevc", "HEVC"),
+            (r"h[ .]?264", "H264"),
+            (r"\bavc\b", "AVC"),
+            (r"\baac\b", "AAC"),
+            (r"\bdts\b", "DTS"),
+            (r"atmos", "Atmos"),
+            (r"truehd", "TrueHD"),
+            (r"简中|简体", "简中"),
+            (r"繁中|繁体", "繁中"),
+            (r"简英", "简英"),
+            (r"双语", "双语"),
+            (r"国语", "国语"),
+            (r"粤语", "粤语"),
+            (r"内封", "内封"),
+            (r"外挂", "外挂"),
+            (r"特效", "特效"),
+        ]
+        for pattern, label in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                self._append_tag(tags, label)
+        self._append_tag(tags, "AY")
+        self._append_tag(tags, "SVIP")
+        return self._join_tags(tags)
 
     def filter_aiying_resources(
         self,
@@ -470,6 +575,7 @@ class ForwardHDHiveService:
                 "title": title,
                 "name": title,
                 "description": self._describe_aiying_resource(item),
+                "genreTitle": self._aiying_tags(item),
                 "url": play_url,
                 "videoUrl": play_url,
                 "link": play_url,
@@ -523,6 +629,7 @@ class ForwardHDHiveService:
                 "title": title,
                 "name": title,
                 "description": self._describe_resource(item),
+                "genreTitle": self._resource_tags(item),
                 "url": play_url,
                 "videoUrl": play_url,
                 "link": play_url,
