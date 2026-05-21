@@ -109,6 +109,7 @@ class TransferService:
         source: str = "manual",
         target_dir: str | None = None,
         source_meta: dict | None = None,
+        share_file_id: str | int | None = None,
     ) -> dict:
         """
         处理单条资源链接。
@@ -120,7 +121,13 @@ class TransferService:
         if self._is_ed2k_link(link):
             results = await self._process_ed2k_links([link], source=source, target_dir=target_dir, source_meta=source_meta)
             return results[0]
-        return await self._process_115_share_link(link, source=source, target_dir=target_dir, source_meta=source_meta)
+        return await self._process_115_share_link(
+            link,
+            source=source,
+            target_dir=target_dir,
+            source_meta=source_meta,
+            share_file_id=share_file_id,
+        )
 
     async def _process_115_share_link(
         self,
@@ -128,6 +135,7 @@ class TransferService:
         source: str = "manual",
         target_dir: str | None = None,
         source_meta: dict | None = None,
+        share_file_id: str | int | None = None,
     ) -> dict:
         try:
             payload = share_extract_payload(link)
@@ -162,13 +170,14 @@ class TransferService:
             return result
 
         try:
+            receive_file_id = str(share_file_id or "0").strip() or "0"
             resp = await run_115_write_request(
                 client,
                 "接收115分享",
                 lambda write_client: write_client.share_receive({
                     "share_code": share_code,
                     "receive_code": receive_code,
-                    "file_id": "0",
+                    "file_id": receive_file_id,
                     "cid": cid,
                 }),
                 raise_on_state_false=False,
@@ -211,6 +220,8 @@ class TransferService:
                 "name": name,
                 "link": link,
                 "share_code": share_code,
+                "share_file_id": str(share_file_id or ""),
+                "target_cid": str(cid),
                 "link_type": "115",
                 "message": f"转存成功 (115)\n名称: {name}\n链接: {link}",
             }
@@ -221,6 +232,8 @@ class TransferService:
                 "name": "",
                 "link": link,
                 "share_code": share_code,
+                "share_file_id": str(share_file_id or ""),
+                "target_cid": str(cid),
                 "link_type": "115",
                 "message": f"转存失败 (115)\n链接: {link}\n原因: {error_msg or '未知错误'}",
             }

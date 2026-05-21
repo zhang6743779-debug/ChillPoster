@@ -9,11 +9,13 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import HTTPException, Request
+from p115client.util import share_extract_payload
 
+from app.routers.config_302 import get_config_302
 from app.services.drive115_service import drive115_service
 from app.services.hdhive_openapi_client import HDHiveAPIError, HDHiveOpenClient
 from app.services.hdhive_service import hdhive_service
-from app.services.media_organize_115_ops import _get_115_fs
+from app.services.media_organize_115_ops import _get_115_fs, run_115_write_request
 from app.services.media_organize_state import VIDEO_EXTS
 from app.services.transfer_service import transfer_service
 from core.logger import logger
@@ -29,6 +31,8 @@ def _default_config() -> dict[str, Any]:
         "widget_token": uuid.uuid4().hex,
         "public_base_url": "",
         "max_unlock_points": 4,
+        "library_enabled": True,
+        "transfer_mode": "series",
     }
 
 
@@ -97,6 +101,8 @@ class ForwardHDHiveService:
             "account_id": str(self.config.get("account_id") or ""),
             "public_base_url": str(self.config.get("public_base_url") or ""),
             "max_unlock_points": int(self.config.get("max_unlock_points") or 0),
+            "library_enabled": bool(self.config.get("library_enabled", True)),
+            "transfer_mode": str(self.config.get("transfer_mode") or "series"),
             "widget_path": self.get_widget_path(),
             "accounts": self.get_account_options(),
             "widget_url": self.get_widget_url(request),
@@ -108,6 +114,8 @@ class ForwardHDHiveService:
             "account_id",
             "public_base_url",
             "max_unlock_points",
+            "library_enabled",
+            "transfer_mode",
         }
         for key in allowed:
             if key not in payload:
@@ -122,6 +130,12 @@ class ForwardHDHiveService:
                 value = max(0, int(value))
             if key == "public_base_url":
                 value = str(value or "").strip().rstrip("/")
+            if key == "library_enabled":
+                value = bool(value)
+            if key == "transfer_mode":
+                value = str(value or "series").strip().lower()
+                if value not in {"series", "episode"}:
+                    value = "series"
             self.config[key] = value
         if not self.config.get("widget_token"):
             self.config["widget_token"] = uuid.uuid4().hex
@@ -160,6 +174,10 @@ class ForwardHDHiveService:
             return False
         max_points = int(self.config.get("max_unlock_points") or 0)
         return self._resource_points(item) <= max_points
+
+    def _is_already_transferred_message(self, message: str) -> bool:
+        text = str(message or "")
+        return any(pattern in text for pattern in ("已经转存过", "文件已接收", "无需重复接收"))
 
     def _sort_resource_key(self, item: dict[str, Any]) -> tuple[int, int, str]:
         resolution = " ".join(str(v) for v in (item.get("video_resolution") or []))
@@ -309,6 +327,167 @@ class ForwardHDHiveService:
                 pass
         return 0
 
+    def _share_item_id(self, item: dict[str, Any]) -> str:
+        return str(item.get("fid") or item.get("file_id") or item.get("id") or item.get("cid") or "")
+
+    def _share_item_name(self, item: dict[str, Any]) -> str:
+        return str(item.get("n") or item.get("fn") or item.get("file_name") or item.get("name") or "")
+
+    def _share_item_size(self, item: dict[str, Any]) -> int:
+        for key in ("s", "size", "file_size"):
+            try:
+                return int(item.get(key) or 0)
+            except Exception:
+                pass
+        return 0
+
+    def _share_item_is_dir(self, item: dict[str, Any]) -> bool:
+        if item.get("is_dir") is True or item.get("is_directory") is True:
+            return True
+        if str(item.get("fc") or "") == "0":
+            return True
+        if item.get("cid") and not item.get("fid"):
+            return True
+        icon = str(item.get("ico") or item.get("icon") or "").lower()
+        return icon in {"folder", "dir"}
+
+    def _extract_share_items(self, resp: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(resp, dict):
+            return []
+        data = resp.get("data")
+        if isinstance(data, list):
+            return [dict(item) for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            for key in ("list", "items", "data"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return [dict(item) for item in value if isinstance(item, dict)]
+        for key in ("list", "items"):
+            value = resp.get(key)
+            if isinstance(value, list):
+                return [dict(item) for item in value if isinstance(item, dict)]
+        return []
+
+    async def _list_share_children(
+        self,
+        client,
+        *,
+        share_code: str,
+        receive_code: str,
+        cid: str | int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            resp = await run_115_write_request(
+                client,
+                "查询115分享文件",
+                lambda write_client: write_client.share_snap_app({
+                    "share_code": share_code,
+                    "receive_code": receive_code,
+                    "cid": cid,
+                    "limit": 1000,
+                    "offset": 0,
+                }),
+                raise_on_state_false=False,
+            )
+            return self._extract_share_items(resp)
+        except Exception as e:
+            logger.warning(f"[ForwardHDHive] 查询 115 分享文件失败 cid={cid}: {e}")
+            return []
+
+    async def _collect_share_video_candidates(
+        self,
+        client,
+        *,
+        share_code: str,
+        receive_code: str,
+        root_cid: str | int = 0,
+        max_depth: int = 4,
+        max_nodes: int = 600,
+    ) -> list[dict[str, Any]]:
+        queue: list[tuple[str | int, int, str]] = [(root_cid, 0, "")]
+        videos: list[dict[str, Any]] = []
+        visited = 0
+        while queue and visited < max_nodes:
+            cid, depth, path = queue.pop(0)
+            visited += 1
+            for child in await self._list_share_children(
+                client,
+                share_code=share_code,
+                receive_code=receive_code,
+                cid=cid,
+            ):
+                name = self._share_item_name(child)
+                child_path = f"{path}/{name}" if path else name
+                item_id = self._share_item_id(child)
+                if self._share_item_is_dir(child):
+                    if item_id and depth < max_depth:
+                        queue.append((item_id, depth + 1, child_path))
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext in VIDEO_EXTS and item_id:
+                    videos.append({
+                        "id": item_id,
+                        "name": name,
+                        "path": child_path,
+                        "size": self._share_item_size(child),
+                        "depth": depth,
+                    })
+        return videos
+
+    async def _select_share_file_id(
+        self,
+        client,
+        share_url: str,
+        *,
+        media_type: str,
+        season: int | None,
+        episode: int | None,
+    ) -> dict[str, Any] | None:
+        try:
+            payload = share_extract_payload(share_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"115 分享链接解析失败: {e}") from e
+        share_code = str(payload.get("share_code") or "")
+        receive_code = str(payload.get("receive_code") or "")
+        candidates = await self._collect_share_video_candidates(
+            client,
+            share_code=share_code,
+            receive_code=receive_code,
+        )
+        if not candidates:
+            return None
+
+        is_tv = str(media_type or "").lower() in {"tv", "series"}
+
+        def _rank(item: dict[str, Any]) -> tuple[int, int, int]:
+            ep_score = self._episode_match_score(item.get("name", ""), season, episode) if is_tv else 0
+            return (ep_score, int(item.get("size") or 0), -int(item.get("depth") or 0))
+
+        candidates.sort(key=_rank, reverse=True)
+        picked = candidates[0]
+        if is_tv and episode and self._episode_match_score(picked.get("name", ""), season, episode) <= 0:
+            raise HTTPException(status_code=404, detail=f"分享中未匹配到 S{season or 1:02d}E{episode:02d} 对应视频")
+        return picked
+
+    async def _get_instant_transfer_dir(self) -> str:
+        cfg = await get_config_302()
+        drives = cfg.get("drives", []) if isinstance(cfg, dict) else []
+        if isinstance(drives, list) and drives:
+            upload_dir = str(drives[0].get("upload_dir") or "").strip()
+            if upload_dir:
+                return upload_dir
+        topology = cfg.get("standard_topology", {}) if isinstance(cfg, dict) else {}
+        if isinstance(topology, dict):
+            instant_dir = str(topology.get("instant_dir") or "").strip()
+            if instant_dir:
+                return instant_dir
+        raise HTTPException(status_code=400, detail="未配置 115 秒传目录，请先在 302/115 配置中设置")
+
+    async def _get_forward_target_dir(self) -> str | None:
+        if bool(self.config.get("library_enabled", True)):
+            return None
+        return await self._get_instant_transfer_dir()
+
     def _episode_match_score(self, name: str, season: int | None, episode: int | None) -> int:
         if not episode:
             return 0
@@ -456,31 +635,120 @@ class ForwardHDHiveService:
         if not share_url:
             raise HTTPException(status_code=502, detail="影巢解锁成功但未返回资源链接")
 
-        client, target_cid, client_error = await transfer_service._get_transfer_context()
+        target_dir = await self._get_forward_target_dir()
+        client, target_cid, client_error = await transfer_service._get_transfer_context(target_dir=target_dir)
         if not client:
             raise HTTPException(status_code=400, detail=client_error or "115 转存客户端未就绪")
+
+        transfer_mode = str(self.config.get("transfer_mode") or "series").strip().lower()
+        if transfer_mode not in {"series", "episode"}:
+            transfer_mode = "series"
+        selected_share_item: dict[str, Any] | None = None
+        share_file_id: str | None = None
+        if transfer_mode == "episode":
+            selected_share_item = await self._select_share_file_id(
+                client,
+                share_url,
+                media_type=media_type,
+                season=season,
+                episode=episode,
+            )
+            if not selected_share_item or not selected_share_item.get("id"):
+                raise HTTPException(status_code=404, detail="分享中未找到可转存的视频文件")
+            share_file_id = str(selected_share_item["id"])
+            logger.info(f"[ForwardHDHive] 单集转存命中: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
 
         transfer_result = await transfer_service.process_link(
             share_url,
             source="forward_hdhive",
+            target_dir=target_dir,
+            share_file_id=share_file_id,
             source_meta={
                 "source_key": "forward_hdhive",
                 "source_label": "Forward 影巢",
                 "source_kind": "forward",
-                "source_detail": f"{media_type}:{tmdb_id}",
+                "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:{transfer_mode}",
                 "source_id": slug,
             },
         )
-        if not transfer_result.get("success"):
+        already_transferred = self._is_already_transferred_message(transfer_result.get("message", ""))
+        if not transfer_result.get("success") and not already_transferred:
             raise HTTPException(status_code=502, detail=transfer_result.get("message") or "115 转存失败")
+        if already_transferred:
+            logger.info(f"[ForwardHDHive] 分享已在转存目录中，跳过重复转存: slug={slug}")
 
         picked = await self._locate_video_pickcode(
             client,
             target_cid,
-            transfer_name=transfer_result.get("name", ""),
+            transfer_name=(
+                selected_share_item.get("name", "")
+                if selected_share_item
+                else (transfer_result.get("name", "") if transfer_result.get("success") else "")
+            ),
             season=season,
             episode=episode,
         )
+        if not picked and already_transferred:
+            alternate_target_dirs: list[str | None] = [None]
+            try:
+                instant_dir = await self._get_instant_transfer_dir()
+                alternate_target_dirs.append(instant_dir)
+            except HTTPException:
+                pass
+            seen_cids = {str(target_cid)}
+            for alternate_dir in alternate_target_dirs:
+                alt_client, alt_cid, _ = await transfer_service._get_transfer_context(target_dir=alternate_dir)
+                if not alt_client or str(alt_cid) in seen_cids:
+                    continue
+                seen_cids.add(str(alt_cid))
+                picked = await self._locate_video_pickcode(
+                    alt_client,
+                    alt_cid,
+                    transfer_name=(
+                        selected_share_item.get("name", "")
+                        if selected_share_item
+                        else (transfer_result.get("name", "") if transfer_result.get("success") else "")
+                    ),
+                    season=season,
+                    episode=episode,
+                )
+                if picked:
+                    client = alt_client
+                    logger.info(f"[ForwardHDHive] 重复转存资源在备用目录中命中: cid={alt_cid} name={picked.get('name')}")
+                    break
+        if not picked and already_transferred and transfer_mode == "series":
+            selected_share_item = await self._select_share_file_id(
+                client,
+                share_url,
+                media_type=media_type,
+                season=season,
+                episode=episode,
+            )
+            if selected_share_item and selected_share_item.get("id"):
+                share_file_id = str(selected_share_item["id"])
+                logger.info(f"[ForwardHDHive] 整剧重复但目标目录缺失，降级接收当前单集: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
+                transfer_result = await transfer_service.process_link(
+                    share_url,
+                    source="forward_hdhive",
+                    target_dir=target_dir,
+                    share_file_id=share_file_id,
+                    source_meta={
+                        "source_key": "forward_hdhive",
+                        "source_label": "Forward 影巢",
+                        "source_kind": "forward",
+                        "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:series_fallback_episode",
+                        "source_id": slug,
+                    },
+                )
+                if not transfer_result.get("success") and not self._is_already_transferred_message(transfer_result.get("message", "")):
+                    raise HTTPException(status_code=502, detail=transfer_result.get("message") or "115 单集补转失败")
+                picked = await self._locate_video_pickcode(
+                    client,
+                    target_cid,
+                    transfer_name=selected_share_item.get("name", ""),
+                    season=season,
+                    episode=episode,
+                )
         if not picked or not picked.get("pickcode"):
             raise HTTPException(status_code=404, detail="转存成功，但未在转存目录定位到可播放视频")
 

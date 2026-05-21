@@ -3541,6 +3541,22 @@
                                             <input type="number" min="0" step="1" v-model.number="forwardHdhiveConfig.max_unlock_points">
                                             <div class="input-tip">资源查询和点播都会二次校验，超过此积分的资源不会返回，也不会被解锁。</div>
                                         </div>
+                                        <div>
+                                            <label>是否入库</label>
+                                            <select v-model="forwardHdhiveConfig.library_enabled">
+                                                <option :value="true">开启：转存到转存目录</option>
+                                                <option :value="false">关闭：转存到秒传目录</option>
+                                            </select>
+                                            <div class="input-tip">关闭时用于临时点播，资源落到 115 秒传目录，尽量不进入自动整理链路。</div>
+                                        </div>
+                                        <div>
+                                            <label>转存模式</label>
+                                            <select v-model="forwardHdhiveConfig.transfer_mode">
+                                                <option value="series">转存整部剧/整个资源</option>
+                                                <option value="episode">只转存当前单集</option>
+                                            </select>
+                                            <div class="input-tip">整部模式会转存分享根目录并按季集定位播放；单集模式会先匹配分享内对应集再转存。</div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

@@ -16,6 +16,8 @@ class ForwardConfigRequest(BaseModel):
     account_id: str = ""
     public_base_url: str = ""
     max_unlock_points: int = 4
+    library_enabled: bool = True
+    transfer_mode: str = "series"
 
 
 class ResourceTestRequest(BaseModel):

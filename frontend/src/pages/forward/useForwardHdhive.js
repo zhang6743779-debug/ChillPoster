@@ -7,6 +7,8 @@ export function useForwardHdhive({ showToast }) {
         account_id: '',
         public_base_url: '',
         max_unlock_points: 4,
+        library_enabled: true,
+        transfer_mode: 'series',
         accounts: [],
         widget_path: '',
         widget_url: ''
@@ -50,7 +52,9 @@ export function useForwardHdhive({ showToast }) {
                 enabled: !!forwardHdhiveConfig.enabled,
                 account_id: forwardHdhiveConfig.account_id || '',
                 public_base_url: normalizeBaseUrl(forwardHdhiveConfig.public_base_url),
-                max_unlock_points: Number(forwardHdhiveConfig.max_unlock_points || 0)
+                max_unlock_points: Number(forwardHdhiveConfig.max_unlock_points || 0),
+                library_enabled: !!forwardHdhiveConfig.library_enabled,
+                transfer_mode: forwardHdhiveConfig.transfer_mode || 'series'
             };
             const res = await axios.post('/api/forward/config', payload);
             Object.assign(forwardHdhiveConfig, res.data || {});
