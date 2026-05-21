@@ -527,9 +527,10 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     const seasonNumber = Number(season);
                     const episodeList = normalizeEpisodeList(episodes);
                     const tmdbSeason = tmdbSeasonMap.get(seasonNumber);
+                    const hasExplicitExtra = Array.isArray(tmdbSeason?.extraEpisodes);
                     const explicitExtra = normalizeEpisodeList(tmdbSeason?.extraEpisodes);
                     const extraEpisodes = extraSeasonMap.get(seasonNumber)
-                        || (explicitExtra.length ? explicitExtra : (tmdbSeason
+                        || (hasExplicitExtra ? explicitExtra : (tmdbSeason
                             ? episodeList.filter(ep => ep > (Number(tmdbSeason.total) || 0))
                             : episodeList));
                     return {
@@ -552,7 +553,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                         total,
                         present: Number(season.present) || 0,
                         missing: Number(season.missing) || 0,
-                        episodes: Array.from({ length: total }, (_, idx) => idx + 1),
+                        episodes: normalizeEpisodeList(season.episodeNumbers).length
+                            ? normalizeEpisodeList(season.episodeNumbers)
+                            : Array.from({ length: total }, (_, idx) => idx + 1),
                         presentEpisodes: normalizeEpisodeList(season.presentEpisodes),
                         missingEpisodes: normalizeEpisodeList(season.missingEpisodes),
                         airedMissingEpisodes: normalizeEpisodeList(season.airedMissingEpisodes),
