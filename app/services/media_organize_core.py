@@ -2619,6 +2619,7 @@ async def _run_organize_async(run_id: str, req):
             await _flush_pending_duplicate_moves()
             _raise_if_organize_cancelled(run_id)
 
+        seen_source_sha1s: set[str] = set()
         for vf in normal_video_items:
             file_name = vf.get("name", "")
             ext = os.path.splitext(file_name)[1] or ".mkv"
@@ -2660,6 +2661,44 @@ async def _run_organize_async(run_id: str, req):
             logger.info(
                 f"[MediaOrganize] 解析成功 -> {file_name} | 标题:{parsed.get('title','')} 年份:{parsed.get('year','')} 类型:{parsed.get('media_type','')} 季:{parsed.get('season')} 集:{parsed.get('episode')}"
             )
+            file_sha1 = str(vf.get("sha1", "") or "").upper().strip()
+            if file_sha1:
+                if file_sha1 in seen_source_sha1s:
+                    logger.info(f"[MediaOrganize] 源目录SHA1重复，跳过整理: {file_name}")
+                    results.append({
+                        "file": file_name,
+                        "status": "skipped",
+                        "message": "源目录已存在相同文件（SHA1 匹配），跳过",
+                    })
+                    if dedup_dir_cid:
+                        pending_duplicate_moves.append({
+                            "vf": vf,
+                            "target_cid": str(dedup_dir_cid),
+                            "file_op": {
+                                "id": vf.get("id", 0),
+                                "fid": vf.get("id", 0),
+                                "name": file_name,
+                                "old_name": file_name,
+                                "new_name": file_name,
+                                "path": vf.get("path", ""),
+                                "source_path": vf.get("path", ""),
+                                "pickcode": vf.get("pickcode", ""),
+                            },
+                        })
+                        if len(pending_duplicate_moves) >= duplicate_batch_size:
+                            await _flush_pending_duplicate_moves()
+                    _update_streaming_progress(
+                        run_id,
+                        scanned_video_count=scanned_video_count,
+                        processed_result_count=len(results),
+                        success_count=success_count,
+                        error_count=_count_error_results(results),
+                        strm_generated_count=strm_generated_count,
+                        scan_complete=False,
+                    )
+                    _raise_if_organize_cancelled(run_id)
+                    continue
+                seen_source_sha1s.add(file_sha1)
             key = parsed["group_key"]
             grouped_items_by_key.setdefault(key, []).append((vf, parsed, ext))
             _update_streaming_progress(
@@ -2671,6 +2710,10 @@ async def _run_organize_async(run_id: str, req):
                 strm_generated_count=strm_generated_count,
                 scan_complete=False,
             )
+            _raise_if_organize_cancelled(run_id)
+
+        if pending_duplicate_moves:
+            await _flush_pending_duplicate_moves()
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
