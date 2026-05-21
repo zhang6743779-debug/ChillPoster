@@ -100,7 +100,7 @@ async def widget_js(request: Request, token: str = Query("")):
 var ChillPosterForward = {json.dumps(payload, ensure_ascii=False)};
 var WidgetMetadata = {{
     id: "chillposter.forward.hdhive",
-    title: "ChillPoster 影巢",
+    title: "ChillPoster",
     icon: "https://hdhive.com/favicon.ico",
     version: "1.0.0",
     requiredVersion: "0.0.1",
