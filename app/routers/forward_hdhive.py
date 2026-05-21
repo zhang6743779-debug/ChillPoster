@@ -6,6 +6,8 @@ from fastapi.responses import RedirectResponse, Response
 from pydantic import BaseModel
 
 from app.services.forward_hdhive_service import forward_hdhive_service
+from app.services.telegram_service import telegram_notify_service
+from core.logger import logger
 
 
 router = APIRouter(prefix="/api/forward", tags=["ForwardHDHive"])
@@ -15,9 +17,13 @@ class ForwardConfigRequest(BaseModel):
     enabled: bool = True
     account_id: str = ""
     public_base_url: str = ""
+    hdhive_enabled: bool = True
     max_unlock_points: int = 4
     library_enabled: bool = True
     transfer_mode: str = "series"
+    aiying_enabled: bool = False
+    aiying_tg_id: str = ""
+    aiying_chill_token: str = ""
 
 
 class ResourceTestRequest(BaseModel):
@@ -27,13 +33,26 @@ class ResourceTestRequest(BaseModel):
 
 @router.get("/config")
 async def get_config(request: Request):
-    return forward_hdhive_service.get_config(request)
+    return forward_hdhive_service.get_config(request, telegram_user_id=await _telegram_user_id())
 
 
 @router.post("/config")
 async def save_config(req: ForwardConfigRequest, request: Request):
     forward_hdhive_service.update_config(req.model_dump())
-    return forward_hdhive_service.get_config(request)
+    return forward_hdhive_service.get_config(request, telegram_user_id=await _telegram_user_id())
+
+
+@router.post("/token/refresh")
+async def refresh_widget_token(request: Request):
+    forward_hdhive_service.refresh_widget_token()
+    return forward_hdhive_service.get_config(request, telegram_user_id=await _telegram_user_id())
+
+
+async def _telegram_user_id() -> str:
+    cached = getattr(telegram_notify_service, "_account_user_cache", None)
+    if isinstance(cached, dict) and cached.get("id"):
+        return str(cached.get("id") or "")
+    return ""
 
 
 @router.post("/test_resources")
@@ -41,12 +60,38 @@ async def test_resources(req: ResourceTestRequest):
     tmdb_id = str(req.tmdb_id or "").strip()
     if not tmdb_id:
         raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
-    resources = forward_hdhive_service.fetch_resources(req.type, tmdb_id, use_cache=False)
-    filtered = forward_hdhive_service.filter_resources(resources)
+    errors: dict[str, str] = {}
+    resources: list[dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
+    if forward_hdhive_service.config.get("hdhive_enabled", True):
+        try:
+            resources = forward_hdhive_service.fetch_resources(req.type, tmdb_id, use_cache=False)
+            filtered = forward_hdhive_service.filter_resources(resources)
+        except HTTPException as e:
+            errors["hdhive"] = str(e.detail)
+    aiying_resources: list[dict[str, Any]] = []
+    aiying_filtered: list[dict[str, Any]] = []
+    try:
+        aiying_resources = await forward_hdhive_service.fetch_aiying_resources(req.type, tmdb_id, use_cache=False)
+        aiying_filtered = forward_hdhive_service.filter_aiying_resources(aiying_resources, media_type=req.type)
+    except HTTPException as e:
+        errors["aiying"] = str(e.detail)
     return {
         "total": len(resources),
         "filtered": len(filtered),
         "items": filtered,
+        "aiying_total": len(aiying_resources),
+        "aiying_filtered": len(aiying_filtered),
+        "aiying_items": aiying_filtered,
+        "errors": errors,
+        "aiying_stats": {
+            "success_count": int(forward_hdhive_service.config.get("aiying_success_count") or 0),
+            "today_used": int(forward_hdhive_service.config.get("aiying_today_used") or 0),
+            "last_times": forward_hdhive_service.config.get("aiying_last_times"),
+            "last_message": str(forward_hdhive_service.config.get("aiying_last_message") or ""),
+            "last_result_count": int(forward_hdhive_service.config.get("aiying_last_result_count") or 0),
+            "last_checked_at": str(forward_hdhive_service.config.get("aiying_last_checked_at") or ""),
+        },
     }
 
 
@@ -64,29 +109,56 @@ async def load_forward_resources(
     if not tmdb_id:
         return []
     media_type = "tv" if str(params.get("type") or "").lower() in {"tv", "series"} else "movie"
-    resources = forward_hdhive_service.fetch_resources(media_type, tmdb_id)
-    return forward_hdhive_service.build_forward_resources(request, params, resources)
+    result: list[dict[str, Any]] = []
+    if forward_hdhive_service.config.get("hdhive_enabled", True):
+        try:
+            resources = forward_hdhive_service.fetch_resources(media_type, tmdb_id)
+            result.extend(forward_hdhive_service.build_forward_resources(request, params, resources))
+        except HTTPException as e:
+            logger.warning(f"[Forward] 影巢查询失败: {getattr(e, 'detail', str(e))}")
+    try:
+        aiying_resources = await forward_hdhive_service.fetch_aiying_resources(media_type, tmdb_id)
+        result.extend(forward_hdhive_service.build_aiying_forward_resources(request, params, aiying_resources))
+    except HTTPException as e:
+        logger.warning(f"[Forward] 爱影查询失败: {getattr(e, 'detail', str(e))}")
+    return result
 
 
 @router.get("/play")
 async def play_forward_resource(
     request: Request,
     token: str = Query(""),
-    slug: str = Query(...),
+    slug: Optional[str] = Query(None),
+    source: str = Query("hdhive"),
+    resource_id: Optional[str] = Query(None),
     type: str = Query("movie"),
     tmdb_id: str = Query(""),
     season: Optional[int] = Query(None),
     episode: Optional[int] = Query(None),
 ):
     forward_hdhive_service.verify_token(token)
-    direct_url = await forward_hdhive_service.play_resource(
-        request,
-        slug=slug,
-        media_type=type,
-        tmdb_id=tmdb_id,
-        season=season,
-        episode=episode,
-    )
+    if str(source or "").lower() == "aiying":
+        if not resource_id:
+            raise HTTPException(status_code=400, detail="缺少爱影资源 ID")
+        direct_url = await forward_hdhive_service.play_aiying_resource(
+            request,
+            resource_id=resource_id,
+            media_type=type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+        )
+    else:
+        if not slug:
+            raise HTTPException(status_code=400, detail="缺少影巢资源 slug")
+        direct_url = await forward_hdhive_service.play_resource(
+            request,
+            slug=slug,
+            media_type=type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+        )
     return RedirectResponse(direct_url, status_code=302)
 
 
@@ -106,13 +178,13 @@ var WidgetMetadata = {{
     icon: "https://hdhive.com/favicon.ico",
     version: "1.0.0",
     requiredVersion: "0.0.1",
-    description: "通过 ChillPoster 查询影巢资源，并使用 115 Cookie 获取直链播放",
+    description: "通过 ChillPoster 查询影巢/爱影资源，并使用 115 Cookie 获取直链播放",
     author: "ChillPoster",
     site: "https://github.com/Chill-lucky/ChillPoster",
     modules: [
       {{
         id: "loadResource",
-        title: "影巢资源",
+        title: "ChillPoster 资源",
         functionName: "loadResource",
         type: "stream",
         params: []

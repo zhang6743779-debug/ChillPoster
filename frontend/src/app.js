@@ -315,6 +315,7 @@ createApp({
             fetchForwardHdhiveConfig,
             saveForwardHdhiveConfig,
             copyForwardHdhiveWidgetUrl,
+            refreshForwardHdhiveToken,
             testForwardHdhiveResources,
         } = useForwardHdhive({ showToast });
 
@@ -954,7 +955,7 @@ createApp({
                 'media_organize': '媒体整理', 'media_organize_rules': '二级分类规则', 'strm_generate': 'STRM 生成',
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
-                'forward_hdhive': 'Forward 影巢',
+                'forward_hdhive': 'Forward模块',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
                 'telegram_monitor': 'Telegram 监听',
                 'config_telegram': '电报配置', 'config_yingchao': '影巢配置',
@@ -1803,11 +1804,12 @@ createApp({
             refreshHdhiveUserInfo,
             refreshHdhiveUsage,
 
-            // [新增] Forward 影巢模块
+            // [新增] Forward 模块
             forwardHdhiveConfig, forwardHdhiveSaving, forwardHdhiveTesting,
             forwardHdhiveTestForm, forwardHdhiveTestResult,
             fetchForwardHdhiveConfig, saveForwardHdhiveConfig,
             copyForwardHdhiveWidgetUrl,
+            refreshForwardHdhiveToken,
             testForwardHdhiveResources,
 
             // [新增] 微信通知配置

@@ -26,7 +26,7 @@ export const toolboxItems = [
     { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' },
     { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
     { id: 'drive115_upload', icon: 'fa-cloud-arrow-up', label: '115秒传/上传', group: '工具箱' },
-    { id: 'forward_hdhive', icon: 'fa-tower-broadcast', label: 'Forward影巢', group: '工具箱' },
+    { id: 'forward_hdhive', icon: 'fa-tower-broadcast', label: 'Forward模块', group: '工具箱' },
     { id: 'config_yingchao', icon: 'fa-film', label: '影巢配置', group: '工具箱' },
     { id: 'webhook', icon: 'fa-bolt-lightning', label: 'Webhook', group: '工具箱' },
 ];

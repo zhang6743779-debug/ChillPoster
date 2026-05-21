@@ -71,7 +71,7 @@
                         <i class="fa-solid fa-bolt-lightning"></i> Webhook
                     </div>
                     <div class="nav-item" :class="{active: tab === 'forward_hdhive'}" @click="tab = 'forward_hdhive'">
-                        <i class="fa-solid fa-tower-broadcast"></i> Forward 影巢
+                        <i class="fa-solid fa-tower-broadcast"></i> Forward模块
                     </div>
 
                     <div class="nav-group-title">网盘一条龙</div>
@@ -3474,7 +3474,7 @@
                     <div v-else-if="tab === 'forward_hdhive'" key="forward_hdhive" class="scroll-view forward-hdhive-page">
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
-                                <h2><i class="fa-solid fa-tower-broadcast icon-brand-blue"></i> Forward 影巢</h2>
+                                <h2><i class="fa-solid fa-tower-broadcast icon-brand-blue"></i> Forward模块</h2>
                                 <button class="btn btn-primary btn-sm" @click="saveForwardHdhiveConfig" :disabled="forwardHdhiveSaving">
                                     <i class="fa-solid" :class="forwardHdhiveSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
                                 </button>
@@ -3484,27 +3484,27 @@
                                 <i class="fa-solid fa-circle-info"></i>
                                 <div class="info-content">
                                     <div class="info-alert-box-title">模块工作流</div>
-                                    Forward 打开影视详情时调用此模块查询影巢资源；用户真正点击播放时才解锁资源、转存到 115，并通过 ChillPoster 获取 115 直链播放。
+                                    Forward 打开影视详情时调用此模块查询影巢/爱影资源；用户真正点击播放时才解锁或转存资源，并通过 ChillPoster 获取 115 直链播放。
                                 </div>
                             </div>
 
                             <div class="card mb-20">
                                 <div class="card-header">
-                                    <div class="card-title-l"><i class="fa-solid fa-link"></i> Forward 模块地址</div>
+                                    <div class="card-title-l"><i class="fa-solid fa-gears"></i> 模块全局设置</div>
                                     <div class="module-card-actions-split">
-                                        <label class="ios-switch" title="启用 Forward 影巢模块">
+                                        <label class="ios-switch" title="启用 Forward 模块">
                                             <input type="checkbox" v-model="forwardHdhiveConfig.enabled">
                                             <span class="ios-slider"></span>
                                         </label>
-                                        <button class="btn btn-ghost btn-sm" @click="copyForwardHdhiveWidgetUrl">
-                                            <i class="fa-solid fa-copy"></i> 复制地址
-                                        </button>
                                     </div>
                                 </div>
                                 <div class="card-body">
                                     <label>模块地址</label>
                                     <div class="form-row-tight">
                                         <input class="form-row-grow" type="text" v-model="forwardHdhiveConfig.widget_url" readonly>
+                                        <button class="icon-btn icon-btn-amber" @click="refreshForwardHdhiveToken" :disabled="forwardHdhiveSaving" title="刷新 Token">
+                                            <i class="fa-solid fa-rotate"></i>
+                                        </button>
                                         <button class="icon-btn icon-btn-blue" @click="copyForwardHdhiveWidgetUrl" title="复制">
                                             <i class="fa-solid fa-copy"></i>
                                         </button>
@@ -3518,12 +3518,35 @@
                                             <div class="input-tip">填写后模块地址会自动更新；留空时按当前访问地址生成。</div>
                                         </div>
                                     </div>
+
+                                    <div class="form-grid-2-tight mt-15">
+                                        <div>
+                                            <label>是否入库</label>
+                                            <select v-model="forwardHdhiveConfig.library_enabled">
+                                                <option :value="true">开启：转存到转存目录</option>
+                                                <option :value="false">关闭：转存到秒传目录</option>
+                                            </select>
+                                            <div class="input-tip">关闭时用于临时点播，资源落到 115 秒传目录，尽量不进入自动整理链路。</div>
+                                        </div>
+                                        <div>
+                                            <label>转存模式</label>
+                                            <select v-model="forwardHdhiveConfig.transfer_mode">
+                                                <option value="series">转存整部剧/整个资源</option>
+                                                <option value="episode">只转存当前单集</option>
+                                            </select>
+                                            <div class="input-tip">整部模式会转存分享根目录并按季集定位播放；单集模式会先匹配分享内对应集再转存。</div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
 
                             <div class="card mb-20">
                                 <div class="card-header">
-                                    <div class="card-title-l"><i class="fa-solid fa-sliders"></i> 查询与解锁限制</div>
+                                    <div class="card-title-l"><i class="fa-solid fa-sliders"></i> 影巢资源</div>
+                                    <label class="ios-switch" title="启用影巢资源源">
+                                        <input type="checkbox" v-model="forwardHdhiveConfig.hdhive_enabled">
+                                        <span class="ios-slider"></span>
+                                    </label>
                                 </div>
                                 <div class="card-body">
                                     <div class="form-grid-2-tight">
@@ -3541,21 +3564,47 @@
                                             <input type="number" min="0" step="1" v-model.number="forwardHdhiveConfig.max_unlock_points">
                                             <div class="input-tip">资源查询和点播都会二次校验，超过此积分的资源不会返回，也不会被解锁。</div>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card mb-20">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-clapperboard"></i> 爱影资源</div>
+                                    <label class="ios-switch" title="启用爱影资源源">
+                                        <input type="checkbox" v-model="forwardHdhiveConfig.aiying_enabled">
+                                        <span class="ios-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-grid-2-tight">
                                         <div>
-                                            <label>是否入库</label>
-                                            <select v-model="forwardHdhiveConfig.library_enabled">
-                                                <option :value="true">开启：转存到转存目录</option>
-                                                <option :value="false">关闭：转存到秒传目录</option>
-                                            </select>
-                                            <div class="input-tip">关闭时用于临时点播，资源落到 115 秒传目录，尽量不进入自动整理链路。</div>
+                                            <label>TG ID</label>
+                                            <input type="text" v-model="forwardHdhiveConfig.aiying_tg_id" :placeholder="forwardHdhiveConfig.telegram_user_id ? '已检测到后台 Telegram ID，可自动填充' : '请输入 TG ID'">
+                                            <div class="input-tip">后台 Telegram 已登录时会自动填充；也可以手动覆盖。</div>
                                         </div>
                                         <div>
-                                            <label>转存模式</label>
-                                            <select v-model="forwardHdhiveConfig.transfer_mode">
-                                                <option value="series">转存整部剧/整个资源</option>
-                                                <option value="episode">只转存当前单集</option>
-                                            </select>
-                                            <div class="input-tip">整部模式会转存分享根目录并按季集定位播放；单集模式会先匹配分享内对应集再转存。</div>
+                                            <label>爱影 Token</label>
+                                            <input type="password" v-model="forwardHdhiveConfig.aiying_chill_token" placeholder="AY_CHILL...">
+                                            <div class="input-tip">爱影 Token 在 TG 机器人输入 /chilltoken 获取；接口限频 6/min、500/day，ChillPoster 会按查询缓存减少重复调用。</div>
+                                        </div>
+                                    </div>
+                                    <div class="stats-grid-mini mt-15">
+                                        <div class="stat-mini-card">
+                                            <div class="stat-mini-label">当日调用</div>
+                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_today_used || 0 }}</div>
+                                        </div>
+                                        <div class="stat-mini-card">
+                                            <div class="stat-mini-label">剩余调用</div>
+                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_last_times ?? '-' }}</div>
+                                        </div>
+                                        <div class="stat-mini-card">
+                                            <div class="stat-mini-label">总调用数</div>
+                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_success_count || 0 }}</div>
+                                        </div>
+                                        <div class="stat-mini-card">
+                                            <div class="stat-mini-label">更新时间</div>
+                                            <div class="stat-mini-value stat-mini-value-small">{{ forwardHdhiveConfig.aiying_last_checked_at || '-' }}</div>
                                         </div>
                                     </div>
                                 </div>
@@ -3584,7 +3633,11 @@
                                     </div>
                                     <div class="meta-row mt-15">
                                         <strong>结果:</strong>
-                                        共 {{ forwardHdhiveTestResult.total }} 条，符合条件 {{ forwardHdhiveTestResult.filtered }} 条
+                                        影巢 {{ forwardHdhiveTestResult.filtered }}/{{ forwardHdhiveTestResult.total }} 条，爱影 {{ forwardHdhiveTestResult.aiying_filtered }}/{{ forwardHdhiveTestResult.aiying_total }} 条
+                                    </div>
+                                    <div v-if="forwardHdhiveTestResult.errors && Object.keys(forwardHdhiveTestResult.errors).length" class="input-tip mt-10">
+                                        <span v-if="forwardHdhiveTestResult.errors.hdhive">影巢：{{ forwardHdhiveTestResult.errors.hdhive }}</span>
+                                        <span v-if="forwardHdhiveTestResult.errors.aiying" class="ml-10">爱影：{{ forwardHdhiveTestResult.errors.aiying }}</span>
                                     </div>
                                     <div v-if="forwardHdhiveTestResult.items.length" class="server-grid-layout server-grid-layout-single mt-15">
                                         <div v-for="item in forwardHdhiveTestResult.items" :key="item.slug" class="module-card">
@@ -3603,7 +3656,24 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div v-else class="empty-state-card mt-15">
+                                    <div v-if="forwardHdhiveTestResult.aiying_items.length" class="server-grid-layout server-grid-layout-single mt-15">
+                                        <div v-for="item in forwardHdhiveTestResult.aiying_items" :key="item.link || item.name" class="module-card">
+                                            <div class="mc-header">
+                                                <div class="mc-title">
+                                                    <i class="fa-solid fa-clapperboard"></i>
+                                                    {{ item.name || '爱影资源' }}
+                                                </div>
+                                                <span class="status-pill">爱影</span>
+                                            </div>
+                                            <div class="mc-body mc-body-compact">
+                                                <div class="meta-row"><strong>大小:</strong> {{ item.size ? `${item.size}GB` : '-' }}</div>
+                                                <div class="meta-row"><strong>分类:</strong> {{ item.category || '-' }}</div>
+                                                <div class="meta-row"><strong>备注:</strong> {{ item.notes || '-' }}</div>
+                                                <div class="meta-row"><strong>日期:</strong> {{ item.release_date || '-' }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div v-if="!forwardHdhiveTestResult.items.length && !forwardHdhiveTestResult.aiying_items.length" class="empty-state-card mt-15">
                                         <i class="fa-solid fa-magnifying-glass placeholder-icon"></i>
                                         <div>暂无测试结果</div>
                                     </div>
@@ -5285,7 +5355,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')"><i class="fa-solid fa-file-code"></i><span>STRM</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>FW影巢</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
                         </div>
                     </div>

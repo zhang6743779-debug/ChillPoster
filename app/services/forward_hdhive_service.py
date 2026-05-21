@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
 from fastapi import HTTPException, Request
 from p115client.util import share_extract_payload
 
@@ -22,6 +24,7 @@ from core.logger import logger
 
 
 CONFIG_PATH = Path("config/forward_hdhive.json")
+AIYING_API_URL = "http://api.ayclub.vip:5050/api/chill"
 
 
 def _default_config() -> dict[str, Any]:
@@ -30,9 +33,21 @@ def _default_config() -> dict[str, Any]:
         "account_id": "",
         "widget_token": uuid.uuid4().hex,
         "public_base_url": "",
+        "hdhive_enabled": True,
         "max_unlock_points": 4,
         "library_enabled": True,
         "transfer_mode": "series",
+        "aiying_enabled": False,
+        "aiying_tg_id": "",
+        "aiying_chill_token": "",
+        "aiying_success_count": 0,
+        "aiying_today_used": 0,
+        "aiying_daily_date": "",
+        "aiying_daily_start_times": None,
+        "aiying_last_times": None,
+        "aiying_last_message": "",
+        "aiying_last_result_count": 0,
+        "aiying_last_checked_at": "",
     }
 
 
@@ -40,6 +55,10 @@ class ForwardHDHiveService:
     def __init__(self) -> None:
         self.config = _default_config()
         self._resource_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._aiying_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._aiying_play_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._aiying_rate_lock = asyncio.Lock()
+        self._aiying_rate_times: list[float] = []
         self._load_config()
 
     def _load_config(self) -> None:
@@ -95,14 +114,28 @@ class ForwardHDHiveService:
         token = self.config.get("widget_token") or ""
         return f"/api/forward/widget.js?token={token}"
 
-    def get_config(self, request: Request | None = None) -> dict[str, Any]:
+    def get_config(self, request: Request | None = None, *, telegram_user_id: str = "") -> dict[str, Any]:
+        aiying_tg_id = str(self.config.get("aiying_tg_id") or "").strip()
+        if not aiying_tg_id and telegram_user_id:
+            aiying_tg_id = str(telegram_user_id).strip()
         return {
             "enabled": bool(self.config.get("enabled", True)),
             "account_id": str(self.config.get("account_id") or ""),
             "public_base_url": str(self.config.get("public_base_url") or ""),
+            "hdhive_enabled": bool(self.config.get("hdhive_enabled", True)),
             "max_unlock_points": int(self.config.get("max_unlock_points") or 0),
             "library_enabled": bool(self.config.get("library_enabled", True)),
             "transfer_mode": str(self.config.get("transfer_mode") or "series"),
+            "aiying_enabled": bool(self.config.get("aiying_enabled", False)),
+            "aiying_tg_id": aiying_tg_id,
+            "aiying_chill_token": str(self.config.get("aiying_chill_token") or ""),
+            "aiying_success_count": int(self.config.get("aiying_success_count") or 0),
+            "aiying_today_used": int(self.config.get("aiying_today_used") or 0),
+            "aiying_last_times": self.config.get("aiying_last_times"),
+            "aiying_last_message": str(self.config.get("aiying_last_message") or ""),
+            "aiying_last_result_count": int(self.config.get("aiying_last_result_count") or 0),
+            "aiying_last_checked_at": str(self.config.get("aiying_last_checked_at") or ""),
+            "telegram_user_id": str(telegram_user_id or ""),
             "widget_path": self.get_widget_path(),
             "accounts": self.get_account_options(),
             "widget_url": self.get_widget_url(request),
@@ -113,9 +146,13 @@ class ForwardHDHiveService:
             "enabled",
             "account_id",
             "public_base_url",
+            "hdhive_enabled",
             "max_unlock_points",
             "library_enabled",
             "transfer_mode",
+            "aiying_enabled",
+            "aiying_tg_id",
+            "aiying_chill_token",
         }
         for key in allowed:
             if key not in payload:
@@ -132,15 +169,25 @@ class ForwardHDHiveService:
                 value = str(value or "").strip().rstrip("/")
             if key == "library_enabled":
                 value = bool(value)
+            if key == "hdhive_enabled":
+                value = bool(value)
             if key == "transfer_mode":
                 value = str(value or "series").strip().lower()
                 if value not in {"series", "episode"}:
                     value = "series"
+            if key == "aiying_enabled":
+                value = bool(value)
+            if key in {"aiying_tg_id", "aiying_chill_token"}:
+                value = str(value or "").strip()
             self.config[key] = value
         if not self.config.get("widget_token"):
             self.config["widget_token"] = uuid.uuid4().hex
         self._save_config()
         return self.get_config()
+
+    def refresh_widget_token(self) -> None:
+        self.config["widget_token"] = uuid.uuid4().hex
+        self._save_config()
 
     def verify_token(self, token: str | None) -> None:
         expected = str(self.config.get("widget_token") or "").strip()
@@ -161,6 +208,119 @@ class ForwardHDHiveService:
 
     def _cache_key(self, media_type: str, tmdb_id: str | int) -> str:
         return f"{media_type}:{tmdb_id}"
+
+    def _aiying_configured(self) -> bool:
+        return bool(
+            self.config.get("aiying_enabled")
+            and str(self.config.get("aiying_tg_id") or "").strip()
+            and str(self.config.get("aiying_chill_token") or "").strip()
+        )
+
+    async def _aiying_rate_wait(self) -> None:
+        async with self._aiying_rate_lock:
+            while True:
+                now = time.monotonic()
+                self._aiying_rate_times = [t for t in self._aiying_rate_times if now - t < 60]
+                if len(self._aiying_rate_times) < 6:
+                    self._aiying_rate_times.append(now)
+                    return
+                wait_seconds = max(0.1, 60 - (now - self._aiying_rate_times[0]))
+                logger.info(f"[Forward爱影] 触发 6/min 限频，等待 {wait_seconds:.1f}s")
+                await asyncio.sleep(wait_seconds)
+
+    def _aiying_call_increment(self, current_times: int) -> int:
+        try:
+            previous_times = int(self.config.get("aiying_last_times"))
+        except Exception:
+            previous_times = None
+        if previous_times is None:
+            return 1
+        if current_times < previous_times:
+            return max(1, previous_times - current_times)
+        # 剩余调用变多通常是充值；本次成功查询仍计 1 次。
+        return 1
+
+    def _update_aiying_stats(self, *, message: str = "", times: Any = None, result_count: int = 0) -> None:
+        self.config["aiying_last_message"] = str(message or "")
+        self.config["aiying_last_result_count"] = int(result_count or 0)
+        self.config["aiying_last_checked_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        today = time.strftime("%Y-%m-%d")
+        if times is not None:
+            try:
+                current_times = int(times)
+                increment = self._aiying_call_increment(current_times)
+                self.config["aiying_success_count"] = int(self.config.get("aiying_success_count") or 0) + increment
+                if str(self.config.get("aiying_daily_date") or "") != today:
+                    self.config["aiying_daily_date"] = today
+                    self.config["aiying_today_used"] = 0
+                    self.config["aiying_daily_start_times"] = current_times + increment
+                self.config["aiying_today_used"] = int(self.config.get("aiying_today_used") or 0) + increment
+                self.config["aiying_last_times"] = current_times
+            except Exception:
+                self.config["aiying_success_count"] = int(self.config.get("aiying_success_count") or 0) + 1
+                if str(self.config.get("aiying_daily_date") or "") != today:
+                    self.config["aiying_daily_date"] = today
+                    self.config["aiying_today_used"] = 0
+                self.config["aiying_today_used"] = int(self.config.get("aiying_today_used") or 0) + 1
+                self.config["aiying_last_times"] = times
+        else:
+            self.config["aiying_success_count"] = int(self.config.get("aiying_success_count") or 0) + 1
+            if str(self.config.get("aiying_daily_date") or "") != today:
+                self.config["aiying_daily_date"] = today
+                self.config["aiying_today_used"] = 0
+            self.config["aiying_today_used"] = int(self.config.get("aiying_today_used") or 0) + 1
+        self._save_config()
+
+    async def fetch_aiying_resources(
+        self,
+        media_type: str,
+        tmdb_id: str | int,
+        *,
+        use_cache: bool = True,
+    ) -> list[dict[str, Any]]:
+        if not self._aiying_configured():
+            return []
+        normalized_type = "tv" if str(media_type or "").lower() in {"tv", "series"} else "movie"
+        key = f"aiying:{normalized_type}:{tmdb_id}"
+        now = time.time()
+        cached = self._aiying_cache.get(key)
+        if use_cache and cached and cached[0] > now:
+            return cached[1]
+
+        payload = {
+            "tg_id": str(self.config.get("aiying_tg_id") or "").strip(),
+            "type": normalized_type,
+            "tmdb_id": str(tmdb_id or "").strip(),
+            "chill_token": str(self.config.get("aiying_chill_token") or "").strip(),
+        }
+        await self._aiying_rate_wait()
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(AIYING_API_URL, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=f"爱影查询失败: HTTP {e.response.status_code}") from e
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"爱影查询失败: {e}") from e
+
+        state = data.get("state") if isinstance(data, dict) else None
+        if state not in {0, "0", True}:
+            message = str(data.get("message") or data.get("error") or "爱影查询未返回成功状态") if isinstance(data, dict) else "爱影查询响应异常"
+            raise HTTPException(status_code=502, detail=message)
+
+        raw_items = data.get("data") if isinstance(data, dict) else []
+        items = [dict(item) for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+        for item in items:
+            item["source_key"] = "aiying"
+        self._aiying_cache[key] = (now + 300, items)
+        if items:
+            self._update_aiying_stats(
+                message=str(data.get("message") or ""),
+                times=data.get("times"),
+                result_count=len(items),
+            )
+        return items
 
     def _resource_points(self, item: dict[str, Any]) -> int:
         try:
@@ -217,16 +377,114 @@ class ForwardHDHiveService:
 
     def _describe_resource(self, item: dict[str, Any]) -> str:
         parts = []
+        tag_parts = []
         for key in ("video_resolution", "source", "subtitle_language", "subtitle_type"):
             values = item.get(key)
             if isinstance(values, list):
                 parts.extend(str(v) for v in values if v)
+                if key == "source":
+                    tag_parts.extend(str(v).split("/")[0] for v in values if v)
             elif values:
                 parts.append(str(values))
+                if key == "source":
+                    tag_parts.append(str(values).split("/")[0])
         if item.get("share_size"):
-            parts.append(str(item.get("share_size")))
+            parts.append(f"整包 {item.get('share_size')}")
         parts.append(f"解锁 {self._resource_points(item)} 积分")
-        return " | ".join(parts)
+        tag_parts.append("HDHive")
+        tag_line = "|".join(dict.fromkeys(tag.strip() for tag in tag_parts if tag and tag.strip()))
+        return " | ".join(parts) + (f"\n{tag_line}" if tag_line else "")
+
+    def _aiying_resource_id(self, item: dict[str, Any]) -> str:
+        seed = "|".join(
+            str(item.get(key) or "")
+            for key in ("link", "name", "tmdb_id", "category", "notes")
+        )
+        return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
+
+    def _describe_aiying_resource(self, item: dict[str, Any]) -> str:
+        parts = []
+        for key in ("category", "notes", "release_date"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                parts.append(value)
+        size = str(item.get("size") or "").strip()
+        if size:
+            parts.append(f"单集 {size}GB")
+        return " | ".join(parts) + "\nAY|SVIP"
+
+    def filter_aiying_resources(
+        self,
+        resources: list[dict[str, Any]],
+        *,
+        media_type: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> list[dict[str, Any]]:
+        items = [item for item in resources if isinstance(item, dict) and str(item.get("link") or "").strip()]
+        is_tv = str(media_type or "").lower() in {"tv", "series"}
+        if is_tv and episode:
+            matched = [
+                item for item in items
+                if self._episode_match_score(str(item.get("name") or ""), season, episode) > 0
+            ]
+            if matched:
+                items = matched
+        return items
+
+    def build_aiying_forward_resources(
+        self,
+        request: Request,
+        params: dict[str, Any],
+        resources: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        base = self.get_public_base_url(request)
+        token = self.config.get("widget_token") or ""
+        media_type = "tv" if str(params.get("type") or "").lower() in {"tv", "series"} else "movie"
+        tmdb_id = str(params.get("tmdbId") or params.get("tmdb_id") or "").strip()
+        season = self._to_optional_int(params.get("season"))
+        episode = self._to_optional_int(params.get("episode"))
+        result = []
+        for item in self.filter_aiying_resources(resources, media_type=media_type, season=season, episode=episode):
+            resource_id = self._aiying_resource_id(item)
+            self._aiying_play_cache[resource_id] = (time.time() + 21600, dict(item))
+            query = {
+                "token": token,
+                "source": "aiying",
+                "resource_id": resource_id,
+                "type": media_type,
+                "tmdb_id": tmdb_id,
+            }
+            if season:
+                query["season"] = str(season)
+            if episode:
+                query["episode"] = str(episode)
+            qs = urlencode({k: v for k, v in query.items() if v})
+            play_url = f"{base}/api/forward/play?{qs}"
+            size = str(item.get("size") or "").strip()
+            size_label = f"单集 {size}GB" if size else "单集大小未知"
+            title = f"{item.get('name') or '爱影资源'} · {size_label}"
+            result.append({
+                "id": play_url,
+                "type": "url",
+                "title": title,
+                "name": title,
+                "description": self._describe_aiying_resource(item),
+                "url": play_url,
+                "videoUrl": play_url,
+                "link": play_url,
+                "mediaType": media_type,
+                "playerType": "system",
+            })
+        return result
+
+    def _to_optional_int(self, value: Any) -> int | None:
+        try:
+            if value in (None, ""):
+                return None
+            return int(value)
+        except Exception:
+            return None
 
     def build_forward_resources(
         self,
@@ -257,7 +515,8 @@ class ForwardHDHiveService:
                 query["episode"] = episode
             qs = urlencode({k: v for k, v in query.items() if v})
             play_url = f"{base}/api/forward/play?{qs}"
-            title = f"{item.get('title') or '影巢资源'} · {item.get('share_size') or '未知大小'}"
+            size_label = str(item.get("share_size") or "未知大小").strip()
+            title = f"{item.get('title') or '影巢资源'} · {size_label}"
             result.append({
                 "id": play_url,
                 "type": "url",
@@ -607,34 +866,22 @@ class ForwardHDHiveService:
             logger.warning(f"[ForwardHDHive] 未精确匹配到 S{season}E{episode}，将返回最大视频: {candidates[0].get('name')}")
         return candidates[0]
 
-    async def play_resource(
+    async def _play_share_url(
         self,
         request: Request,
         *,
-        slug: str,
+        share_url: str,
         media_type: str,
         tmdb_id: str,
+        source_key: str,
+        source_label: str,
+        source_id: str,
+        source_detail_mode: str,
+        log_prefix: str,
+        preferred_name: str = "",
         season: int | None = None,
         episode: int | None = None,
     ) -> str:
-        if not self.config.get("enabled", True):
-            raise HTTPException(status_code=403, detail="Forward 影巢模块未启用")
-        resources = self.fetch_resources(media_type, tmdb_id) if tmdb_id else []
-        resource = self._find_resource_by_slug(resources, slug) if resources else None
-        if resource is not None:
-            if not self._resource_allowed(resource):
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"资源需要 {self._resource_points(resource)} 积分，超过当前上限 {self.config.get('max_unlock_points')}",
-                )
-            if str(resource.get("pan_type") or "").lower() != "115":
-                raise HTTPException(status_code=400, detail="当前仅支持 115 资源播放")
-
-        unlock_data = self._unlock_resource(slug)
-        share_url = self._extract_unlock_url(unlock_data, slug)
-        if not share_url:
-            raise HTTPException(status_code=502, detail="影巢解锁成功但未返回资源链接")
-
         target_dir = await self._get_forward_target_dir()
         client, target_cid, client_error = await transfer_service._get_transfer_context(target_dir=target_dir)
         if not client:
@@ -656,26 +903,26 @@ class ForwardHDHiveService:
             if not selected_share_item or not selected_share_item.get("id"):
                 raise HTTPException(status_code=404, detail="分享中未找到可转存的视频文件")
             share_file_id = str(selected_share_item["id"])
-            logger.info(f"[ForwardHDHive] 单集转存命中: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
+            logger.info(f"{log_prefix} 单集转存命中: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
 
         transfer_result = await transfer_service.process_link(
             share_url,
-            source="forward_hdhive",
+            source=source_key,
             target_dir=target_dir,
             share_file_id=share_file_id,
             source_meta={
-                "source_key": "forward_hdhive",
-                "source_label": "Forward 影巢",
+                "source_key": source_key,
+                "source_label": source_label,
                 "source_kind": "forward",
-                "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:{transfer_mode}",
-                "source_id": slug,
+                "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:{source_detail_mode}:{transfer_mode}",
+                "source_id": source_id,
             },
         )
         already_transferred = self._is_already_transferred_message(transfer_result.get("message", ""))
         if not transfer_result.get("success") and not already_transferred:
             raise HTTPException(status_code=502, detail=transfer_result.get("message") or "115 转存失败")
         if already_transferred:
-            logger.info(f"[ForwardHDHive] 分享已在转存目录中，跳过重复转存: slug={slug}")
+            logger.info(f"{log_prefix} 分享已在转存目录中，跳过重复转存: id={source_id}")
 
         picked = await self._locate_video_pickcode(
             client,
@@ -683,7 +930,7 @@ class ForwardHDHiveService:
             transfer_name=(
                 selected_share_item.get("name", "")
                 if selected_share_item
-                else (transfer_result.get("name", "") if transfer_result.get("success") else "")
+                else (transfer_result.get("name", "") if transfer_result.get("success") else preferred_name)
             ),
             season=season,
             episode=episode,
@@ -707,14 +954,14 @@ class ForwardHDHiveService:
                     transfer_name=(
                         selected_share_item.get("name", "")
                         if selected_share_item
-                        else (transfer_result.get("name", "") if transfer_result.get("success") else "")
+                        else (transfer_result.get("name", "") if transfer_result.get("success") else preferred_name)
                     ),
                     season=season,
                     episode=episode,
                 )
                 if picked:
                     client = alt_client
-                    logger.info(f"[ForwardHDHive] 重复转存资源在备用目录中命中: cid={alt_cid} name={picked.get('name')}")
+                    logger.info(f"{log_prefix} 重复转存资源在备用目录中命中: cid={alt_cid} name={picked.get('name')}")
                     break
         if not picked and already_transferred and transfer_mode == "series":
             selected_share_item = await self._select_share_file_id(
@@ -726,18 +973,18 @@ class ForwardHDHiveService:
             )
             if selected_share_item and selected_share_item.get("id"):
                 share_file_id = str(selected_share_item["id"])
-                logger.info(f"[ForwardHDHive] 整剧重复但目标目录缺失，降级接收当前单集: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
+                logger.info(f"{log_prefix} 整剧重复但目标目录缺失，降级接收当前单集: {selected_share_item.get('path') or selected_share_item.get('name')} file_id={share_file_id}")
                 transfer_result = await transfer_service.process_link(
                     share_url,
-                    source="forward_hdhive",
+                    source=source_key,
                     target_dir=target_dir,
                     share_file_id=share_file_id,
                     source_meta={
-                        "source_key": "forward_hdhive",
-                        "source_label": "Forward 影巢",
+                        "source_key": source_key,
+                        "source_label": source_label,
                         "source_kind": "forward",
-                        "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:series_fallback_episode",
-                        "source_id": slug,
+                        "source_detail": f"{media_type}:{tmdb_id}:{'library' if self.config.get('library_enabled', True) else 'instant'}:{source_detail_mode}:series_fallback_episode",
+                        "source_id": source_id,
                     },
                 )
                 if not transfer_result.get("success") and not self._is_already_transferred_message(transfer_result.get("message", "")):
@@ -762,7 +1009,106 @@ class ForwardHDHiveService:
         )
         if not direct_url:
             raise HTTPException(status_code=502, detail="115 直链获取失败")
-        logger.info(f"[ForwardHDHive] 播放直链已生成: {picked.get('name')} slug={slug}")
+        logger.info(f"{log_prefix} 播放直链已生成: {picked.get('name')} id={source_id}")
+        return direct_url
+
+    async def play_resource(
+        self,
+        request: Request,
+        *,
+        slug: str,
+        media_type: str,
+        tmdb_id: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> str:
+        if not self.config.get("enabled", True):
+            raise HTTPException(status_code=403, detail="Forward 模块未启用")
+        if not self.config.get("hdhive_enabled", True):
+            raise HTTPException(status_code=403, detail="影巢资源源未启用")
+        resources = self.fetch_resources(media_type, tmdb_id) if tmdb_id else []
+        resource = self._find_resource_by_slug(resources, slug) if resources else None
+        if resource is not None:
+            if not self._resource_allowed(resource):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"资源需要 {self._resource_points(resource)} 积分，超过当前上限 {self.config.get('max_unlock_points')}",
+                )
+            if str(resource.get("pan_type") or "").lower() != "115":
+                raise HTTPException(status_code=400, detail="当前仅支持 115 资源播放")
+
+        unlock_data = self._unlock_resource(slug)
+        share_url = self._extract_unlock_url(unlock_data, slug)
+        if not share_url:
+            raise HTTPException(status_code=502, detail="影巢解锁成功但未返回资源链接")
+
+        direct_url = await self._play_share_url(
+            request,
+            share_url=share_url,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            source_key="forward_hdhive",
+            source_label="Forward 影巢",
+            source_id=slug,
+            source_detail_mode="hdhive",
+            log_prefix="[ForwardHDHive]",
+            season=season,
+            episode=episode,
+        )
+        logger.info(f"[ForwardHDHive] 播放直链已生成: slug={slug}")
+        return direct_url
+
+    async def play_aiying_resource(
+        self,
+        request: Request,
+        *,
+        resource_id: str,
+        media_type: str,
+        tmdb_id: str,
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> str:
+        if not self.config.get("enabled", True):
+            raise HTTPException(status_code=403, detail="Forward 模块未启用")
+        if not self._aiying_configured():
+            raise HTTPException(status_code=403, detail="爱影未启用或未配置 Token/TG ID")
+
+        now = time.time()
+        cached = self._aiying_play_cache.get(resource_id)
+        item = cached[1] if cached and cached[0] > now else None
+        if item is None and tmdb_id:
+            resources = await self.fetch_aiying_resources(media_type, tmdb_id)
+            for candidate in self.filter_aiying_resources(resources, media_type=media_type, season=season, episode=episode):
+                candidate_id = self._aiying_resource_id(candidate)
+                self._aiying_play_cache[candidate_id] = (now + 21600, dict(candidate))
+                if candidate_id == resource_id:
+                    item = candidate
+                    break
+        if not item:
+            raise HTTPException(status_code=404, detail="爱影资源已过期，请返回详情页重新查询")
+
+        share_url = str(item.get("link") or "").strip()
+        if not share_url:
+            raise HTTPException(status_code=502, detail="爱影资源未返回 115 分享链接")
+        if str(media_type or "").lower() in {"tv", "series"} and episode:
+            if self._episode_match_score(str(item.get("name") or ""), season, episode) <= 0:
+                raise HTTPException(status_code=404, detail=f"爱影资源未匹配到 S{season or 1:02d}E{episode:02d}")
+
+        direct_url = await self._play_share_url(
+            request,
+            share_url=share_url,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            source_key="forward_aiying",
+            source_label="Forward 爱影",
+            source_id=resource_id,
+            source_detail_mode="aiying",
+            log_prefix="[Forward爱影]",
+            preferred_name=str(item.get("name") or ""),
+            season=season,
+            episode=episode,
+        )
+        logger.info(f"[Forward爱影] 播放直链已生成: {item.get('name')} id={resource_id}")
         return direct_url
 
 
