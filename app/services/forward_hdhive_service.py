@@ -1090,10 +1090,6 @@ class ForwardHDHiveService:
         share_url = str(item.get("link") or "").strip()
         if not share_url:
             raise HTTPException(status_code=502, detail="爱影资源未返回 115 分享链接")
-        if str(media_type or "").lower() in {"tv", "series"} and episode:
-            if self._episode_match_score(str(item.get("name") or ""), season, episode) <= 0:
-                raise HTTPException(status_code=404, detail=f"爱影资源未匹配到 S{season or 1:02d}E{episode:02d}")
-
         direct_url = await self._play_share_url(
             request,
             share_url=share_url,
