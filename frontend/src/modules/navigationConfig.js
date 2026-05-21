@@ -5,8 +5,7 @@ export const dockItems = [
 
 export const storageItems = [
     { id: 'resource_transfer', icon: 'fa-cloud-arrow-down', label: '资源转存', group: '网盘一条龙' },
-    { id: 'media_organize', icon: 'fa-folder-tree', label: '媒体整理', group: '网盘一条龙' },
-    { id: 'strm_generate', icon: 'fa-file-code', label: 'STRM同步', group: '网盘一条龙' },
+    { id: 'media_organize', icon: 'fa-box-archive', label: '一条龙菜单', group: '网盘一条龙' },
     { id: 'rename_template', icon: 'fa-pen-fancy', label: '重命名模板', group: '网盘一条龙' },
     { id: 'media_organize_rules', icon: 'fa-sitemap', label: '二级分类', group: '网盘一条龙' },
 ];
@@ -73,7 +72,6 @@ export const allValidTabs = new Set([
     'media_organize',
     'rename_template',
     'media_organize_rules',
-    'strm_generate',
     'server',
     'config_115',
     'telegram_monitor',

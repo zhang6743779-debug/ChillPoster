@@ -35,11 +35,17 @@ createApp({
     },
     setup() {
         const ACTIVE_TAB_STORAGE_KEY = 'chillposter-active-tab';
+        const normalizeTab = (value) => (value === 'strm_generate' ? 'media_organize' : value);
         const getInitialTab = () => {
             try {
                 localStorage.removeItem(ACTIVE_TAB_STORAGE_KEY);
                 const hashTab = decodeURIComponent((window.location.hash || '').replace(/^#/, '')).trim();
-                return allValidTabs.has(hashTab) ? hashTab : 'dashboard';
+                const normalizedHashTab = normalizeTab(hashTab);
+                if (hashTab && normalizedHashTab !== hashTab) {
+                    const cleanUrl = `${window.location.pathname}${window.location.search}`;
+                    window.history.replaceState(null, '', `${cleanUrl}#${encodeURIComponent(normalizedHashTab)}`);
+                }
+                return allValidTabs.has(normalizedHashTab) ? normalizedHashTab : 'dashboard';
             } catch (_) {}
             return 'dashboard';
         };
@@ -913,7 +919,7 @@ createApp({
 
         // 选中 Tab 后自动关闭菜单
         const selectMobileTab = (t) => {
-            tab.value = t;
+            tab.value = normalizeTab(t);
             mobileMenuVisible.value = false;
         };
 
@@ -951,7 +957,7 @@ createApp({
                 'upgrade': '系统升级',
                 'docker_manager': 'Docker 管理',
                 'media_subscribe': '发现推荐', 'missing_episode_stats': '缺集统计', 'resource_transfer': '资源转存',
-                'media_organize': '媒体整理', 'media_organize_rules': '二级分类规则', 'strm_generate': 'STRM 生成',
+                'media_organize': '一条龙菜单', 'media_organize_rules': '二级分类规则',
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
                 'forward_hdhive': 'Forward模块',

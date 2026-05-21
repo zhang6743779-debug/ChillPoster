@@ -85,13 +85,10 @@
                         <i class="fa-solid fa-cloud-arrow-down"></i> 资源转存
                     </div>
                     <div class="nav-item" :class="{active: tab === 'media_organize'}" @click="tab = 'media_organize'">
-                        <i class="fa-solid fa-folder-tree"></i> 媒体整理
+                        <i class="fa-solid fa-box-archive"></i> 一条龙菜单
                     </div>
                     <div class="nav-item nav-item-sub" :class="{active: tab === 'media_organize_rules'}" @click="tab = 'media_organize_rules'">
                         <i class="fa-solid fa-sitemap"></i> 二级分类
-                    </div>
-                    <div class="nav-item" :class="{active: tab === 'strm_generate'}" @click="tab = 'strm_generate'">
-                        <i class="fa-solid fa-file-code"></i> STRM同步
                     </div>
                     <div class="nav-group-title">核心配置</div>
                     <div class="nav-item" :class="{active: tab === 'server'}" @click="tab = 'server'">
@@ -1072,6 +1069,64 @@
                         <div class="content-shell discover-shell">
 
                             <div class="mp-discover-shell">
+                                <div class="mp-top-source-actions mp-discover-toolbar">
+                                    <form class="mp-discover-search-bar" @submit.prevent="searchDiscover(false)">
+                                        <label class="mp-discover-search-box" title="搜索电影或电视剧">
+                                            <i class="fa-solid fa-magnifying-glass"></i>
+                                            <input
+                                                v-model.trim="discoverSearchQuery"
+                                                type="search"
+                                                placeholder="搜索电影 / 电视剧 / TMDB"
+                                            >
+                                            <button
+                                                v-if="discoverSearchQuery"
+                                                type="button"
+                                                class="mp-discover-search-clear"
+                                                @click="clearDiscoverSearch"
+                                                title="清空搜索"
+                                            >
+                                                <i class="fa-solid fa-xmark"></i>
+                                            </button>
+                                        </label>
+                                    </form>
+                                    <div class="mp-resource-source-control" @click.stop>
+                                        <button
+                                            type="button"
+                                            class="mp-resource-source-btn"
+                                            :class="{ active: resourceSearchSourceMenuOpen, empty: !resourceSearchSourceReady }"
+                                            @click="toggleResourceSearchSourceMenu"
+                                            title="配置资源搜索源"
+                                        >
+                                            <span>{{ resourceSearchSourceLoading ? '加载中' : '搜索源' }}</span>
+                                            <i class="fa-solid fa-chevron-down"></i>
+                                        </button>
+                                        <div v-if="resourceSearchSourceMenuOpen" class="mp-resource-source-popover">
+                                            <div v-if="resourceSearchSourceLoading" class="mp-resource-source-empty">
+                                                <i class="fa-solid fa-spinner fa-spin"></i> 加载中...
+                                            </div>
+                                            <template v-else-if="resourceSearchSources.length">
+                                                <button
+                                                    v-for="source in resourceSearchSources"
+                                                    :key="source.key"
+                                                    type="button"
+                                                    class="mp-resource-source-option"
+                                                    :class="{ active: selectedResourceSearchSources.includes(source.key) }"
+                                                    @click="toggleResourceSearchSource(source.key)"
+                                                >
+                                                    <i :class="selectedResourceSearchSources.includes(source.key) ? 'fa-solid fa-square-check' : 'fa-regular fa-square'"></i>
+                                                    <span>
+                                                        <strong>{{ source.label || source.name }}</strong>
+                                                        <small>{{ source.description }}</small>
+                                                    </span>
+                                                </button>
+                                            </template>
+                                            <div v-else class="mp-resource-source-empty">
+                                                请先在 Forward 模块配置影巢或爱影
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button class="mp-top-source-menu"><i class="fa-solid fa-bars"></i></button>
+                                </div>
                                 <div class="mp-panel">
                                     <div class="mp-top-source-bar">
                                         <div class="mp-top-source-tabs">
@@ -1080,46 +1135,6 @@
                                                 :class="['mp-top-source-tab', { active: discoverActiveSource === source.key }]">
                                                 {{ source.name || source.label }}
                                             </button>
-                                        </div>
-                                        <div class="mp-top-source-actions">
-                                            <div class="mp-resource-source-control" @click.stop>
-                                                <button
-                                                    type="button"
-                                                    class="mp-resource-source-btn"
-                                                    :class="{ active: resourceSearchSourceMenuOpen, empty: !resourceSearchSourceReady }"
-                                                    @click="toggleResourceSearchSourceMenu"
-                                                    title="配置资源搜索源"
-                                                >
-                                                    <i class="fa-solid" :class="resourceSearchSourceLoading ? 'fa-spinner fa-spin' : 'fa-sliders'"></i>
-                                                    <span>{{ resourceSearchSourceButtonText }}</span>
-                                                    <i class="fa-solid fa-chevron-down"></i>
-                                                </button>
-                                                <div v-if="resourceSearchSourceMenuOpen" class="mp-resource-source-popover">
-                                                    <div v-if="resourceSearchSourceLoading" class="mp-resource-source-empty">
-                                                        <i class="fa-solid fa-spinner fa-spin"></i> 加载中...
-                                                    </div>
-                                                    <template v-else-if="resourceSearchSources.length">
-                                                        <button
-                                                            v-for="source in resourceSearchSources"
-                                                            :key="source.key"
-                                                            type="button"
-                                                            class="mp-resource-source-option"
-                                                            :class="{ active: selectedResourceSearchSources.includes(source.key) }"
-                                                            @click="toggleResourceSearchSource(source.key)"
-                                                        >
-                                                            <i :class="selectedResourceSearchSources.includes(source.key) ? 'fa-solid fa-square-check' : 'fa-regular fa-square'"></i>
-                                                            <span>
-                                                                <strong>{{ source.label || source.name }}</strong>
-                                                                <small>{{ source.description }}</small>
-                                                            </span>
-                                                        </button>
-                                                    </template>
-                                                    <div v-else class="mp-resource-source-empty">
-                                                        请先在 Forward 模块配置影巢或爱影
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <button class="mp-top-source-menu"><i class="fa-solid fa-bars"></i></button>
                                         </div>
                                     </div>
 
@@ -1143,26 +1158,6 @@
                                 </div>
 
                             </div>
-
-                            <form class="mp-discover-search-bar" @submit.prevent="searchDiscover(false)">
-                                <label class="mp-discover-search-box" title="搜索电影或电视剧">
-                                    <i class="fa-solid fa-magnifying-glass"></i>
-                                    <input
-                                        v-model.trim="discoverSearchQuery"
-                                        type="search"
-                                        placeholder="搜索电影 / 电视剧 / TMDB"
-                                    >
-                                    <button
-                                        v-if="discoverSearchQuery"
-                                        type="button"
-                                        class="mp-discover-search-clear"
-                                        @click="clearDiscoverSearch"
-                                        title="清空搜索"
-                                    >
-                                        <i class="fa-solid fa-xmark"></i>
-                                    </button>
-                                </label>
-                            </form>
 
                             <!-- 搜索 -->
                             <div class="mp-search-section" v-if="discoverHasSearched">
@@ -1712,8 +1707,8 @@
 
                             <div class="server-toolbar mb-15">
                                 <div class="server-toolbar-title">
-                                    <i class="fa-solid fa-folder-tree"></i>
-                                    <span>媒体整理</span>
+                                    <i class="fa-solid fa-box-archive"></i>
+                                    <span>一条龙菜单</span>
                                 </div>
                                 <div class="server-toolbar-actions">
                                     <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
@@ -1887,6 +1882,132 @@
                                                 当前容差：{{ Number(mediaOrganizeConfig.wash_tolerance_ratio || 0) }}%
                                             </div>
                                         </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="one-stop-section-head">
+                                <div class="one-stop-section-title"><i class="fa-solid fa-file-code"></i> STRM 同步</div>
+                                <div class="one-stop-section-actions">
+                                    <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
+                                    <button class="btn btn-primary btn-sm" @click="addStrmTask" :disabled="needs115Setup"><i class="fa-solid fa-plus"></i> 添加任务</button>
+                                    <button class="btn btn-green btn-sm" @click="saveStrmConfig" :disabled="needs115Setup"><i class="fa-solid fa-save"></i> 保存配置</button>
+                                </div>
+                            </div>
+
+                            <div class="server-grid-layout server-grid-layout-wide mb-30">
+                                <div v-for="(task, idx) in strmConfig.sync_tasks" :key="idx" class="module-card">
+                                    <div class="mc-header">
+                                        <div class="mc-title">
+                                            <i class="fa-solid fa-sync"></i> {{ task.name || '未命名任务' }}
+                                            <span class="strm-task-index">(idx: {{idx}})</span>
+                                        </div>
+                                        <button class="icon-btn danger" @click="removeStrmTask(idx)"><i class="fa-solid fa-minus-circle"></i></button>
+                                    </div>
+                                    <div class="mc-body">
+                                        <label>任务名称</label>
+                                        <input type="text" v-model="task.name" placeholder="如：电影库同步">
+
+                                        <template v-if="!config302.standard_topology">
+                                        <label>网盘媒体库路径</label>
+                                        <div class="strm-path-row">
+                                            <input type="text" v-model="task.remote_path" placeholder="/媒体库/电影">
+                                            <button class="btn btn-ghost" @click="browseStrmDir(idx)"><i class="fa-solid fa-folder-open"></i> 浏览</button>
+                                        </div>
+                                        <div v-if="strmBrowser.taskIdx === idx && strmBrowser.dirs.length > 0" class="strm-browser">
+                                            <div v-if="strmBrowser.path" class="strm-browser-head">
+                                                <span class="strm-browser-up" @click="browseStrmDirUp(idx)"><i class="fa-solid fa-arrow-left"></i> 上级</span>
+                                                <span class="strm-browser-path">{{ strmBrowser.path }}</span>
+                                                <button class="btn btn-ghost strm-browser-pick" @click="applyBrowsePath(idx)">选择此目录</button>
+                                            </div>
+                                            <div v-for="dir in strmBrowser.dirs" :key="dir.cid" class="strm-browser-item" @click="selectStrmDir(idx, dir)">
+                                                <i class="fa-solid fa-folder"></i> {{ dir.name }}
+                                            </div>
+                                        </div>
+
+                                        <label>本地媒体库路径</label>
+                                        <div class="strm-path-row">
+                                            <input type="text" v-model="task.local_path" placeholder="/data/strm/电影">
+                                            <button class="btn btn-ghost" @click="browseLocalDir(idx)"><i class="fa-solid fa-folder-open"></i> 浏览</button>
+                                        </div>
+                                        <div v-if="localBrowser.taskIdx === idx && localBrowser.dirs.length > 0" class="strm-browser">
+                                            <div class="strm-browser-head">
+                                                <span class="strm-browser-path">{{ localBrowser.current }}</span>
+                                                <button class="btn btn-ghost strm-browser-pick" @click="applyLocalBrowsePath(idx)">选择此目录</button>
+                                            </div>
+                                            <div v-for="dir in localBrowser.dirs" :key="dir.path" class="strm-browser-item" @click="selectLocalDir(dir)">
+                                                <i class="fa-solid fa-folder"></i> {{ dir.name }}
+                                            </div>
+                                        </div>
+                                        </template>
+
+                                        <div class="strm-overwrite-row">
+                                            <span class="strm-overwrite-label">strm文件本地存在时</span>
+                                            <div class="strm-overwrite-segmented">
+                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite === 'overwrite' }" @click="task.overwrite = 'overwrite'">覆盖生成</button>
+                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite !== 'overwrite' }" @click="task.overwrite = 'skip'">直接跳过</button>
+                                            </div>
+                                        </div>
+
+                                        <div class="strm-task-actions">
+                                            <div class="strm-task-actions-left">
+                                                <button class="btn btn-primary btn-sm" @click="startStrmSync(idx, 'full')" :disabled="strmProgress.running">
+                                                    <i class="fa-solid fa-play"></i> 全量同步
+                                                </button>
+                                            </div>
+                                            <div class="strm-task-actions-right">
+                                                <label class="ios-switch">
+                                                    <input type="checkbox" v-model="task.download_auxiliary">
+                                                    <span class="ios-slider"></span>
+                                                </label>
+                                                <span class="strm-task-meta-label">下载网盘元数据</span>
+                                                <label class="ios-switch">
+                                                    <input type="checkbox" v-model="task.download_tmdb_metadata">
+                                                    <span class="ios-slider"></span>
+                                                </label>
+                                                <span class="strm-task-meta-label">tmdb同步下载元数据</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div v-if="strmProgress.running || strmProgress.last_result" class="module-card strm-progress-card">
+                                <div class="mc-header">
+                                    <div class="mc-title"><i class="fa-solid fa-chart-bar"></i> 同步进度</div>
+                                </div>
+                                <div class="mc-body">
+                                    <div v-if="strmProgress.running">
+                                        <div class="strm-progress-block">
+                                            <div class="strm-progress-head">
+                                                <span>{{ strmProgress.status_text }}</span>
+                                                <span>{{ strmProgress.percent }}%</span>
+                                            </div>
+                                            <div class="strm-progress-bar">
+                                                <div class="strm-progress-fill" :style="{width: strmProgress.percent + '%'}"></div>
+                                            </div>
+                                        </div>
+                                        <div class="strm-progress-stats">
+                                            <span>已扫描: <b>{{ strmProgress.scanned }}</b></span>
+                                            <span>文件夹数量: <b>{{ strmProgress.scanned_dirs }}</b></span>
+                                            <span>已生成: <b class="ok">{{ strmProgress.generated }}</b></span>
+                                            <span>已下载: <b class="info">{{ strmProgress.downloaded }}</b></span>
+                                            <span>下载失败: <b class="danger">{{ strmProgress.download_failed }}</b></span>
+                                            <span>已跳过: <b class="warn">{{ strmProgress.skipped }}</b></span>
+                                            <span>失败: <b class="danger">{{ strmProgress.failed }}</b></span>
+                                        </div>
+                                        <div v-if="Object.keys(strmProgress.skip_reasons || {}).length > 0" class="strm-progress-stats">
+                                            <span>跳过明细:</span>
+                                            <span v-for="(count, reason) in strmProgress.skip_reasons" :key="reason">{{ reason }} <b class="warn">{{ count }}</b></span>
+                                        </div>
+                                        <div class="strm-progress-actions">
+                                            <button class="btn btn-danger btn-sm" @click="stopStrmSync">
+                                                <i class="fa-solid fa-stop"></i> 取消任务
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div v-else-if="strmProgress.last_result" class="strm-progress-result">
+                                        <span>{{ strmProgress.last_result }}</span>
                                     </div>
                                 </div>
                             </div>
@@ -2214,151 +2335,6 @@
                                     </div>
 
                             </div>
-                        </div>
-                    </div>
-
-                    <div v-else-if="tab === 'strm_generate'" key="strm_generate" class="scroll-view">
-                        <div class="content-shell shell-xxl">
-
-                            <div class="server-toolbar">
-                                <div class="server-toolbar-title">
-                                    <i class="fa-solid fa-file-code"></i>
-                                    <span>STRM同步</span>
-                                </div>
-                                <div class="server-toolbar-actions">
-                                    <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
-                                    <button class="btn btn-primary btn-sm" @click="addStrmTask" :disabled="needs115Setup"><i class="fa-solid fa-plus"></i> 添加任务</button>
-                                    <button class="btn btn-green btn-sm" @click="saveStrmConfig" :disabled="needs115Setup"><i class="fa-solid fa-save"></i> 保存配置</button>
-                                </div>
-                            </div>
-
-                            <div v-if="needs115Setup" class="empty-state-card mb-20">
-                                请先完成 115 配置，再创建 STRM 同步任务。
-                            </div>
-
-                            <template v-else>
-                            <div class="server-grid-layout server-grid-layout-wide mb-30">
-                                <div v-for="(task, idx) in strmConfig.sync_tasks" :key="idx" class="module-card">
-                                    <div class="mc-header">
-                                        <div class="mc-title">
-                                            <i class="fa-solid fa-sync"></i> {{ task.name || '未命名任务' }}
-                                            <span class="strm-task-index">(idx: {{idx}})</span>
-                                        </div>
-                                        <button class="icon-btn danger" @click="removeStrmTask(idx)"><i class="fa-solid fa-minus-circle"></i></button>
-                                    </div>
-                                    <div class="mc-body">
-
-                                        <label>任务名称</label>
-                                        <input type="text" v-model="task.name" placeholder="如：电影库同步">
-
-
-                                        <template v-if="!config302.standard_topology">
-                                        <label>网盘媒体库路径</label>
-                                        <div class="strm-path-row">
-                                            <input type="text" v-model="task.remote_path" placeholder="/媒体库/电影">
-                                            <button class="btn btn-ghost" @click="browseStrmDir(idx)"><i class="fa-solid fa-folder-open"></i> 浏览</button>
-                                        </div>
-                                        <div v-if="strmBrowser.taskIdx === idx && strmBrowser.dirs.length > 0" class="strm-browser">
-                                            <div v-if="strmBrowser.path" class="strm-browser-head">
-                                                <span class="strm-browser-up" @click="browseStrmDirUp(idx)"><i class="fa-solid fa-arrow-left"></i> 上级</span>
-                                                <span class="strm-browser-path">{{ strmBrowser.path }}</span>
-                                                <button class="btn btn-ghost strm-browser-pick" @click="applyBrowsePath(idx)">选择此目录</button>
-                                            </div>
-                                            <div v-for="dir in strmBrowser.dirs" :key="dir.cid" class="strm-browser-item" @click="selectStrmDir(idx, dir)">
-                                                <i class="fa-solid fa-folder"></i> {{ dir.name }}
-                                            </div>
-                                        </div>
-
-                                        <label>本地媒体库路径</label>
-                                        <div class="strm-path-row">
-                                            <input type="text" v-model="task.local_path" placeholder="/data/strm/电影">
-                                            <button class="btn btn-ghost" @click="browseLocalDir(idx)"><i class="fa-solid fa-folder-open"></i> 浏览</button>
-                                        </div>
-                                        <div v-if="localBrowser.taskIdx === idx && localBrowser.dirs.length > 0" class="strm-browser">
-                                            <div class="strm-browser-head">
-                                                <span class="strm-browser-path">{{ localBrowser.current }}</span>
-                                                <button class="btn btn-ghost strm-browser-pick" @click="applyLocalBrowsePath(idx)">选择此目录</button>
-                                            </div>
-                                            <div v-for="dir in localBrowser.dirs" :key="dir.path" class="strm-browser-item" @click="selectLocalDir(dir)">
-                                                <i class="fa-solid fa-folder"></i> {{ dir.name }}
-                                            </div>
-                                        </div>
-                                        </template>
-
-
-                                        <div class="strm-overwrite-row">
-                                            <span class="strm-overwrite-label">strm文件本地存在时</span>
-                                            <div class="strm-overwrite-segmented">
-                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite === 'overwrite' }" @click="task.overwrite = 'overwrite'">覆盖生成</button>
-                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite !== 'overwrite' }" @click="task.overwrite = 'skip'">直接跳过</button>
-                                            </div>
-                                        </div>
-
-                                        <div class="strm-task-actions">
-                                            <div class="strm-task-actions-left">
-                                                <button class="btn btn-primary btn-sm" @click="startStrmSync(idx, 'full')" :disabled="strmProgress.running">
-                                                    <i class="fa-solid fa-play"></i> 全量同步
-                                                </button>
-                                            </div>
-                                            <div class="strm-task-actions-right">
-                                                <label class="ios-switch">
-                                                    <input type="checkbox" v-model="task.download_auxiliary">
-                                                    <span class="ios-slider"></span>
-                                                </label>
-                                                <span class="strm-task-meta-label">下载网盘元数据</span>
-                                                <label class="ios-switch">
-                                                    <input type="checkbox" v-model="task.download_tmdb_metadata">
-                                                    <span class="ios-slider"></span>
-                                                </label>
-                                                <span class="strm-task-meta-label">tmdb同步下载元数据</span>
-                                            </div>
-                                        </div>
-
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div v-if="strmProgress.running || strmProgress.last_result" class="module-card strm-progress-card">
-                                <div class="mc-header">
-                                    <div class="mc-title"><i class="fa-solid fa-chart-bar"></i> 同步进度</div>
-                                </div>
-                                <div class="mc-body">
-                                    <div v-if="strmProgress.running">
-                                        <div class="strm-progress-block">
-                                            <div class="strm-progress-head">
-                                                <span>{{ strmProgress.status_text }}</span>
-                                                <span>{{ strmProgress.percent }}%</span>
-                                            </div>
-                                            <div class="strm-progress-bar">
-                                                <div class="strm-progress-fill" :style="{width: strmProgress.percent + '%'}"></div>
-                                            </div>
-                                        </div>
-                                        <div class="strm-progress-stats">
-                                            <span>已扫描: <b>{{ strmProgress.scanned }}</b></span>
-                                            <span>文件夹数量: <b>{{ strmProgress.scanned_dirs }}</b></span>
-                                            <span>已生成: <b class="ok">{{ strmProgress.generated }}</b></span>
-                                            <span>已下载: <b class="info">{{ strmProgress.downloaded }}</b></span>
-                                            <span>下载失败: <b class="danger">{{ strmProgress.download_failed }}</b></span>
-                                            <span>已跳过: <b class="warn">{{ strmProgress.skipped }}</b></span>
-                                            <span>失败: <b class="danger">{{ strmProgress.failed }}</b></span>
-                                        </div>
-                                        <div v-if="Object.keys(strmProgress.skip_reasons || {}).length > 0" class="strm-progress-stats">
-                                            <span>跳过明细:</span>
-                                            <span v-for="(count, reason) in strmProgress.skip_reasons" :key="reason">{{ reason }} <b class="warn">{{ count }}</b></span>
-                                        </div>
-                                        <div class="strm-progress-actions">
-                                            <button class="btn btn-danger btn-sm" @click="stopStrmSync">
-                                                <i class="fa-solid fa-stop"></i> 取消任务
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div v-else-if="strmProgress.last_result" class="strm-progress-result">
-                                        <span>{{ strmProgress.last_result }}</span>
-                                    </div>
-                                </div>
-                            </div>
-                            </template>
-
                         </div>
                     </div>
 
@@ -3489,9 +3465,6 @@
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
                                 <h2><i class="fa-solid fa-tower-broadcast icon-brand-blue"></i> Forward模块</h2>
-                                <button class="btn btn-primary btn-sm" @click="saveForwardHdhiveConfig" :disabled="forwardHdhiveSaving">
-                                    <i class="fa-solid" :class="forwardHdhiveSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
-                                </button>
                             </div>
 
                             <div class="info-alert-box mb-20">
@@ -3514,7 +3487,7 @@
                                 </div>
                                 <div class="card-body">
                                     <label>模块地址</label>
-                                    <div class="form-row-tight">
+                                    <div class="form-row-tight form-row-inline-icons">
                                         <input class="form-row-grow" type="text" v-model="forwardHdhiveConfig.widget_url" readonly>
                                         <button class="icon-btn icon-btn-amber" @click="refreshForwardHdhiveToken" :disabled="forwardHdhiveSaving" title="刷新 Token">
                                             <i class="fa-solid fa-rotate"></i>
@@ -3692,6 +3665,11 @@
                                         <div>暂无测试结果</div>
                                     </div>
                                 </div>
+                            </div>
+                            <div class="forward-hdhive-save-actions">
+                                <button class="btn btn-primary" @click="saveForwardHdhiveConfig" :disabled="forwardHdhiveSaving">
+                                    <i class="fa-solid" :class="forwardHdhiveSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -5501,7 +5479,6 @@
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')"><i class="fa-solid fa-file-code"></i><span>STRM</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>
@@ -5543,8 +5520,8 @@
                 <span>首页</span>
             </button>
             <button class="mobile-tabbar-item" :class="{active: tab === 'media_organize'}" @click="selectMobileTab('media_organize')">
-                <i class="fa-solid fa-folder-tree"></i>
-                <span>整理</span>
+                <i class="fa-solid fa-box-archive"></i>
+                <span>一条龙</span>
             </button>
             <button class="mobile-tabbar-item" :class="{active: mobileMenuVisible || !['dashboard', 'media_subscribe', 'media_organize', 'missing_episode_stats'].includes(tab)}" @click="toggleMobileMenu">
                 <i class="fa-solid fa-ellipsis"></i>
