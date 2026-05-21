@@ -15,6 +15,7 @@ import { useRssTasks } from './pages/rss/useRssTasks';
 import { useResourceTransfer } from './pages/transfer/useResourceTransfer';
 import { useMoviePilotConfig } from './pages/moviepilot/useMoviePilotConfig';
 import { useHdhiveConfig } from './pages/hdhive/useHdhiveConfig';
+import { useForwardHdhive } from './pages/forward/useForwardHdhive';
 import { useNotificationSettings } from './pages/notifications/useNotificationSettings';
 import { useConfig302 } from './pages/config302/useConfig302';
 import { useStrmConfig } from './pages/strm/useStrmConfig';
@@ -304,6 +305,18 @@ createApp({
             saveMpConfig,
             testMpConnection,
         } = useMoviePilotConfig({ showToast });
+
+        const {
+            forwardHdhiveConfig,
+            forwardHdhiveSaving,
+            forwardHdhiveTesting,
+            forwardHdhiveTestForm,
+            forwardHdhiveTestResult,
+            fetchForwardHdhiveConfig,
+            saveForwardHdhiveConfig,
+            copyForwardHdhiveWidgetUrl,
+            testForwardHdhiveResources,
+        } = useForwardHdhive({ showToast });
 
         const {
             tasksState,
@@ -840,6 +853,7 @@ createApp({
             if (val === 'webhook') fetchWebhookConfig();
             if (val === 'library_preview') fetchLibraryCovers();
             if (val === 'config_yingchao') fetchHdhiveConfig();
+            if (val === 'forward_hdhive') { fetchForwardHdhiveConfig(); fetchHdhiveConfig(); }
             if (val === 'config_notification') { fetchWechatNotifyConfig(); fetchTelegramNotifyConfig(); }
             if (val === 'telegram_monitor') fetchTelegramNotifyConfig();
             if (val === 'config_302') fetch302Config();
@@ -940,6 +954,7 @@ createApp({
                 'media_organize': '媒体整理', 'media_organize_rules': '二级分类规则', 'strm_generate': 'STRM 生成',
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
+                'forward_hdhive': 'Forward 影巢',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
                 'telegram_monitor': 'Telegram 监听',
                 'config_telegram': '电报配置', 'config_yingchao': '影巢配置',
@@ -1787,6 +1802,13 @@ createApp({
             toggleHdhiveCheckin,
             refreshHdhiveUserInfo,
             refreshHdhiveUsage,
+
+            // [新增] Forward 影巢模块
+            forwardHdhiveConfig, forwardHdhiveSaving, forwardHdhiveTesting,
+            forwardHdhiveTestForm, forwardHdhiveTestResult,
+            fetchForwardHdhiveConfig, saveForwardHdhiveConfig,
+            copyForwardHdhiveWidgetUrl,
+            testForwardHdhiveResources,
 
             // [新增] 微信通知配置
             wechatNotifyConfig, wechatNotifyTesting, wechatNotifySending, wechatNotifySaving, wechatTemplateTesting,

@@ -70,6 +70,9 @@
                     <div class="nav-item" :class="{active: tab === 'webhook'}" @click="tab = 'webhook'">
                         <i class="fa-solid fa-bolt-lightning"></i> Webhook
                     </div>
+                    <div class="nav-item" :class="{active: tab === 'forward_hdhive'}" @click="tab = 'forward_hdhive'">
+                        <i class="fa-solid fa-tower-broadcast"></i> Forward 影巢
+                    </div>
 
                     <div class="nav-group-title">网盘一条龙</div>
                     <div class="nav-item" :class="{active: tab === 'media_subscribe'}" @click="tab = 'media_subscribe'">
@@ -3468,6 +3471,131 @@
                             </div><!-- end notify 2col grid -->
                         </div>
                     </div>
+                    <div v-else-if="tab === 'forward_hdhive'" key="forward_hdhive" class="scroll-view forward-hdhive-page">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <h2><i class="fa-solid fa-tower-broadcast icon-brand-blue"></i> Forward 影巢</h2>
+                                <button class="btn btn-primary btn-sm" @click="saveForwardHdhiveConfig" :disabled="forwardHdhiveSaving">
+                                    <i class="fa-solid" :class="forwardHdhiveSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
+                                </button>
+                            </div>
+
+                            <div class="info-alert-box mb-20">
+                                <i class="fa-solid fa-circle-info"></i>
+                                <div class="info-content">
+                                    <div class="info-alert-box-title">模块工作流</div>
+                                    Forward 打开影视详情时调用此模块查询影巢资源；用户真正点击播放时才解锁资源、转存到 115，并通过 ChillPoster 获取 115 直链播放。
+                                </div>
+                            </div>
+
+                            <div class="card mb-20">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-link"></i> Forward 模块地址</div>
+                                    <div class="module-card-actions-split">
+                                        <label class="ios-switch" title="启用 Forward 影巢模块">
+                                            <input type="checkbox" v-model="forwardHdhiveConfig.enabled">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <button class="btn btn-ghost btn-sm" @click="copyForwardHdhiveWidgetUrl">
+                                            <i class="fa-solid fa-copy"></i> 复制地址
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="card-body">
+                                    <label>模块地址</label>
+                                    <div class="form-row-tight">
+                                        <input class="form-row-grow" type="text" v-model="forwardHdhiveConfig.widget_url" readonly>
+                                        <button class="icon-btn icon-btn-blue" @click="copyForwardHdhiveWidgetUrl" title="复制">
+                                            <i class="fa-solid fa-copy"></i>
+                                        </button>
+                                    </div>
+                                    <div class="input-tip">把这个地址添加到 Forward 模块里。地址中包含模块 Token，请不要公开。</div>
+
+                                    <div class="mt-15">
+                                        <div>
+                                            <label>公网访问地址</label>
+                                            <input type="text" v-model="forwardHdhiveConfig.public_base_url" placeholder="例如 https://poster.example.com">
+                                            <div class="input-tip">填写后模块地址会自动更新；留空时按当前访问地址生成。</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card mb-20">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-sliders"></i> 查询与解锁限制</div>
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-grid-2-tight">
+                                        <div>
+                                            <label>影巢账号</label>
+                                            <select v-model="forwardHdhiveConfig.account_id">
+                                                <option value="">自动选择可用 API Key</option>
+                                                <option v-for="account in forwardHdhiveConfig.accounts" :key="account.id" :value="account.id" :disabled="!account.has_api_key">
+                                                    {{ account.name }} {{ account.has_api_key ? '' : '(无 API Key)' }}
+                                                </option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label>最高解锁积分</label>
+                                            <input type="number" min="0" step="1" v-model.number="forwardHdhiveConfig.max_unlock_points">
+                                            <div class="input-tip">资源查询和点播都会二次校验，超过此积分的资源不会返回，也不会被解锁。</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="card">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-vial"></i> 资源查询测试</div>
+                                    <button class="btn btn-secondary btn-sm" @click="testForwardHdhiveResources" :disabled="forwardHdhiveTesting">
+                                        <i class="fa-solid" :class="forwardHdhiveTesting ? 'fa-spinner fa-spin' : 'fa-search'"></i> 测试查询
+                                    </button>
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-grid-2-tight">
+                                        <div>
+                                            <label>类型</label>
+                                            <select v-model="forwardHdhiveTestForm.type">
+                                                <option value="movie">电影</option>
+                                                <option value="tv">电视剧</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label>TMDB ID</label>
+                                            <input type="text" v-model="forwardHdhiveTestForm.tmdb_id" placeholder="例如 550">
+                                        </div>
+                                    </div>
+                                    <div class="meta-row mt-15">
+                                        <strong>结果:</strong>
+                                        共 {{ forwardHdhiveTestResult.total }} 条，符合条件 {{ forwardHdhiveTestResult.filtered }} 条
+                                    </div>
+                                    <div v-if="forwardHdhiveTestResult.items.length" class="server-grid-layout server-grid-layout-single mt-15">
+                                        <div v-for="item in forwardHdhiveTestResult.items" :key="item.slug" class="module-card">
+                                            <div class="mc-header">
+                                                <div class="mc-title">
+                                                    <i class="fa-solid fa-film"></i>
+                                                    {{ item.title || item.slug }}
+                                                </div>
+                                                <span class="status-pill">{{ item.unlock_points || 0 }} 积分</span>
+                                            </div>
+                                            <div class="mc-body mc-body-compact">
+                                                <div class="meta-row"><strong>大小:</strong> {{ item.share_size || '-' }}</div>
+                                                <div class="meta-row"><strong>分辨率:</strong> {{ (item.video_resolution || []).join(' / ') || '-' }}</div>
+                                                <div class="meta-row"><strong>来源:</strong> {{ (item.source || []).join(' / ') || '-' }}</div>
+                                                <div class="meta-row"><strong>字幕:</strong> {{ (item.subtitle_language || []).concat(item.subtitle_type || []).join(' / ') || '-' }}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div v-else class="empty-state-card mt-15">
+                                        <i class="fa-solid fa-magnifying-glass placeholder-icon"></i>
+                                        <div>暂无测试结果</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'config_yingchao'" key="config_yingchao" class="scroll-view">
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
@@ -5141,6 +5269,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'strm_generate'}" @click="selectMobileTab('strm_generate')"><i class="fa-solid fa-file-code"></i><span>STRM</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>FW影巢</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
                         </div>
                     </div>

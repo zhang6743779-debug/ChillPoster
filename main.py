@@ -57,6 +57,7 @@ from app.routers import docker_manager
 from app.routers import drive115_cleanup
 from app.routers import drive115_upload
 from app.routers import system_health
+from app.routers import forward_hdhive
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -346,6 +347,7 @@ app.include_router(docker_manager.router)
 app.include_router(drive115_cleanup.router)
 app.include_router(drive115_upload.router)
 app.include_router(system_health.router)
+app.include_router(forward_hdhive.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")

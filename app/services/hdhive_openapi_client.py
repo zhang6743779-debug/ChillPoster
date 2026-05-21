@@ -156,6 +156,30 @@ class HDHiveOpenClient:
         data, _ = self._request("GET", "/me")
         return data
 
+    def get_resources(self, media_type: MediaType, tmdb_id: str | int) -> list[dict[str, Any]]:
+        data, _ = self._request("GET", f"/resources/{media_type}/{tmdb_id}")
+        return data if isinstance(data, list) else []
+
+    def unlock_resources(
+        self,
+        *,
+        slug: str | None = None,
+        slugs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if slugs:
+            body["slugs"] = slugs
+        elif slug:
+            body["slug"] = slug
+        else:
+            raise ValueError("slug or slugs is required")
+        data, _ = self._request("POST", "/resources/unlock", json=body)
+        return data if isinstance(data, dict) else {}
+
+    def check_resource(self, url: str) -> dict[str, Any]:
+        data, _ = self._request("POST", "/check/resource", json={"url": url})
+        return data if isinstance(data, dict) else {}
+
     def checkin(self, is_gambler: bool = False) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if is_gambler:

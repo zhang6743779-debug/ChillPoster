@@ -2722,6 +2722,17 @@ input:focus, select:focus, textarea:focus {
 .meta-row { font-size: 12px; color: #999; }
 .meta-row strong { color: white; font-weight: 500; }
 .meta-row-accent { color: var(--accent); }
+.forward-hdhive-page .module-card .meta-row {
+    color: rgba(71, 85, 105, 0.9);
+}
+.forward-hdhive-page .module-card .meta-row strong {
+    color: rgba(15, 23, 42, 0.78);
+    font-weight: 600;
+}
+.forward-hdhive-page .module-card .mc-title,
+.forward-hdhive-page .module-card .status-pill {
+    color: rgba(15, 23, 42, 0.92);
+}
 .empty-state-card { grid-column: 1 / -1; text-align: center; padding: 40px; color: #555; border: 1px dashed #333; border-radius: 12px; }
 .info-stack { margin-top: 30px; display: flex; flex-direction: column; gap: 16px; }
 .server-id-text { font-size: 11px; color: #666; }
