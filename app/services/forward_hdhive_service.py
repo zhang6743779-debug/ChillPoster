@@ -238,10 +238,19 @@ class ForwardHDHiveService:
             if episode:
                 query["episode"] = episode
             qs = urlencode({k: v for k, v in query.items() if v})
+            play_url = f"{base}/api/forward/play?{qs}"
+            title = f"{item.get('title') or '影巢资源'} · {item.get('share_size') or '未知大小'}"
             result.append({
-                "name": f"{item.get('title') or '影巢资源'} · {item.get('share_size') or '未知大小'}",
+                "id": play_url,
+                "type": "url",
+                "title": title,
+                "name": title,
                 "description": self._describe_resource(item),
-                "url": f"{base}/api/forward/play?{qs}",
+                "url": play_url,
+                "videoUrl": play_url,
+                "link": play_url,
+                "mediaType": media_type,
+                "playerType": "system",
             })
         return result
 

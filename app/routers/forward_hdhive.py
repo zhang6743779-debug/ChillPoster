@@ -120,19 +120,20 @@ var WidgetMetadata = {{
 
 async function chillposterPost(path, body) {{
     const url = `${{ChillPosterForward.baseUrl}}${{path}}?token=${{encodeURIComponent(ChillPosterForward.token)}}`;
-    const res = await fetch(url, {{
-      method: "POST",
+    if (typeof Widget === "undefined" || !Widget.http || !Widget.http.post) {{
+      throw new Error("Forward Widget.http.post 不可用");
+    }}
+    const response = await Widget.http.post(url, body || {{}}, {{
       headers: {{
         "Content-Type": "application/json",
+        "User-Agent": "ForwardWidgets/1.0.0",
         "X-Forward-Token": ChillPosterForward.token
-      }},
-      body: JSON.stringify(body || {{}})
+      }}
     }});
-    if (!res.ok) {{
-      const text = await res.text();
-      throw new Error(text || `ChillPoster HTTP ${{res.status}}`);
+    if (!response) {{
+      throw new Error("ChillPoster 请求无响应");
     }}
-    return await res.json();
+    return response.data;
 }}
 
 async function loadResource(params) {{
