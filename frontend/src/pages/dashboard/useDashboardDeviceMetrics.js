@@ -22,8 +22,6 @@ export function useDashboardDeviceMetrics({ tab }) {
             diskWriteBytes: [],
         });
 
-        const dashboardDeviceMetricsPulse = ref(false);
-
         const dashboardDeviceMetricsLoaded = ref(false);
 
         let dashboardDeviceMetricsPolling = null;
@@ -88,13 +86,6 @@ export function useDashboardDeviceMetrics({ tab }) {
                 recordDashboardDeviceMetricHistory();
                 startDashboardDeviceMetricsAnimation();
                 dashboardDeviceMetricsLoaded.value = true;
-                dashboardDeviceMetricsPulse.value = false;
-                requestAnimationFrame(() => {
-                    dashboardDeviceMetricsPulse.value = true;
-                });
-                setTimeout(() => {
-                    dashboardDeviceMetricsPulse.value = false;
-                }, 520);
             } catch (e) {
                 console.log('Dashboard device metrics failed', e);
                 dashboardDeviceMetricsLoaded.value = false;
@@ -469,7 +460,6 @@ export function useDashboardDeviceMetrics({ tab }) {
     return {
         dashboardDeviceMetrics,
         dashboardDeviceMetricsLoaded,
-        dashboardDeviceMetricsPulse,
         dashboardDeviceMetricCards,
         startDashboardDeviceMetricsPolling,
         stopDashboardDeviceMetricsPolling,

@@ -336,7 +336,7 @@
                                 <div v-if="dashboard115Account.connected && dashboard115Account.vip_expire_at && !dashboard115Account.vip_forever" class="dashboard-115-meta">会员到期 {{ dashboard115Account.vip_expire_at.replace('T', ' ') }}</div>
                             </div>
 
-                            <div class="device-performance-card" :class="{ 'device-performance-card--pulse': dashboardDeviceMetricsPulse }">
+                            <div class="device-performance-card">
                                 <div class="device-performance-head">
                                     <div>
                                         <div class="device-performance-title">资源与性能</div>
@@ -362,38 +362,6 @@
                                         </div>
                                     </div>
                                 </div>
-                            </div>
-                        </div>
-
-                        <!-- 1. 统计卡片行 -->
-                        <div class="stat-cards">
-                            <div class="stat-card">
-                                <div class="stat-main-row">
-                                    <i class="fa-solid fa-film"></i>
-                                    <div class="stat-num">{{ dashboardMediaStats.movie_count }}</div>
-                                </div>
-                                <div class="stat-label">电影</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-main-row">
-                                    <i class="fa-solid fa-tv"></i>
-                                    <div class="stat-num">{{ dashboardMediaStats.series_count }}</div>
-                                </div>
-                                <div class="stat-label">电视剧</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-main-row">
-                                    <i class="fa-solid fa-clapperboard"></i>
-                                    <div class="stat-num">{{ dashboardMediaStats.episode_count }}</div>
-                                </div>
-                                <div class="stat-label">剧集</div>
-                            </div>
-                            <div class="stat-card">
-                                <div class="stat-main-row">
-                                    <i class="fa-solid fa-user"></i>
-                                    <div class="stat-num">{{ dashboardMediaStats.user_count }}</div>
-                                </div>
-                                <div class="stat-label">用户</div>
                             </div>
                         </div>
 
@@ -432,7 +400,7 @@
                                 </div>
                                 <div class="dashboard-task-body">
                                     <div class="dashboard-task-list">
-                                        <div v-for="category in dashboardTaskCategories" :key="category.key" class="dashboard-task-row" :class="'dashboard-task-row--' + category.statusClass">
+                                        <div v-for="category in dashboardTaskCategories" :key="category.key" class="dashboard-task-row" :class="['dashboard-task-row--' + category.statusClass, 'dashboard-task-row--' + category.key]">
                                             <button type="button" class="dashboard-task-row-icon" @click="openTaskCategoryLog(category.key)" :title="category.title + '日志'">
                                                 <i class="fa-solid" :class="category.running ? 'fa-spinner fa-spin' : category.icon"></i>
                                             </button>
@@ -447,7 +415,6 @@
                                                 </div>
                                             </div>
                                             <div class="dashboard-task-row-actions">
-                                                <span class="dashboard-task-row-pill" :class="category.statusClass">{{ category.statusLabel }}</span>
                                                 <button type="button" class="dashboard-task-action-btn" @click="openTaskCategoryLog(category.key)" title="查看日志">
                                                     <i class="fa-solid fa-list-ul"></i>
                                                     <span>查看日志</span>
@@ -456,6 +423,9 @@
                                                     <i class="fa-solid fa-play"></i>
                                                     <span>运行</span>
                                                 </button>
+                                            </div>
+                                            <div class="dashboard-task-row-state" :title="category.statusLabel">
+                                                <span class="dashboard-task-row-status-dot" :class="category.statusClass"></span>
                                             </div>
                                         </div>
                                     </div>
@@ -500,10 +470,13 @@
                                     </div>
                                     <div class="dashboard-stats-total">{{ dashboardMediaStats.total }}</div>
                                 </div>
-                                <div class="media-stat-grid">
+                                <div class="media-stat-grid media-stat-grid--summary">
                                     <div class="media-stat-chip">电影库 {{ dashboardMediaStats.movie_libraries }}</div>
                                     <div class="media-stat-chip">剧集库 {{ dashboardMediaStats.series_libraries }}</div>
-                                    <div class="media-stat-chip">其他库 {{ dashboardMediaStats.other_libraries }}</div>
+                                    <div class="media-stat-chip">用户 {{ dashboardMediaStats.user_count }}</div>
+                                    <div class="media-stat-chip">电视剧 {{ dashboardMediaStats.series_count }}</div>
+                                    <div class="media-stat-chip">剧集 {{ dashboardMediaStats.episode_count }}</div>
+                                    <div class="media-stat-chip">电影 {{ dashboardMediaStats.movie_count }}</div>
                                 </div>
                                 <div v-if="dashboardMediaStats.libraries.length === 0" class="dashboard-empty-state">暂无媒体统计数据</div>
                                 <div v-else class="media-library-list" @scroll="onDashboardLazyScroll('libraries', $event)">
@@ -1100,13 +1073,54 @@
 
                             <div class="mp-discover-shell">
                                 <div class="mp-panel">
-                                    <div class="mp-top-source-tabs">
-                                        <button v-for="source in discoverSourceTabs" :key="source.key"
-                                            @click="switchDiscoverSource(source.key)"
-                                            :class="['mp-top-source-tab', { active: discoverActiveSource === source.key }]">
-                                            {{ source.name || source.label }}
-                                        </button>
-                                        <button class="mp-top-source-menu"><i class="fa-solid fa-bars"></i></button>
+                                    <div class="mp-top-source-bar">
+                                        <div class="mp-top-source-tabs">
+                                            <button v-for="source in discoverSourceTabs" :key="source.key"
+                                                @click="switchDiscoverSource(source.key)"
+                                                :class="['mp-top-source-tab', { active: discoverActiveSource === source.key }]">
+                                                {{ source.name || source.label }}
+                                            </button>
+                                        </div>
+                                        <div class="mp-top-source-actions">
+                                            <div class="mp-resource-source-control" @click.stop>
+                                                <button
+                                                    type="button"
+                                                    class="mp-resource-source-btn"
+                                                    :class="{ active: resourceSearchSourceMenuOpen, empty: !resourceSearchSourceReady }"
+                                                    @click="toggleResourceSearchSourceMenu"
+                                                    title="配置资源搜索源"
+                                                >
+                                                    <i class="fa-solid" :class="resourceSearchSourceLoading ? 'fa-spinner fa-spin' : 'fa-sliders'"></i>
+                                                    <span>{{ resourceSearchSourceButtonText }}</span>
+                                                    <i class="fa-solid fa-chevron-down"></i>
+                                                </button>
+                                                <div v-if="resourceSearchSourceMenuOpen" class="mp-resource-source-popover">
+                                                    <div v-if="resourceSearchSourceLoading" class="mp-resource-source-empty">
+                                                        <i class="fa-solid fa-spinner fa-spin"></i> 加载中...
+                                                    </div>
+                                                    <template v-else-if="resourceSearchSources.length">
+                                                        <button
+                                                            v-for="source in resourceSearchSources"
+                                                            :key="source.key"
+                                                            type="button"
+                                                            class="mp-resource-source-option"
+                                                            :class="{ active: selectedResourceSearchSources.includes(source.key) }"
+                                                            @click="toggleResourceSearchSource(source.key)"
+                                                        >
+                                                            <i :class="selectedResourceSearchSources.includes(source.key) ? 'fa-solid fa-square-check' : 'fa-regular fa-square'"></i>
+                                                            <span>
+                                                                <strong>{{ source.label || source.name }}</strong>
+                                                                <small>{{ source.description }}</small>
+                                                            </span>
+                                                        </button>
+                                                    </template>
+                                                    <div v-else class="mp-resource-source-empty">
+                                                        请先在 Forward 模块配置影巢或爱影
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <button class="mp-top-source-menu"><i class="fa-solid fa-bars"></i></button>
+                                        </div>
                                     </div>
 
                                     <div v-for="row in getVisibleFilterRows" :key="row.key" :class="['mp-filter-row', { 'mp-filter-row-rating': row.control === 'number' }]">
@@ -4652,8 +4666,10 @@
                 <section class="missing-episode-compare-panel">
                     <button class="modal-close-btn missing-episode-compare-close" @click="closeMissingEpisodeCompare"><i class="fa-solid fa-xmark"></i></button>
                     <div class="missing-episode-compare-head">
-                        <div class="missing-episode-compare-kicker">异常入库对比</div>
-                        <span class="detail-library-badge error">需要核对</span>
+                        <div class="missing-episode-compare-kicker">{{ shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '异常入库对比' : '入库剧集明细' }}</div>
+                        <span class="detail-library-badge" :class="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? 'error' : 'exists'">
+                            {{ shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '需要核对' : '正常入库' }}
+                        </span>
                     </div>
                     <div class="missing-episode-compare-media">
                         <img v-if="missingEpisodeCompareModal.row?.poster_url" class="missing-episode-compare-poster" :src="missingEpisodeCompareModal.row.poster_url" :alt="missingEpisodeCompareModal.row.title">
@@ -4666,6 +4682,14 @@
                                     <p v-if="missingEpisodeCompareModal.row?.item?.original_title">{{ missingEpisodeCompareModal.row.item.original_title }}</p>
                                 </div>
                                 <div class="missing-episode-compare-action-stack">
+                                    <button type="button" class="missing-episode-compare-mp-btn" @click="openMissingEpisodeMpSubscribe">
+                                        <i class="fa-solid fa-bell"></i>
+                                        <span>MP订阅</span>
+                                    </button>
+                                    <button type="button" class="missing-episode-compare-resource-btn" @click="openMissingEpisodeResourceSearch">
+                                        <i class="fa-solid fa-magnifying-glass"></i>
+                                        <span>资源搜索</span>
+                                    </button>
                                     <button type="button" class="missing-episode-compare-detail-btn" @click="openMissingEpisodeCompareDetail">
                                         <i class="fa-solid fa-arrow-up-right-from-square"></i>
                                         <span>详情页</span>
@@ -4684,11 +4708,11 @@
                             <div class="missing-episode-compare-meta">
                                 <span>{{ missingEpisodeCompareModal.row?.year || missingEpisodeCompareModal.row?.localItem?.year || '未知年份' }}</span>
                                 <span>{{ missingEpisodeCompareModal.row?.localItem?.libraryName || missingEpisodeCompareModal.row?.libraryName || '未分类媒体库' }}</span>
-                                <span>{{ missingEpisodeCompareModal.row?.tmdbStatus || '未知状态' }}</span>
+                                <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.tmdbStatus || '未知状态' }}</span>
                                 <span>{{ countLocalEpisodes(missingEpisodeCompareModal.row?.localItem?.seasons) }} 集已入库</span>
-                                <span>{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
-                                <span v-if="missingEpisodeCompareModal.row?.extraLocalEpisodes">本地多 {{ missingEpisodeCompareModal.row.extraLocalEpisodes }} 集</span>
-                                <span>{{ missingEpisodeCompareModal.row?.label || '异常入库' }}</span>
+                                <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
+                                <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) && missingEpisodeCompareModal.row?.extraLocalEpisodes">本地多 {{ missingEpisodeCompareModal.row.extraLocalEpisodes }} 集</span>
+                                <span>{{ missingEpisodeCompareModal.row?.label || getMissingEpisodePosterCategoryLabel(missingEpisodeCompareModal.row) }}</span>
                             </div>
                             <div class="missing-episode-compare-id-row">
                                 <span v-if="missingEpisodeCompareModal.row?.localItem?.embyId" class="missing-episode-compare-id">Emby ID: {{ missingEpisodeCompareModal.row.localItem.embyId }}</span>
@@ -4696,7 +4720,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="missing-episode-compare-section local">
+                    <div v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-section local">
                         <div class="missing-episode-compare-section-head">
                             <div>
                                 <div class="missing-episode-compare-title">已入库条目</div>
@@ -4752,16 +4776,98 @@
                             </div>
                         </div>
                         <div v-else class="missing-episode-compare-empty">暂无 TMDB 季集信息，刷新统计后会补齐展开条目</div>
-                        <div class="missing-episode-chip-legend">
-                            <span><i class="exists"></i>已入库</span>
-                            <span><i class="aired-missing"></i>已播缺失</span>
-                            <span><i class="extra"></i>本地多出</span>
-                            <span><i class="missing"></i>未入库/未播</span>
+                    </div>
+                    <div class="missing-episode-chip-legend">
+                        <span><i class="exists"></i>已入库</span>
+                        <span><i class="aired-missing"></i>已播缺失</span>
+                        <span><i class="extra"></i>本地多出</span>
+                        <span><i class="missing"></i>未入库/未播</span>
+                    </div>
+                    <div
+                        v-if="resourceSearchModal.context === 'missing_episode' && (resourceSearchModal.loading || resourceSearchModal.items.length || resourceSearchModal.error)"
+                        class="missing-episode-resource-results"
+                    >
+                        <div class="missing-episode-resource-results-head">
+                            <div>
+                                <div class="missing-episode-compare-title">资源搜索结果</div>
+                                <strong>{{ resourceSearchModal.title || '未知媒体' }}</strong>
+                            </div>
+                            <span v-if="resourceSearchModal.items.length">{{ resourceSearchModal.items.length }} 个结果</span>
+                        </div>
+                        <div v-if="resourceSearchModal.loading" class="resource-search-state missing-episode-resource-state">
+                            <i class="fa-solid fa-spinner fa-spin"></i>
+                            <span>搜索资源中...</span>
+                        </div>
+                        <div v-else-if="resourceSearchModal.items.length" class="resource-search-list missing-episode-resource-list">
+                            <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item">
+                                <div class="resource-search-item-main">
+                                    <div class="resource-search-item-title">{{ item.title || item.name || '未命名资源' }}</div>
+                                    <div class="resource-search-item-tags">
+                                        <span class="resource-search-source-tag">{{ item.sourceName || (item.sourceKey === 'aiying' ? '爱影' : '影巢') }}</span>
+                                        <span v-for="tag in (item.tags || []).slice(0, 6)" :key="tag">{{ tag }}</span>
+                                    </div>
+                                    <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>
+                                </div>
+                                <button class="resource-search-open-btn" @click="openForwardResource(item)" :disabled="resourceSearchModal.transferringId === String(item.id || item.url || item.title || '')">
+                                    <i class="fa-solid" :class="resourceSearchModal.transferringId === String(item.id || item.url || item.title || '') ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i>
+                                    {{ resourceSearchModal.transferringId === String(item.id || item.url || item.title || '') ? '转存中' : (item.transferStatus || '转存到整理目录') }}
+                                </button>
+                            </div>
+                        </div>
+                        <div v-else class="resource-search-state resource-search-empty missing-episode-resource-state">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <span>{{ resourceSearchModal.error || '未搜索到可用资源' }}</span>
                         </div>
                     </div>
-                    <div class="missing-episode-compare-note">
+                    <div v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-note">
                         <i class="fa-solid fa-circle-info"></i>
                         <span>如果标题、年份、季号或集数对不上，可能是 Emby 剧集识别错、绑定到了错误的 TMDB 条目，也可能是 TMDB 自身季集信息有误；本地多出的集号也会标为异常。请先核对媒体库识别与 TMDB 条目，修正后重新刷新统计。</span>
+                    </div>
+                </section>
+            </div>
+        </transition>
+
+        <transition name="fade">
+            <div v-if="mpSubscribeModal.visible" class="discover-overlay mp-subscribe-overlay" @click.self="closeMpSubscribeModal">
+                <section class="mp-subscribe-panel">
+                    <button class="modal-close-btn mp-subscribe-close" @click="closeMpSubscribeModal"><i class="fa-solid fa-xmark"></i></button>
+                    <div class="mp-subscribe-head">
+                        <div class="mp-subscribe-kicker">MoviePilot</div>
+                        <h3>MP订阅</h3>
+                        <p>{{ mpSubscribeModal.title || '未知剧集' }}<span v-if="mpSubscribeModal.year"> · {{ mpSubscribeModal.year }}</span></p>
+                    </div>
+                    <div class="mp-subscribe-options">
+                        <button
+                            type="button"
+                            class="mp-subscribe-option"
+                            :class="{ active: mpSubscribeModal.selectedMode === 'all' }"
+                            @click="mpSubscribeModal.selectedMode = 'all'; mpSubscribeModal.selectedSeasons = []"
+                        >
+                            <i class="fa-solid fa-layer-group"></i>
+                            <span>全剧</span>
+                        </button>
+                        <button
+                            v-for="season in mpSubscribeModal.seasons"
+                            :key="'mp-sub-season-' + season.season"
+                            type="button"
+                            class="mp-subscribe-option"
+                            :class="{ active: mpSubscribeModal.selectedMode === 'seasons' && mpSubscribeModal.selectedSeasons.includes(season.season) }"
+                            @click="toggleMpSubscribeSeason(season.season)"
+                        >
+                            <i class="fa-solid" :class="mpSubscribeModal.selectedMode === 'seasons' && mpSubscribeModal.selectedSeasons.includes(season.season) ? 'fa-circle-check' : 'fa-circle'"></i>
+                            <span>S{{ String(season.season).padStart(2, '0') }}</span>
+                            <small v-if="season.episodeCount">{{ season.episodeCount }} 集</small>
+                        </button>
+                    </div>
+                    <div v-if="!mpSubscribeModal.seasons.length" class="mp-subscribe-tip">
+                        未获取到季信息，也可以直接订阅全剧。
+                    </div>
+                    <div class="mp-subscribe-actions">
+                        <button type="button" class="btn btn-ghost" @click="closeMpSubscribeModal">取消</button>
+                        <button type="button" class="btn btn-primary" @click="confirmMpSubscribe" :disabled="mpSubscribeModal.loading">
+                            <i class="fa-solid" :class="mpSubscribeModal.loading ? 'fa-spinner fa-spin' : 'fa-bell'"></i>
+                            {{ mpSubscribeModal.loading ? '订阅中' : (mpSubscribeModal.selectedMode === 'seasons' && mpSubscribeModal.selectedSeasons.length ? `确认订阅 ${mpSubscribeModal.selectedSeasons.length} 季` : '确认订阅') }}
+                        </button>
                     </div>
                 </section>
             </div>
@@ -4817,14 +4923,14 @@
                                             <span v-if="detailModal.subscribed && detailModal.detail.media_type !== 'tv'" @click="unsubscribeMedia(detailModal.item)" class="btn-subscribed btn-subscribed-action">
                                                 <i class="fa-solid fa-bell-slash"></i> 取消订阅
                                             </span>
-                                            <button v-if="!detailModal.subscribed && detailModal.detail.media_type !== 'tv'" @click="subscribeMedia(detailModal.item)" class="btn-subscribe">
-                                                <i class="fa-solid fa-bell"></i> 订阅媒体
+                                            <button v-if="!detailModal.subscribed && detailModal.detail.media_type !== 'tv'" @click="openDetailMpSubscribe" class="btn-subscribe">
+                                                <i class="fa-solid fa-bell"></i> MP订阅
                                             </button>
                                             <span v-if="detailModal.detail.media_type === 'tv' && detailModal.selectedSeason != null && detailModal.seasonSubscribed" @click="unsubscribeMedia(detailModal.item)" class="btn-subscribed btn-subscribed-action">
                                                 <i class="fa-solid fa-bell-slash"></i> 取消第 {{ detailModal.selectedSeason }} 季订阅
                                             </span>
-                                            <button v-if="detailModal.detail.media_type === 'tv' && detailModal.selectedSeason != null && !detailModal.seasonSubscribed" @click="subscribeMedia(detailModal.item)" class="btn-subscribe">
-                                                <i class="fa-solid fa-bell"></i> 订阅第 {{ detailModal.selectedSeason }} 季
+                                            <button v-if="detailModal.detail.media_type === 'tv' && !(detailModal.selectedSeason != null && detailModal.seasonSubscribed)" @click="openDetailMpSubscribe" class="btn-subscribe">
+                                                <i class="fa-solid fa-bell"></i> {{ detailModal.selectedSeason != null ? `MP订阅第 ${detailModal.selectedSeason} 季` : 'MP订阅' }}
                                             </button>
                                             <a v-if="getImdbLink()" :href="getImdbLink()" target="_blank" rel="noopener noreferrer" class="detail-external-link">
                                                 <i class="fa-brands fa-imdb"></i> IMDb
@@ -4832,6 +4938,10 @@
                                             <a v-if="getTvdbLink()" :href="getTvdbLink()" target="_blank" rel="noopener noreferrer" class="detail-external-link">
                                                 <i class="fa-solid fa-up-right-from-square"></i> TheTVDB
                                             </a>
+                                            <button class="detail-resource-search-btn" @click.stop="openDetailResourceSearch">
+                                                <i class="fa-solid fa-magnifying-glass"></i>
+                                                资源搜索
+                                            </button>
                                         </div>
                                     </div>
                                 </div>
@@ -5006,6 +5116,45 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="resourceSearchModal.visible" class="discover-overlay resource-search-overlay" @click.self="closeResourceSearchModal">
+            <div class="resource-search-panel">
+                <div class="resource-search-head">
+                    <div>
+                        <div class="resource-search-kicker">资源搜索</div>
+                        <h3>{{ resourceSearchModal.title || '未知媒体' }}</h3>
+                        <p>{{ selectedResourceSearchSourceLabels.join(' / ') || 'Forward 搜索源' }}</p>
+                    </div>
+                    <button class="modal-close-btn resource-search-close" @click="closeResourceSearchModal">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <div v-if="resourceSearchModal.loading" class="resource-search-state">
+                    <i class="fa-solid fa-spinner fa-spin"></i>
+                    <span>正在搜索资源...</span>
+                </div>
+                <div v-else-if="resourceSearchModal.items.length" class="resource-search-list">
+                    <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item">
+                        <div class="resource-search-item-main">
+                            <div class="resource-search-item-title">{{ item.title || item.name || '未命名资源' }}</div>
+                            <div class="resource-search-item-tags">
+                                <span class="resource-search-source-tag">{{ item.sourceName || (item.sourceKey === 'aiying' ? '爱影' : '影巢') }}</span>
+                                <span v-for="tag in String(item.genreTitle || '').split('|').filter(Boolean).slice(0, 8)" :key="tag">{{ tag }}</span>
+                            </div>
+                            <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>
+                        </div>
+                        <button class="resource-search-open-btn" @click="openForwardResource(item)" :disabled="resourceSearchModal.transferringId === String(item.id || item.url || item.title || '')">
+                            <i class="fa-solid" :class="resourceSearchModal.transferringId === String(item.id || item.url || item.title || '') ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'"></i>
+                            {{ resourceSearchModal.transferringId === String(item.id || item.url || item.title || '') ? '转存中' : (item.transferStatus || '转存到整理目录') }}
+                        </button>
+                    </div>
+                </div>
+                <div v-else class="resource-search-state resource-search-empty">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <span>{{ resourceSearchModal.error || '未搜索到可用资源' }}</span>
                 </div>
             </div>
         </div>

@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.services.forward_hdhive_service import forward_hdhive_service
 from app.services.telegram_service import telegram_notify_service
@@ -31,9 +31,32 @@ class ResourceTestRequest(BaseModel):
     tmdb_id: str = ""
 
 
+class ResourceSearchRequest(BaseModel):
+    type: str = "movie"
+    tmdb_id: str = ""
+    season: Optional[int] = None
+    episode: Optional[int] = None
+    sources: list[str] = Field(default_factory=list)
+
+
+class ResourceTransferRequest(BaseModel):
+    source: str = "hdhive"
+    slug: str = ""
+    resource_id: str = ""
+    type: str = "movie"
+    tmdb_id: str = ""
+    season: Optional[int] = None
+    episode: Optional[int] = None
+
+
 @router.get("/config")
 async def get_config(request: Request):
     return forward_hdhive_service.get_config(request, telegram_user_id=await _telegram_user_id())
+
+
+@router.get("/search_sources")
+async def get_search_sources():
+    return {"sources": forward_hdhive_service.get_search_source_options()}
 
 
 @router.post("/config")
@@ -105,22 +128,87 @@ async def load_forward_resources(
         return []
 
     params: dict[str, Any] = await request.json()
+    return await _load_forward_resources_from_params(request, params)
+
+
+@router.post("/search_resources")
+async def search_forward_resources(req: ResourceSearchRequest, request: Request):
+    tmdb_id = str(req.tmdb_id or "").strip()
+    if not tmdb_id:
+        raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
+    params: dict[str, Any] = {
+        "tmdbId": tmdb_id,
+        "type": req.type,
+        "sources": req.sources or [],
+    }
+    if req.season is not None:
+        params["season"] = req.season
+    if req.episode is not None:
+        params["episode"] = req.episode
+    params["ignoreEnabled"] = True
+    return await _load_forward_resources_from_params(request, params, respect_enabled=False)
+
+
+@router.post("/transfer_resource")
+async def transfer_forward_resource(req: ResourceTransferRequest, request: Request):
+    tmdb_id = str(req.tmdb_id or "").strip()
+    if not tmdb_id:
+        raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
+    source = str(req.source or "hdhive").strip().lower()
+    if source == "aiying":
+        resource_id = str(req.resource_id or "").strip()
+        if not resource_id:
+            raise HTTPException(status_code=400, detail="缺少爱影资源 ID")
+        return await forward_hdhive_service.transfer_aiying_resource_to_organize(
+            request,
+            resource_id=resource_id,
+            media_type=req.type,
+            tmdb_id=tmdb_id,
+            season=req.season,
+            episode=req.episode,
+            require_enabled=False,
+        )
+    slug = str(req.slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="缺少影巢资源 slug")
+    return await forward_hdhive_service.transfer_resource_to_organize(
+        request,
+        slug=slug,
+        media_type=req.type,
+        tmdb_id=tmdb_id,
+        season=req.season,
+        episode=req.episode,
+        require_enabled=False,
+    )
+
+
+async def _load_forward_resources_from_params(request: Request, params: dict[str, Any], *, respect_enabled: bool = True):
     tmdb_id = str(params.get("tmdbId") or params.get("tmdb_id") or "").strip()
     if not tmdb_id:
         return []
     media_type = "tv" if str(params.get("type") or "").lower() in {"tv", "series"} else "movie"
+    raw_sources = params.get("sources") or params.get("source") or []
+    if isinstance(raw_sources, str):
+        source_set = {part.strip().lower() for part in raw_sources.split(",") if part.strip()}
+    elif isinstance(raw_sources, list):
+        source_set = {str(part or "").strip().lower() for part in raw_sources if str(part or "").strip()}
+    else:
+        source_set = set()
+    if not source_set or "all" in source_set:
+        source_set = {"hdhive", "aiying"}
     result: list[dict[str, Any]] = []
-    if forward_hdhive_service.config.get("hdhive_enabled", True):
+    if "hdhive" in source_set and (not respect_enabled or forward_hdhive_service.config.get("hdhive_enabled", True)):
         try:
-            resources = forward_hdhive_service.fetch_resources(media_type, tmdb_id)
+            resources = forward_hdhive_service.fetch_resources(media_type, tmdb_id, require_enabled=respect_enabled)
             result.extend(forward_hdhive_service.build_forward_resources(request, params, resources))
         except HTTPException as e:
             logger.warning(f"[Forward] 影巢查询失败: {getattr(e, 'detail', str(e))}")
-    try:
-        aiying_resources = await forward_hdhive_service.fetch_aiying_resources(media_type, tmdb_id)
-        result.extend(forward_hdhive_service.build_aiying_forward_resources(request, params, aiying_resources))
-    except HTTPException as e:
-        logger.warning(f"[Forward] 爱影查询失败: {getattr(e, 'detail', str(e))}")
+    if "aiying" in source_set:
+        try:
+            aiying_resources = await forward_hdhive_service.fetch_aiying_resources(media_type, tmdb_id, require_enabled=respect_enabled)
+            result.extend(forward_hdhive_service.build_aiying_forward_resources(request, params, aiying_resources))
+        except HTTPException as e:
+            logger.warning(f"[Forward] 爱影查询失败: {getattr(e, 'detail', str(e))}")
     return result
 
 
@@ -135,6 +223,7 @@ async def play_forward_resource(
     tmdb_id: str = Query(""),
     season: Optional[int] = Query(None),
     episode: Optional[int] = Query(None),
+    ignore_enabled: bool = Query(False),
 ):
     forward_hdhive_service.verify_token(token)
     if str(source or "").lower() == "aiying":
@@ -147,6 +236,7 @@ async def play_forward_resource(
             tmdb_id=tmdb_id,
             season=season,
             episode=episode,
+            require_enabled=not ignore_enabled,
         )
     else:
         if not slug:
@@ -158,6 +248,7 @@ async def play_forward_resource(
             tmdb_id=tmdb_id,
             season=season,
             episode=episode,
+            require_enabled=not ignore_enabled,
         )
     return RedirectResponse(direct_url, status_code=302)
 

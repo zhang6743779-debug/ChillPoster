@@ -5,6 +5,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         // ==========================================
         // 14. 发现推荐页
         // ==========================================
+        const RESOURCE_SEARCH_SOURCE_STORAGE_KEY = 'chillposter-discover-resource-search-sources';
         const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 36;
         const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 16;
         const MISSING_EPISODE_RENDER_STEP_DESKTOP = 24;
@@ -49,6 +50,36 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const searchPage = ref(1);
         const searchTotalPages = ref(1);
         const missingEpisodeCompareModal = reactive({ visible: false, row: null });
+        const mpSubscribeModal = reactive({
+            visible: false,
+            loading: false,
+            title: '',
+            year: '',
+            tmdbId: '',
+            mediaType: 'tv',
+            seasons: [],
+            selectedMode: 'all',
+            selectedSeasons: [],
+        });
+        const resourceSearchSources = ref([]);
+        const resourceSearchSourceLoading = ref(false);
+        const resourceSearchSourceMenuOpen = ref(false);
+        const selectedResourceSearchSources = ref([]);
+        const resourceSearchModal = reactive({
+            visible: false,
+            context: '',
+            loading: false,
+            items: [],
+            error: '',
+            title: '',
+            mediaType: 'movie',
+            tmdbId: '',
+            sources: [],
+            season: null,
+            episode: null,
+            transferringId: '',
+        });
+        let resourceSearchSourcesPromise = null;
 
         // ===== 发现页状态 (MP 克隆) =====
         const LIBRARY_STATUS_FILTER_KEY = '__library_status';
@@ -79,6 +110,97 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             return discoverFiltersBySource[key];
         });
         const discoverEmptyText = computed(() => discoverSourceSupported.value ? '暂无内容' : '该数据源暂未接入当前项目');
+        const selectedResourceSearchSourceLabels = computed(() => {
+            const selected = new Set(selectedResourceSearchSources.value || []);
+            return (resourceSearchSources.value || [])
+                .filter(source => selected.has(source.key))
+                .map(source => source.label || source.name || source.key);
+        });
+        const resourceSearchSourceButtonText = computed(() => {
+            const labels = selectedResourceSearchSourceLabels.value;
+            return labels.length ? `搜索源: ${labels.join(' / ')}` : '搜索源';
+        });
+        const resourceSearchSourceReady = computed(() => {
+            return resourceSearchSources.value.length > 0 && selectedResourceSearchSources.value.length > 0;
+        });
+
+        const readSavedResourceSearchSources = () => {
+            try {
+                const raw = localStorage.getItem(RESOURCE_SEARCH_SOURCE_STORAGE_KEY);
+                const parsed = JSON.parse(raw || '[]');
+                return Array.isArray(parsed) ? parsed.map(item => String(item || '').trim()).filter(Boolean) : [];
+            } catch (_) {
+                return [];
+            }
+        };
+
+        const saveSelectedResourceSearchSources = () => {
+            try {
+                localStorage.setItem(RESOURCE_SEARCH_SOURCE_STORAGE_KEY, JSON.stringify(selectedResourceSearchSources.value || []));
+            } catch (_) {}
+        };
+
+        const reconcileResourceSearchSelection = () => {
+            const availableKeys = (resourceSearchSources.value || []).map(source => source.key).filter(Boolean);
+            const availableSet = new Set(availableKeys);
+            const current = (selectedResourceSearchSources.value || []).filter(key => availableSet.has(key));
+            const saved = readSavedResourceSearchSources().filter(key => availableSet.has(key));
+            const next = current.length ? current : (saved.length ? saved : availableKeys);
+            selectedResourceSearchSources.value = Array.from(new Set(next));
+            saveSelectedResourceSearchSources();
+        };
+
+        const loadResourceSearchSources = async (force = false) => {
+            if (resourceSearchSourceLoading.value && resourceSearchSourcesPromise) return resourceSearchSourcesPromise;
+            if (!force && resourceSearchSources.value.length) return;
+            resourceSearchSourceLoading.value = true;
+            resourceSearchSourcesPromise = (async () => {
+                try {
+                    const res = await axios.get('/api/forward/search_sources');
+                    resourceSearchSources.value = res.data?.sources || [];
+                    reconcileResourceSearchSelection();
+                } catch (e) {
+                    console.error('加载资源搜索源失败:', e);
+                    resourceSearchSources.value = [];
+                    selectedResourceSearchSources.value = [];
+                } finally {
+                    resourceSearchSourceLoading.value = false;
+                    resourceSearchSourcesPromise = null;
+                }
+            })();
+            return resourceSearchSourcesPromise;
+        };
+
+        const toggleResourceSearchSourceMenu = async () => {
+            const nextOpen = !resourceSearchSourceMenuOpen.value;
+            resourceSearchSourceMenuOpen.value = nextOpen;
+            if (nextOpen) await loadResourceSearchSources(true);
+        };
+
+        const closeResourceSearchSourceMenu = () => {
+            resourceSearchSourceMenuOpen.value = false;
+        };
+
+        const handleResourceSearchSourceOutsideClick = () => {
+            if (resourceSearchSourceMenuOpen.value) closeResourceSearchSourceMenu();
+        };
+
+        const toggleResourceSearchSource = (key) => {
+            key = String(key || '').trim();
+            if (!key) return;
+            const selected = new Set(selectedResourceSearchSources.value || []);
+            if (selected.has(key)) {
+                if (selected.size <= 1) {
+                    showToast?.('至少保留一个资源搜索源', 'warning');
+                    return;
+                }
+                selected.delete(key);
+            } else {
+                selected.add(key);
+            }
+            selectedResourceSearchSources.value = Array.from(selected);
+            saveSelectedResourceSearchSources();
+        };
 
         const fetchGenreList = async () => {
             if (genreList.value.length) return;
@@ -119,6 +241,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 const res = await axios.get('/api/discover/sources');
                 discoverSourceTabs.value = res.data.sources || [];
                 discoverSourceTabs.value.forEach(source => ensureSourceFilters(source));
+                loadResourceSearchSources();
                 await fetchGenreList();
                 patchTmdbGenreSchema();
                 if (!discoverSourceMap.value[discoverActiveSource.value] && discoverSourceTabs.value.length) {
@@ -460,6 +583,16 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 || normalized === 'pilot';
         };
 
+        const isMissingEpisodeErrorRow = (row = {}) => {
+            return row?.missingCategory === 'error'
+                || row?.status === 'error'
+                || row?.status === 'missing';
+        };
+
+        const shouldShowMissingEpisodeTmdbCompare = (row = missingEpisodeCompareModal.row) => {
+            return isMissingEpisodeErrorRow(row);
+        };
+
         const getMissingEpisodePosterCategoryLabel = (row = {}) => {
             const category = String(row.missingCategory || '').trim().toLowerCase();
             const total = Number(row.totalEpisodes) || 0;
@@ -516,6 +649,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const getLocalSeasonRows = (row = missingEpisodeCompareModal.row) => {
             const seasons = row?.localItem?.seasons || {};
+            const showTmdbCompare = shouldShowMissingEpisodeTmdbCompare(row);
             const tmdbSeasonMap = new Map((row?.seasons || [])
                 .map(season => [Number(season.seasonNumber), season])
                 .filter(([season]) => Number.isFinite(season) && season > 0));
@@ -529,7 +663,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     const tmdbSeason = tmdbSeasonMap.get(seasonNumber);
                     const hasExplicitExtra = Array.isArray(tmdbSeason?.extraEpisodes);
                     const explicitExtra = normalizeEpisodeList(tmdbSeason?.extraEpisodes);
-                    const extraEpisodes = extraSeasonMap.get(seasonNumber)
+                    const extraEpisodes = !showTmdbCompare ? [] : extraSeasonMap.get(seasonNumber)
                         || (hasExplicitExtra ? explicitExtra : (tmdbSeason
                             ? episodeList.filter(ep => ep > (Number(tmdbSeason.total) || 0))
                             : episodeList));
@@ -578,18 +712,18 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const closeMissingEpisodeCompare = () => {
             missingEpisodeCompareModal.visible = false;
             missingEpisodeCompareModal.row = null;
+            if (resourceSearchModal.context === 'missing_episode') {
+                resourceSearchModal.visible = false;
+                resourceSearchModal.context = '';
+                resourceSearchModal.loading = false;
+                resourceSearchModal.items = [];
+                resourceSearchModal.error = '';
+                resourceSearchModal.transferringId = '';
+            }
         };
 
         const openMissingEpisodeCard = (row = {}) => {
-            const isErrorRow = missingEpisodeStats.filter === 'error'
-                || row.missingCategory === 'error'
-                || row.status === 'error'
-                || row.status === 'missing';
-            if (isErrorRow) {
-                openMissingEpisodeCompare(row);
-                return;
-            }
-            openMediaDetail(row.item);
+            openMissingEpisodeCompare(row);
         };
 
         const teardownMissingEpisodeLoadMoreObserver = () => {
@@ -710,9 +844,11 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         });
 
         window.addEventListener('scroll', onMissingEpisodeScrollFallback, { passive: true });
+        document.addEventListener('click', handleResourceSearchSourceOutsideClick);
 
         onBeforeUnmount(() => {
             window.removeEventListener('scroll', onMissingEpisodeScrollFallback);
+            document.removeEventListener('click', handleResourceSearchSourceOutsideClick);
             teardownMissingEpisodeLoadMoreObserver();
             if (discoverRealtimeEventSource) {
                 discoverRealtimeEventSource.close();
@@ -1254,6 +1390,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             detailModal.seasonEpisodesLoading = {};
             detailModal.librarySeriesStatus = { exists: false, seasons: {} };
             detailHistoryActive = false;
+            resourceSearchModal.visible = false;
+            resourceSearchModal.loading = false;
         };
 
         const handleDetailPopstate = () => {
@@ -1416,8 +1554,173 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const openMissingEpisodeCompareDetail = () => {
             const item = missingEpisodeCompareModal.row?.item;
             if (!item) return;
-            closeMissingEpisodeCompare();
             openMediaDetail(item);
+        };
+
+        const normalizeMpSubscribeSeasons = (seasons = []) => {
+            const map = new Map();
+            (Array.isArray(seasons) ? seasons : []).forEach(season => {
+                const number = Number(season?.season_number ?? season?.seasonNumber ?? season?.season);
+                if (!Number.isFinite(number) || number <= 0) return;
+                if (!map.has(number)) {
+                    map.set(number, {
+                        season: number,
+                        episodeCount: Number(season?.episode_count ?? season?.total ?? season?.episodes?.length ?? 0) || 0,
+                        name: String(season?.name || '').trim(),
+                    });
+                }
+            });
+            return [...map.values()].sort((a, b) => a.season - b.season);
+        };
+
+        const subscribeMoviePilotMedia = async ({ tmdbId, mediaType = 'movie', title = '', year = '', season = null } = {}) => {
+            if (!mpConfig.mp_url) {
+                showToast('请先配置 MoviePilot 连接信息', 'warning');
+                return false;
+            }
+            const normalizedTmdbId = Number(tmdbId);
+            if (!Number.isFinite(normalizedTmdbId) || normalizedTmdbId <= 0) {
+                showToast('未获取到 TMDB ID，无法订阅', 'warning');
+                return false;
+            }
+            try {
+                const body = {
+                    tmdbid: normalizedTmdbId,
+                    type_name: mediaType,
+                    name: title,
+                    year,
+                };
+                if (mediaType === 'tv' && season != null && season !== 'all') {
+                    body.season = Number(season);
+                }
+                await axios.post('/api/moviepilot/subscribe', body);
+                const currentTmdbId = String(detailModal.detail?.tmdb_id || detailModal.item?._tmdb_id || detailModal.item?.tmdb_id || detailModal.item?.id || '');
+                if (currentTmdbId && currentTmdbId === String(normalizedTmdbId)) {
+                    if (mediaType === 'tv' && body.season) {
+                        detailModal.seasonSubscribed = true;
+                    } else {
+                        detailModal.subscribed = true;
+                    }
+                    if (detailModal.item) detailModal.item.subscribed = true;
+                }
+                showToast(mediaType === 'tv' && body.season ? `MP已订阅第 ${body.season} 季` : 'MP订阅成功', 'success');
+                return true;
+            } catch (e) {
+                showToast('MP订阅失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
+            }
+        };
+
+        const closeMpSubscribeModal = () => {
+            mpSubscribeModal.visible = false;
+            mpSubscribeModal.loading = false;
+        };
+
+        const openMpSubscribeModalForMedia = async ({
+            tmdbId,
+            mediaType = 'movie',
+            title = '',
+            year = '',
+            seasons = [],
+            defaultSeason = null,
+        } = {}) => {
+            const normalizedMediaType = String(mediaType || '').toLowerCase() === 'movie' ? 'movie' : 'tv';
+            if (normalizedMediaType === 'movie') {
+                await subscribeMoviePilotMedia({ tmdbId, mediaType: 'movie', title, year });
+                return;
+            }
+            const seasonOptions = normalizeMpSubscribeSeasons(seasons);
+            mpSubscribeModal.visible = true;
+            mpSubscribeModal.loading = false;
+            mpSubscribeModal.title = title || '';
+            mpSubscribeModal.year = year || '';
+            mpSubscribeModal.tmdbId = String(tmdbId || '');
+            mpSubscribeModal.mediaType = 'tv';
+            mpSubscribeModal.seasons = seasonOptions;
+            const defaultNumber = Number(defaultSeason);
+            if (Number.isFinite(defaultNumber) && defaultNumber > 0) {
+                mpSubscribeModal.selectedMode = 'seasons';
+                mpSubscribeModal.selectedSeasons = [defaultNumber];
+            } else {
+                mpSubscribeModal.selectedMode = 'all';
+                mpSubscribeModal.selectedSeasons = [];
+            }
+        };
+
+        const toggleMpSubscribeSeason = (season) => {
+            const seasonNumber = Number(season);
+            if (!Number.isFinite(seasonNumber) || seasonNumber <= 0) return;
+            mpSubscribeModal.selectedMode = 'seasons';
+            const current = new Set((mpSubscribeModal.selectedSeasons || []).map(value => Number(value)));
+            if (current.has(seasonNumber)) {
+                current.delete(seasonNumber);
+            } else {
+                current.add(seasonNumber);
+            }
+            mpSubscribeModal.selectedSeasons = [...current].sort((a, b) => a - b);
+        };
+
+        const confirmMpSubscribe = async () => {
+            if (mpSubscribeModal.loading) return;
+            if (mpSubscribeModal.selectedMode === 'seasons' && !mpSubscribeModal.selectedSeasons.length) {
+                showToast('请选择要订阅的季，或切换为全剧订阅', 'warning');
+                return;
+            }
+            mpSubscribeModal.loading = true;
+            let ok = false;
+            if (mpSubscribeModal.selectedMode === 'all') {
+                ok = await subscribeMoviePilotMedia({
+                    tmdbId: mpSubscribeModal.tmdbId,
+                    mediaType: mpSubscribeModal.mediaType,
+                    title: mpSubscribeModal.title,
+                    year: mpSubscribeModal.year,
+                    season: null,
+                });
+            } else {
+                ok = true;
+                for (const season of mpSubscribeModal.selectedSeasons) {
+                    const seasonOk = await subscribeMoviePilotMedia({
+                        tmdbId: mpSubscribeModal.tmdbId,
+                        mediaType: mpSubscribeModal.mediaType,
+                        title: mpSubscribeModal.title,
+                        year: mpSubscribeModal.year,
+                        season,
+                    });
+                    ok = ok && seasonOk;
+                    if (!seasonOk) break;
+                }
+            }
+            mpSubscribeModal.loading = false;
+            if (ok) closeMpSubscribeModal();
+        };
+
+        const openDetailMpSubscribe = async () => {
+            const detail = detailModal.detail || {};
+            const item = detailModal.item || {};
+            await openMpSubscribeModalForMedia({
+                tmdbId: detail.tmdb_id || item._tmdb_id || item.tmdb_id || item.id || '',
+                mediaType: detail.media_type || item.media_type || 'movie',
+                title: detail.title || item.title || '',
+                year: detail.year || item.year || '',
+                seasons: detail.seasons || [],
+                defaultSeason: detailModal.selectedSeason,
+            });
+        };
+
+        const openMissingEpisodeMpSubscribe = async () => {
+            const row = missingEpisodeCompareModal.row || {};
+            const item = row.item || {};
+            const localSeasons = getLocalSeasonRows(row).map(season => ({
+                season_number: season.season,
+                episode_count: season.episodes.length,
+            }));
+            await openMpSubscribeModalForMedia({
+                tmdbId: row.tmdbId || item.tmdb_id || item._tmdb_id || item.id || '',
+                mediaType: 'tv',
+                title: row.title || item.title || row.localItem?.title || '',
+                year: row.year || item.year || row.localItem?.year || '',
+                seasons: (row.seasons && row.seasons.length) ? row.seasons : localSeasons,
+            });
         };
 
         const getMissingEpisodeEmbyContext = (row = missingEpisodeCompareModal.row) => {
@@ -1509,6 +1812,127 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             } catch (e) {
                 showToast('取消失败: ' + (e.response?.data?.detail || e.message), 'error');
             }
+        };
+
+        const closeResourceSearchModal = () => {
+            resourceSearchModal.visible = false;
+            resourceSearchModal.loading = false;
+        };
+
+        const openForwardResource = async (item = {}) => {
+            const source = String(item.sourceKey || item.source || 'hdhive').trim().toLowerCase();
+            const transferId = String(item.id || item.url || item.title || Date.now());
+            const payload = {
+                source,
+                slug: item.slug || '',
+                resource_id: item.resourceId || item.resource_id || '',
+                type: resourceSearchModal.mediaType || item.mediaType || 'movie',
+                tmdb_id: resourceSearchModal.tmdbId || item.tmdbId || item.tmdb_id || '',
+            };
+            if (resourceSearchModal.season != null) payload.season = resourceSearchModal.season;
+            if (resourceSearchModal.episode != null) payload.episode = resourceSearchModal.episode;
+            if (source === 'aiying' && !payload.resource_id) {
+                showToast?.('该爱影资源缺少转存 ID，请重新搜索', 'warning');
+                return;
+            }
+            if (source !== 'aiying' && !payload.slug) {
+                showToast?.('该影巢资源缺少转存标识，请重新搜索', 'warning');
+                return;
+            }
+            resourceSearchModal.transferringId = transferId;
+            try {
+                const res = await axios.post('/api/forward/transfer_resource', payload);
+                item.transferStatus = res.data?.status || '转存成功';
+                showToast?.(res.data?.message || '已转存到整理目录', 'success');
+            } catch (e) {
+                const message = e.response?.data?.detail || e.message || '转存失败';
+                showToast?.('转存失败: ' + message, 'error');
+            } finally {
+                if (resourceSearchModal.transferringId === transferId) {
+                    resourceSearchModal.transferringId = '';
+                }
+            }
+        };
+
+        const openResourceSearchForMedia = async ({
+            tmdbId,
+            mediaType = 'movie',
+            title = '',
+            season = null,
+            episode = null,
+            context = 'modal',
+            inline = false,
+        } = {}) => {
+            await loadResourceSearchSources(true);
+            if (!resourceSearchSources.value.length) {
+                showToast?.('请先在 Forward 模块配置影巢或爱影资源源', 'warning');
+                return;
+            }
+            if (!selectedResourceSearchSources.value.length) {
+                reconcileResourceSearchSelection();
+            }
+            const normalizedTmdbId = String(tmdbId || '').trim();
+            if (!normalizedTmdbId) {
+                showToast?.('未获取到 TMDB ID，无法搜索资源', 'warning');
+                return;
+            }
+            const normalizedMediaType = String(mediaType || '').toLowerCase() === 'movie' ? 'movie' : 'tv';
+            const sources = [...selectedResourceSearchSources.value];
+            resourceSearchModal.visible = !inline;
+            resourceSearchModal.context = context;
+            resourceSearchModal.loading = true;
+            resourceSearchModal.items = [];
+            resourceSearchModal.error = '';
+            resourceSearchModal.title = title || '';
+            resourceSearchModal.mediaType = normalizedMediaType;
+            resourceSearchModal.tmdbId = normalizedTmdbId;
+            resourceSearchModal.sources = sources;
+            resourceSearchModal.season = normalizedMediaType === 'tv' && season != null ? season : null;
+            resourceSearchModal.episode = normalizedMediaType === 'tv' && episode != null ? episode : null;
+            resourceSearchModal.transferringId = '';
+            try {
+                const payload = {
+                    tmdb_id: normalizedTmdbId,
+                    type: normalizedMediaType,
+                    sources,
+                };
+                if (resourceSearchModal.season != null) payload.season = resourceSearchModal.season;
+                if (resourceSearchModal.episode != null) payload.episode = resourceSearchModal.episode;
+                const res = await axios.post('/api/forward/search_resources', payload);
+                resourceSearchModal.items = res.data || [];
+                if (!resourceSearchModal.items.length) {
+                    resourceSearchModal.error = '未搜索到可用资源';
+                }
+            } catch (e) {
+                resourceSearchModal.error = e.response?.data?.detail || e.message || '资源搜索失败';
+                showToast?.('资源搜索失败: ' + resourceSearchModal.error, 'error');
+            } finally {
+                resourceSearchModal.loading = false;
+            }
+        };
+
+        const openDetailResourceSearch = async () => {
+            const detail = detailModal.detail || {};
+            const item = detailModal.item || {};
+            await openResourceSearchForMedia({
+                tmdbId: detail.tmdb_id || item._tmdb_id || item.id || '',
+                mediaType: detail.media_type || item.media_type || 'movie',
+                title: detail.title || item.title || '',
+                season: detailModal.selectedSeason,
+                context: 'detail',
+            });
+        };
+
+        const openMissingEpisodeResourceSearch = async () => {
+            const row = missingEpisodeCompareModal.row || {};
+            const item = row.item || {};
+            await openResourceSearchForMedia({
+                tmdbId: row.tmdbId || item.tmdb_id || item._tmdb_id || item.id || '',
+                mediaType: 'tv',
+                title: row.title || item.title || row.localItem?.title || '',
+                context: 'missing_episode',
+                inline: true,
+            });
         };
 
         const openRowGrid = async (row) => {
@@ -1755,6 +2179,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
     return {
         detailModal,
         missingEpisodeCompareModal,
+        mpSubscribeModal,
         openMediaDetail,
         closeDetailModal,
         handleDetailPopstate,
@@ -1773,6 +2198,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         missingEpisodeLoadMoreSentinel,
         getMissingEpisodePosterKey,
         getMissingEpisodePosterCategoryLabel,
+        isMissingEpisodeErrorRow,
+        shouldShowMissingEpisodeTmdbCompare,
         isMissingEpisodePosterReady,
         countLocalEpisodes,
         formatLocalSeasonBrief,
@@ -1782,6 +2209,12 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         isEpisodeListed,
         openMissingEpisodeCard,
         openMissingEpisodeCompareDetail,
+        openMissingEpisodeResourceSearch,
+        openMissingEpisodeMpSubscribe,
+        closeMpSubscribeModal,
+        confirmMpSubscribe,
+        toggleMpSubscribeSeason,
+        openDetailMpSubscribe,
         canOpenMissingEpisodeEmby,
         getMissingEpisodeEmbyUrl,
         openMissingEpisodeEmby,
@@ -1820,6 +2253,21 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         searchDiscover,
         loadMoreSearch,
         clearDiscoverSearch,
+        resourceSearchSources,
+        resourceSearchSourceLoading,
+        resourceSearchSourceMenuOpen,
+        selectedResourceSearchSources,
+        selectedResourceSearchSourceLabels,
+        resourceSearchSourceButtonText,
+        resourceSearchSourceReady,
+        toggleResourceSearchSourceMenu,
+        closeResourceSearchSourceMenu,
+        toggleResourceSearchSource,
+        loadResourceSearchSources,
+        resourceSearchModal,
+        openDetailResourceSearch,
+        closeResourceSearchModal,
+        openForwardResource,
         genreList,
         discoverSourceTabs,
         discoverActiveSource,
