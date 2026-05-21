@@ -9382,6 +9382,10 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     .missing-episode-actions-stack { flex-direction: column; width: 100%; min-width: 0; align-items: stretch; }
     .missing-episode-actions { width: 100%; justify-content: stretch; }
     .missing-episode-actions .btn { flex: 1; justify-content: center; }
+    .missing-episode-actions-stack .missing-episode-search-control {
+        flex: 0 0 auto;
+        height: 42px;
+    }
     .missing-episode-filter-strip { grid-template-columns: 1fr; }
     .missing-episode-summary-grid { grid-template-columns: 1fr 1fr; }
     .missing-episode-view-controls label,
@@ -14157,6 +14161,8 @@ html[data-theme="light"] .network-connectivity-skeleton {
     }
 
     .dashboard-recent-card .dashboard-section-title {
+        font-size: 16px !important;
+        font-weight: 700 !important;
         letter-spacing: -0.045em !important;
         line-height: 1.18 !important;
     }
@@ -14167,7 +14173,7 @@ html[data-theme="light"] .network-connectivity-skeleton {
 
     .recent-media-row {
         margin: 0 !important;
-        padding: 0 14px 8px !important;
+        padding: 0 0 8px !important;
     }
 
     .playback-hero-list {

@@ -1145,15 +1145,6 @@
                                         <i class="fa-solid fa-xmark"></i>
                                     </button>
                                 </label>
-                                <button class="mp-discover-search-submit" type="submit" :disabled="discoverSearchLoading || !discoverSearchQuery">
-                                    <i v-if="discoverSearchLoading" class="fa-solid fa-spinner fa-spin"></i>
-                                    <i v-else class="fa-solid fa-magnifying-glass"></i>
-                                    <span>搜索</span>
-                                </button>
-                                <button v-if="discoverHasSearched" class="mp-discover-search-back" type="button" @click="clearDiscoverSearch">
-                                    <i class="fa-solid fa-table-cells-large"></i>
-                                    <span>推荐</span>
-                                </button>
                             </form>
 
                             <!-- 搜索 -->
