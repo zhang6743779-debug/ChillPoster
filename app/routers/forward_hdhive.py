@@ -97,10 +97,8 @@ async def widget_js(request: Request, token: str = Query("")):
         "token": token,
     }
     js = f"""
-(function () {{
-  const ChillPosterForward = {json.dumps(payload, ensure_ascii=False)};
-
-  WidgetMetadata = {{
+var ChillPosterForward = {json.dumps(payload, ensure_ascii=False)};
+var WidgetMetadata = {{
     id: "chillposter.forward.hdhive",
     title: "ChillPoster 影巢",
     icon: "https://hdhive.com/favicon.ico",
@@ -120,7 +118,7 @@ async def widget_js(request: Request, token: str = Query("")):
     ]
   }};
 
-  async function chillposterPost(path, body) {{
+async function chillposterPost(path, body) {{
     const url = `${{ChillPosterForward.baseUrl}}${{path}}?token=${{encodeURIComponent(ChillPosterForward.token)}}`;
     const res = await fetch(url, {{
       method: "POST",
@@ -135,11 +133,19 @@ async def widget_js(request: Request, token: str = Query("")):
       throw new Error(text || `ChillPoster HTTP ${{res.status}}`);
     }}
     return await res.json();
-  }}
+}}
 
-  async function loadResource(params) {{
+async function loadResource(params) {{
     return await chillposterPost("/api/forward/resources", params || {{}});
-  }}
-}})();
+}}
+
+if (typeof globalThis !== "undefined") {{
+  globalThis.WidgetMetadata = WidgetMetadata;
+  globalThis.loadResource = loadResource;
+}}
 """
-    return Response(js, media_type="application/javascript; charset=utf-8")
+    return Response(
+        js,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )

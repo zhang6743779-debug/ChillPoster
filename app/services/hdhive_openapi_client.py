@@ -2,6 +2,9 @@
 HDHive Open API 客户端
 """
 
+from collections import deque
+from threading import Lock
+from time import monotonic, sleep
 from typing import Any, Literal
 import httpx
 
@@ -67,6 +70,25 @@ _CODE_MAP: dict[str, type[HDHiveAPIError]] = {
 MediaType = Literal["movie", "tv"]
 
 
+_RATE_LIMIT_QPS = 5
+_RATE_LIMIT_WINDOW_SECONDS = 1.0
+_RATE_LIMIT_LOCK = Lock()
+_RATE_LIMIT_REQUESTS: deque[float] = deque()
+
+
+def _throttle_openapi_request() -> None:
+    while True:
+        with _RATE_LIMIT_LOCK:
+            now = monotonic()
+            while _RATE_LIMIT_REQUESTS and now - _RATE_LIMIT_REQUESTS[0] >= _RATE_LIMIT_WINDOW_SECONDS:
+                _RATE_LIMIT_REQUESTS.popleft()
+            if len(_RATE_LIMIT_REQUESTS) < _RATE_LIMIT_QPS:
+                _RATE_LIMIT_REQUESTS.append(now)
+                return
+            wait_seconds = _RATE_LIMIT_WINDOW_SECONDS - (now - _RATE_LIMIT_REQUESTS[0])
+        sleep(max(wait_seconds, 0.01))
+
+
 class HDHiveOpenClient:
     BASE_URL = "https://hdhive.com/api/open"
 
@@ -122,7 +144,17 @@ class HDHiveOpenClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
     ) -> Any:
+        _throttle_openapi_request()
         resp = self._client.request(method, path, params=params, json=json)
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                sleep_seconds = float(retry_after) if retry_after else 1.0
+            except Exception:
+                sleep_seconds = 1.0
+            sleep(max(sleep_seconds, 1.0))
+            _throttle_openapi_request()
+            resp = self._client.request(method, path, params=params, json=json)
         self._raise_for_response(resp)
         body: dict[str, Any] = resp.json()
         return body.get("data"), body.get("meta")
