@@ -13,7 +13,6 @@ import re
 import json
 import uuid
 import asyncio
-import sqlite3
 import time as _time
 import threading
 import hashlib
@@ -95,13 +94,6 @@ _WASH_CODEC_MULTIPLIERS = {
     "XVID": 0.6,
     "DIVX": 0.6,
 }
-_FFPROBE_FILE_CACHE_PATH = "config/media_organize_ffprobe_cache.json"
-_FFPROBE_FILE_CACHE_DB_PATH = (
-    os.getenv("CHILLPOSTER_FFPROBE_CACHE_DB")
-    or os.path.splitext(_FFPROBE_FILE_CACHE_PATH)[0] + ".db"
-)
-_FFPROBE_BATCH_CACHE_PATH = "config/media_organize_ffprobe_batch_cache.json"
-_FFPROBE_BATCH_CACHE_TTL_SECONDS = 1800
 _FFPROBE_BATCH_SAMPLE_LIMIT = 3
 _FFPROBE_NAME_CONFLICT_REASONS = {"resolution_conflict", "codec_conflict"}
 _FFPROBE_PROFILE_FIELDS = (
@@ -116,239 +108,40 @@ _FFPROBE_PROFILE_FIELDS = (
     "release_group",
 )
 _FFPROBE_CACHE_LOCK = threading.RLock()
-_FFPROBE_FILE_CACHE_DB_READY = False
+_FFPROBE_FILE_CACHE: Optional[dict] = None
 _FFPROBE_BATCH_CACHE: Optional[dict] = None
 _FFPROBE_MEDIA_DOWNLOAD_LIMIT = 3
 _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(_FFPROBE_MEDIA_DOWNLOAD_LIMIT)
 _FFPROBE_EXEC_TIMEOUT_SECONDS = 45
 
 
-def _open_ffprobe_file_cache_db() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(_FFPROBE_FILE_CACHE_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_FFPROBE_FILE_CACHE_DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    return conn
-
-
-def _ffprobe_json_cache_signature() -> str:
-    try:
-        stat = os.stat(_FFPROBE_FILE_CACHE_PATH)
-        return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
-    except OSError:
-        return ""
-
-
-def _get_ffprobe_file_cache_meta(conn: sqlite3.Connection, key: str) -> str:
-    row = conn.execute("SELECT value FROM ffprobe_file_cache_meta WHERE key = ?", (key,)).fetchone()
-    return str(row["value"]) if row else ""
-
-
-def _set_ffprobe_file_cache_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
-    conn.execute(
-        "INSERT INTO ffprobe_file_cache_meta(key, value) VALUES(?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (str(key), str(value)),
-    )
-
-
-def _create_ffprobe_file_cache_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS ffprobe_file_cache_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS ffprobe_file_cache (
-            cache_key TEXT PRIMARY KEY,
-            fields_json TEXT NOT NULL,
-            resource_pix TEXT NOT NULL DEFAULT '',
-            video_encode TEXT NOT NULL DEFAULT '',
-            audio_encode TEXT NOT NULL DEFAULT '',
-            fps TEXT NOT NULL DEFAULT '',
-            resource_effect TEXT NOT NULL DEFAULT '',
-            video_effect TEXT NOT NULL DEFAULT '',
-            color_depth TEXT NOT NULL DEFAULT '',
-            source TEXT NOT NULL DEFAULT '',
-            release_group TEXT NOT NULL DEFAULT '',
-            duration_seconds REAL NOT NULL DEFAULT 0,
-            size INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_ffprobe_file_cache_updated_at
-            ON ffprobe_file_cache(updated_at);
-        CREATE INDEX IF NOT EXISTS idx_ffprobe_file_cache_size
-            ON ffprobe_file_cache(size);
-        """
-    )
-
-
-def _ffprobe_file_cache_payload(cache_key: str, fields: dict, file_size: int = 0, updated_at: Optional[int] = None) -> tuple:
-    normalized = _normalize_ffprobe_fields(fields)
-    updated_at = int(updated_at or _time.time())
-    file_size = int(file_size or fields.get("size", 0) or 0)
-    payload = {
-        **normalized,
-        "updated_at": updated_at,
-        "size": file_size,
-    }
-    return (
-        str(cache_key or ""),
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-        normalized["resource_pix"],
-        normalized["video_encode"],
-        normalized["audio_encode"],
-        normalized["fps"],
-        normalized["resource_effect"],
-        normalized["video_effect"],
-        normalized["color_depth"],
-        normalized["source"],
-        normalized["release_group"],
-        float(normalized["duration_seconds"] or 0.0),
-        file_size,
-        updated_at,
-    )
-
-
-def _upsert_ffprobe_file_cache_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
-    if not rows:
-        return
-    conn.executemany(
-        """
-        INSERT INTO ffprobe_file_cache(
-            cache_key, fields_json, resource_pix, video_encode, audio_encode, fps,
-            resource_effect, video_effect, color_depth, source, release_group,
-            duration_seconds, size, updated_at
-        )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(cache_key) DO UPDATE SET
-            fields_json = excluded.fields_json,
-            resource_pix = excluded.resource_pix,
-            video_encode = excluded.video_encode,
-            audio_encode = excluded.audio_encode,
-            fps = excluded.fps,
-            resource_effect = excluded.resource_effect,
-            video_effect = excluded.video_effect,
-            color_depth = excluded.color_depth,
-            source = excluded.source,
-            release_group = excluded.release_group,
-            duration_seconds = excluded.duration_seconds,
-            size = excluded.size,
-            updated_at = excluded.updated_at
-        """,
-        rows,
-    )
-
-
-def _migrate_ffprobe_file_cache_json(conn: sqlite3.Connection) -> None:
-    signature = _ffprobe_json_cache_signature()
-    if not signature:
-        return
-    if _get_ffprobe_file_cache_meta(conn, "json_migration_signature") == signature:
-        return
-
-    started_at = _time.time()
-    try:
-        with open(_FFPROBE_FILE_CACHE_PATH, "r", encoding="utf-8") as f:
-            raw_cache = json.load(f)
-    except Exception as e:
-        logger.warning(f"[MediaOrganize] ffprobe JSON缓存迁移读取失败: {e}")
-        return
-    if not isinstance(raw_cache, dict):
-        return
-
-    migrated = 0
-    rows: list[tuple] = []
-    now_ts = int(_time.time())
-    for cache_key, fields in raw_cache.items():
-        if not isinstance(fields, dict):
-            continue
-        try:
-            normalized = _normalize_ffprobe_fields(fields)
-        except Exception:
-            continue
-        if not cache_key or not normalized:
-            continue
-        rows.append(
-            _ffprobe_file_cache_payload(
-                str(cache_key),
-                normalized,
-                file_size=int(fields.get("size", 0) or 0),
-                updated_at=int(fields.get("updated_at", 0) or now_ts),
-            )
-        )
-        if len(rows) >= 500:
-            _upsert_ffprobe_file_cache_rows(conn, rows)
-            migrated += len(rows)
-            rows.clear()
-    if rows:
-        _upsert_ffprobe_file_cache_rows(conn, rows)
-        migrated += len(rows)
-
-    _set_ffprobe_file_cache_meta(conn, "json_migration_signature", signature)
-    logger.info(
-        f"[MediaOrganize] ffprobe缓存已迁移到SQLite: {migrated} 条 | "
-        f"耗时:{_time.time() - started_at:.2f}s"
-    )
-
-
-def _ensure_ffprobe_file_cache_db() -> None:
-    global _FFPROBE_FILE_CACHE_DB_READY
-    if _FFPROBE_FILE_CACHE_DB_READY:
-        return
+def _ensure_runtime_ffprobe_file_cache() -> dict:
+    global _FFPROBE_FILE_CACHE
     with _FFPROBE_CACHE_LOCK:
-        if _FFPROBE_FILE_CACHE_DB_READY:
-            return
-        conn = _open_ffprobe_file_cache_db()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            _create_ffprobe_file_cache_schema(conn)
-            _migrate_ffprobe_file_cache_json(conn)
-            conn.commit()
-            _FFPROBE_FILE_CACHE_DB_READY = True
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        if _FFPROBE_FILE_CACHE is None:
+            _FFPROBE_FILE_CACHE = {}
+        return _FFPROBE_FILE_CACHE
+
+
+def _clear_runtime_ffprobe_file_cache() -> None:
+    global _FFPROBE_FILE_CACHE, _FFPROBE_BATCH_CACHE
+    with _FFPROBE_CACHE_LOCK:
+        _FFPROBE_FILE_CACHE = {}
+        _FFPROBE_BATCH_CACHE = {}
 
 
 
 def _load_ffprobe_batch_cache() -> dict:
     global _FFPROBE_BATCH_CACHE
-    now_ts = int(_time.time())
     with _FFPROBE_CACHE_LOCK:
         if _FFPROBE_BATCH_CACHE is None:
-            if os.path.exists(_FFPROBE_BATCH_CACHE_PATH):
-                try:
-                    with open(_FFPROBE_BATCH_CACHE_PATH, "r", encoding="utf-8") as f:
-                        _FFPROBE_BATCH_CACHE = json.load(f)
-                except Exception as e:
-                    logger.warning(f"[MediaOrganize] ffprobe批次缓存加载失败: {e}")
-                    _FFPROBE_BATCH_CACHE = {}
-            else:
-                _FFPROBE_BATCH_CACHE = {}
-        stale_keys = [
-            key for key, value in (_FFPROBE_BATCH_CACHE or {}).items()
-            if now_ts - int((value or {}).get("updated_at", 0) or 0) > _FFPROBE_BATCH_CACHE_TTL_SECONDS
-        ]
-        for key in stale_keys:
-            _FFPROBE_BATCH_CACHE.pop(key, None)
+            _FFPROBE_BATCH_CACHE = {}
         return _FFPROBE_BATCH_CACHE
 
 
 
 def _save_ffprobe_batch_cache() -> None:
-    with _FFPROBE_CACHE_LOCK:
-        cache = _FFPROBE_BATCH_CACHE or {}
-        os.makedirs(os.path.dirname(_FFPROBE_BATCH_CACHE_PATH), exist_ok=True)
-        with open(_FFPROBE_BATCH_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+    return
 
 
 
@@ -389,26 +182,8 @@ def _get_cached_ffprobe_fields(file_item: dict) -> dict:
     cache_key = _build_ffprobe_file_cache_key(file_item)
     if not cache_key:
         return {}
-    try:
-        _ensure_ffprobe_file_cache_db()
-        conn = _open_ffprobe_file_cache_db()
-        try:
-            row = conn.execute(
-                "SELECT fields_json FROM ffprobe_file_cache WHERE cache_key = ?",
-                (cache_key,),
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row:
-            return {}
-        try:
-            fields = json.loads(row["fields_json"] or "{}")
-        except Exception:
-            fields = {}
-        return _normalize_ffprobe_fields(fields)
-    except Exception as e:
-        logger.debug(f"[MediaOrganize] ffprobe SQLite缓存读取失败: {e}")
-        return {}
+    cache = _ensure_runtime_ffprobe_file_cache()
+    return _normalize_ffprobe_fields(cache.get(cache_key) or {})
 
 
 
@@ -417,26 +192,9 @@ def _set_cached_ffprobe_fields(file_item: dict, fields: dict) -> None:
     normalized = _normalize_ffprobe_fields(fields)
     if not cache_key or not normalized:
         return
-    try:
-        _ensure_ffprobe_file_cache_db()
-        row = _ffprobe_file_cache_payload(
-            cache_key,
-            normalized,
-            file_size=int((file_item or {}).get("size", 0) or 0),
-        )
-        with _FFPROBE_CACHE_LOCK:
-            conn = _open_ffprobe_file_cache_db()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                _upsert_ffprobe_file_cache_rows(conn, [row])
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-    except Exception as e:
-        logger.warning(f"[MediaOrganize] ffprobe缓存保存失败: {e}")
+    cache = _ensure_runtime_ffprobe_file_cache()
+    with _FFPROBE_CACHE_LOCK:
+        cache[cache_key] = normalized
 
 
 
@@ -3172,6 +2930,8 @@ async def _run_organize_async(run_id: str, req):
             elapsed_seconds=elapsed,
             detail=f"失败原因：{e}",
         )
+    finally:
+        _clear_runtime_ffprobe_file_cache()
 
 
 # ---------------------------------------------------------------------------

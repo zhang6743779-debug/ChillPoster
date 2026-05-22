@@ -13,6 +13,8 @@ export function useForwardHdhive({ showToast }) {
         aiying_enabled: false,
         aiying_tg_id: '',
         aiying_chill_token: '',
+        aiying_rate_limit_per_minute: 6,
+        aiying_daily_limit: 500,
         aiying_success_count: 0,
         aiying_today_used: 0,
         aiying_last_times: null,

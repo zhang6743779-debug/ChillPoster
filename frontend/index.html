@@ -3576,6 +3576,18 @@
                                             <div class="input-tip">爱影 Token 在 TG 机器人输入 /chilltoken 获取；接口限频 6/min、500/day，ChillPoster 会按查询缓存减少重复调用。</div>
                                         </div>
                                     </div>
+                                    <div class="form-grid-2-tight mt-15">
+                                        <div>
+                                            <label>请求频率</label>
+                                            <input type="number" :value="forwardHdhiveConfig.aiying_rate_limit_per_minute || 6" disabled>
+                                            <div class="input-tip">单位：次/分钟。当前按爱影接口限制固定展示，暂不支持修改。</div>
+                                        </div>
+                                        <div>
+                                            <label>单日请求次数上限</label>
+                                            <input type="number" :value="forwardHdhiveConfig.aiying_daily_limit || 500" disabled>
+                                            <div class="input-tip">单位：次/天。当前按爱影接口限制固定展示，暂不支持修改。</div>
+                                        </div>
+                                    </div>
                                     <div class="stats-grid-mini mt-15">
                                         <div class="stat-mini-card">
                                             <div class="stat-mini-label">当日调用</div>

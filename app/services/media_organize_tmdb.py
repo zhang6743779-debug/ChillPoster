@@ -189,7 +189,7 @@ def _ensure_tmdb_sqlite_cache_schema() -> bool:
         if _TMDB_SQLITE_CACHE_READY:
             return True
         try:
-            from core.cache_db import cache_db
+            from core.cache_db import tmdb_cache_db as cache_db
             with cache_db(write=True) as conn:
                 conn.executescript(
                     """
@@ -295,7 +295,7 @@ def _get_cached_tmdb_detail(tmdb_id: int, media_type: str, required_episode_keys
     if not tmdb_id or not media_type or not _ensure_tmdb_sqlite_cache_schema():
         return None
     try:
-        from core.cache_db import cache_db
+        from core.cache_db import tmdb_cache_db as cache_db
         now_ts = _time.time()
         with cache_db() as conn:
             row = conn.execute(
@@ -321,7 +321,7 @@ def _set_cached_tmdb_detail(tmdb_id: int, media_type: str, data: Optional[dict])
     if not tmdb_id or not media_type or not isinstance(data, dict) or not _ensure_tmdb_sqlite_cache_schema():
         return
     try:
-        from core.cache_db import cache_db
+        from core.cache_db import tmdb_cache_db as cache_db
         now_ts = _time.time()
         ttl_seconds = _tmdb_detail_ttl(media_type, data)
         status = _tmdb_detail_status(media_type, data)
@@ -1519,7 +1519,7 @@ def _get_cached_tmdb_search_result(parsed: dict) -> tuple[bool, Optional[dict]]:
         return False, None
     cache_key = _tmdb_search_cache_key(parsed)
     try:
-        from core.cache_db import cache_db
+        from core.cache_db import tmdb_cache_db as cache_db
         now_ts = _time.time()
         with cache_db() as conn:
             row = conn.execute(
@@ -1551,7 +1551,7 @@ def _set_cached_tmdb_search_result(parsed: dict, result: Optional[dict]) -> None
     ttl_seconds = _TMDB_SEARCH_CACHE_HIT_TTL_SECONDS if hit else _TMDB_SEARCH_CACHE_MISS_TTL_SECONDS
     payload_json = json.dumps(result or {}, ensure_ascii=False, separators=(",", ":"))
     try:
-        from core.cache_db import cache_db
+        from core.cache_db import tmdb_cache_db as cache_db
         now_ts = _time.time()
         with cache_db(write=True) as conn:
             conn.execute(
