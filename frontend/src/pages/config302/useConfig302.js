@@ -20,6 +20,11 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         });
 
         const needs115Setup = computed(() => !hasPrimary115Cookie.value);
+        const standardTopologyEnabled = computed(() => {
+            const drive = Array.isArray(config302.drives) ? config302.drives[0] : null;
+            if (drive && drive.enable_standard_topology === false) return false;
+            return true;
+        });
 
         const open115ConfigPanel = () => {
             if (isMobile.value) {
@@ -535,6 +540,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         config302,
         hasPrimary115Cookie,
         needs115Setup,
+        standardTopologyEnabled,
         open115ConfigPanel,
         notify115SetupRequired,
         qrcode115State,

@@ -19,6 +19,7 @@ from app.services.telegram_service import telegram_notify_service
 from core.logger import logger
 
 _115_READ_REQUEST_TIMEOUT_SECONDS = 10
+_DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS = 10
 _RAPID_RANGE_READ_TIMEOUT_SECONDS = 15
 _RAPID_UPLOAD_INIT_TIMEOUT_SECONDS = 30
 
@@ -879,6 +880,7 @@ class Drive115Service:
                     user_agent=user_agent or "Mozilla/5.0",
                     app="chrome",
                     async_=False,
+                    timeout=_DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS,
                 )
                 if direct_link_context == "gateway_playback":
                     result = await self._run_gateway_playback_direct_url_request("获取直链", request_factory)

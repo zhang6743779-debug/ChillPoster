@@ -1073,19 +1073,16 @@ async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries:
                 done_event = None
 
         if done_event is not None:
-            logger.info("[115Life] 整理任务已在运行，等待现有任务完成后补跑")
-            await done_event.wait()
-            source_tree_entries = None
-            continue
+            logger.info("[115Life] 整理任务已在运行，跳过事件补跑，等待整理后源目录复查")
+            return "", "organize_running"
 
         organize_req = OrganizeRequest(drive_index=drive_index)
         if source_tree_entries is not None:
             organize_req._prefetched_source_tree_entries = list(source_tree_entries or [])
         result = await organize_media(organize_req)
         if result.get("status") == "busy":
-            await asyncio.sleep(1)
-            source_tree_entries = None
-            continue
+            logger.info("[115Life] 整理启动时发现已有任务运行，跳过事件补跑")
+            return "", "organize_running"
         if result.get("status") != "ok":
             return "", str(result.get("message", "启动整理失败") or "启动整理失败")
 
@@ -1114,6 +1111,8 @@ def schedule_auto_organize_after_transfer(drive_index: int = 0, source: str = ""
             run_id, status = await _trigger_auto_organize_and_wait(drive_index)
             if run_id:
                 logger.info(f"[转存] 转存后媒体整理完成: source={source or '-'} run_id={run_id} status={status}")
+            elif status == "organize_running":
+                logger.info(f"[转存] 整理任务已在运行，跳过转存后补跑，交给整理结束后的源目录复查: source={source or '-'}")
             else:
                 logger.warning(f"[转存] 转存后媒体整理未启动: source={source or '-'} reason={status or 'unknown'}")
         except Exception as e:
@@ -1221,8 +1220,11 @@ async def _run_source_poll_loop():
                         await asyncio.sleep(wait_seconds)
                     logger.info(f"[115Life] 源目录事件触发自动整理: key={session_key} reason=pre_run_event")
                     run_id, run_status = await _trigger_auto_organize_and_wait(drive_index)
-                    current["active_run_id"] = run_id
-                    current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
+                    if run_id:
+                        current["active_run_id"] = run_id
+                        current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
+                    elif run_status == "organize_running":
+                        logger.info(f"[115Life] 源目录事件不排队补跑，转入整理后复查: key={session_key}")
                     current["phase"] = "post_run"
                     current["last_scan_signature"] = ""
                     current["unchanged_polls"] = 0
@@ -1261,9 +1263,14 @@ async def _run_source_poll_loop():
                         continue
                     logger.info(f"[115Life] 源目录仍有残留条目，继续自动补跑: key={session_key} reason=source_still_has_entries count={entry_count}")
                     run_id, run_status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
-                    current["active_run_id"] = run_id
-                    current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
-                    logger.info(f"[115Life] 自动补跑完成: key={session_key} run_id={run_id} status={run_status}")
+                    if run_id:
+                        current["active_run_id"] = run_id
+                        current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
+                        logger.info(f"[115Life] 自动补跑完成: key={session_key} run_id={run_id} status={run_status}")
+                    elif run_status == "organize_running":
+                        logger.info(f"[115Life] 源目录补跑跳过，已有整理任务运行: key={session_key}")
+                    else:
+                        logger.warning(f"[115Life] 自动补跑未启动: key={session_key} reason={run_status or 'unknown'}")
 
             await asyncio.sleep(5)
     except Exception as e:

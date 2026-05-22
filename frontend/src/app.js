@@ -487,6 +487,7 @@ createApp({
             config302,
             hasPrimary115Cookie,
             needs115Setup,
+            standardTopologyEnabled,
             open115ConfigPanel,
             notify115SetupRequired,
             qrcode115State,
@@ -1838,7 +1839,7 @@ createApp({
             add302Emby, remove302Emby,
             test115Cookie, manualCleanup115,
             qrcode115State, open115QrLogin, close115QrLogin, create115QrCode,
-            hasPrimary115Cookie, needs115Setup, open115ConfigPanel,
+            hasPrimary115Cookie, needs115Setup, standardTopologyEnabled, open115ConfigPanel,
 
             // [修复] 全局变量及方法
             globalConfig, sensitiveVisibility, saveGlobalSettings, toggleDebugMode,

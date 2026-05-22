@@ -1877,6 +1877,7 @@ class StrmService:
                 if item.get("is_dir"):
                     continue
                 stats["matched_items"] += 1
+                item_download_tmdb_metadata = download_tmdb_metadata and not bool(item.get("_skip_tmdb_metadata"))
                 result = _process_single_item(
                     item,
                     remote_path,
@@ -1888,7 +1889,7 @@ class StrmService:
                     data_exts,
                     sync_video,
                     download_aux,
-                    download_tmdb_metadata,
+                    item_download_tmdb_metadata,
                     min_video_size_mb,
                     overwrite_mode,
                     dl_executor,
@@ -1907,7 +1908,7 @@ class StrmService:
                 elif result and result.status == "skip":
                     stats["skipped"] += 1
                     _record_skip(result.message)
-                elif result and result.status == "submitted" and download_tmdb_metadata:
+                elif result and result.status == "submitted" and item_download_tmdb_metadata:
                     tmdb_plan = (result.data or {}).get("tmdb_plan") if result.data else None
                     if tmdb_plan:
                         tmdb_plans.append(tmdb_plan)

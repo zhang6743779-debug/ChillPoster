@@ -322,10 +322,12 @@ export function useConsoleLogs({ showToast }) {
         consoleLogState.autoRefresh = true;
         consoleLogState.loading = true;
         stopConsoleLogStream();
-        startConsoleLogStream();
-        setTimeout(() => {
+        loadSystemLogsFallback().finally(() => {
+            if (consoleLogState.visible && consoleLogState.autoRefresh) {
+                startConsoleLogStream();
+            }
             consoleLogState.loading = false;
-        }, 300);
+        });
     };
 
     let consoleLogEventSource = null;

@@ -549,7 +549,7 @@
                                 </button>
                             </div>
 
-                            <div class="card mb-20" v-if="!config302.standard_topology">
+                            <div class="card mb-20" v-if="!standardTopologyEnabled">
                                 <div class="card-header card-header-clickable" @click="showRssConfig = !showRssConfig">
                                     <div class="card-title-l">
                                         <i class="fa-solid fa-folder-tree"></i> 路径映射基础配置
@@ -1544,7 +1544,7 @@
                             </section>
 
                             <section class="transfer-workbench">
-                                <div class="transfer-panel transfer-manual-panel" :class="{ 'transfer-manual-panel--wide': config302.standard_topology }">
+                                <div class="transfer-panel transfer-manual-panel" :class="{ 'transfer-manual-panel--wide': standardTopologyEnabled }">
                                     <div class="transfer-panel-head">
                                         <div>
                                             <div class="transfer-panel-title"><i class="fa-solid fa-link"></i> 手动转存</div>
@@ -1574,7 +1574,7 @@
                                     </div>
                                 </div>
 
-                                <div class="transfer-panel transfer-config-panel" v-if="!config302.standard_topology">
+                                <div class="transfer-panel transfer-config-panel" v-if="!standardTopologyEnabled">
                                     <div class="transfer-panel-head">
                                         <div>
                                             <div class="transfer-panel-title"><i class="fa-solid fa-folder-tree"></i> 转存目录</div>
@@ -1726,7 +1726,7 @@
                                     <div class="mc-title"><i class="fa-solid fa-cog"></i> 基础配置</div>
                                 </div>
                                 <div class="mc-body">
-                                    <template v-if="!config302.standard_topology">
+                                    <template v-if="!standardTopologyEnabled">
                                     <div class="form-stack">
                                         <label class="mt-12">网盘转存源目录 <span class="text-muted-2xs">(待整理的视频文件所在目录)</span></label>
                                         <div class="form-row-tight">
@@ -1908,7 +1908,7 @@
                                         <label>任务名称</label>
                                         <input type="text" v-model="task.name" placeholder="如：电影库同步">
 
-                                        <template v-if="!config302.standard_topology">
+                                        <template v-if="!standardTopologyEnabled">
                                         <label>网盘媒体库路径</label>
                                         <div class="strm-path-row">
                                             <input type="text" v-model="task.remote_path" placeholder="/媒体库/电影">

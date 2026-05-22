@@ -403,6 +403,8 @@ def _generate_strm_on_organize(result: dict, media_type: str, config_data: dict,
         )
         if not items:
             return 0
+        for item in items:
+            item["_skip_tmdb_metadata"] = True
 
         inc_result = strm_service.process_incremental_items(items)
         if not inc_result.get("matched_tasks"):
@@ -451,6 +453,8 @@ def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict, ca
             if force_overwrite:
                 for item in batch_items:
                     item["_force_strm_overwrite"] = True
+            for item in batch_items:
+                item["_skip_tmdb_metadata"] = True
             replace_remote_paths.extend([
                 str(p or "").rstrip("/")
                 for p in (payload.get("replace_remote_paths") or [])

@@ -279,7 +279,6 @@ _WRITE_API_RATE_LOCK = threading.Lock()
 _LAST_WRITE_API_AT = 0.0
 _DIRECT_URL_LOCK = threading.Lock()
 _LAST_DIRECT_URL_AT = 0.0
-_RENAME_LOCK = threading.Lock()
 _DIRECT_URL_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
 _WRITE_REQUEST_TIMEOUT_SECONDS = 20
@@ -290,6 +289,9 @@ _MOVE_PROGRESS_TIMEOUT_SECONDS = 1800.0
 _TREE_SCAN_MIN_INTERVAL_SECONDS = 5.0
 _TREE_SCAN_LOCK = threading.Lock()
 _LAST_TREE_SCAN_FINISHED_AT = 0.0
+_FILE_OP_TIMING_INFO_THRESHOLD_SECONDS = 10.0
+_FILE_OP_WRITE_SUBMIT_INFO_THRESHOLD_SECONDS = 5.0
+_FILE_OP_MOVE_WAIT_INFO_THRESHOLD_SECONDS = 5.0
 
 
 @asynccontextmanager
@@ -514,8 +516,40 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
 _run_115_write_request = run_115_write_request
 
 
-async def _move_115_items(client, file_ids, target_cid: str):
+def _normalize_115_file_ids(file_ids):
     normalized_ids = file_ids if isinstance(file_ids, list) else int(file_ids)
+    return normalized_ids
+
+
+def _count_115_file_ids(file_ids) -> int:
+    return len(file_ids) if isinstance(file_ids, list) else 1
+
+
+def _log_115_file_op_timing(
+    label: str,
+    *,
+    count: int,
+    write_submit_seconds: float,
+    move_wait_seconds: float,
+    total_seconds: float,
+):
+    message = (
+        f"[MediaOrganize] 115文件操作耗时: {label} count={count} "
+        f"总耗时={total_seconds:.2f}s 写提交={write_submit_seconds:.2f}s "
+        f"移动等待={move_wait_seconds:.2f}s"
+    )
+    if (
+        total_seconds >= _FILE_OP_TIMING_INFO_THRESHOLD_SECONDS
+        or write_submit_seconds >= _FILE_OP_WRITE_SUBMIT_INFO_THRESHOLD_SECONDS
+        or move_wait_seconds >= _FILE_OP_MOVE_WAIT_INFO_THRESHOLD_SECONDS
+    ):
+        logger.info(message)
+    else:
+        logger.debug(message)
+
+
+async def _submit_115_move_items(client, file_ids, target_cid: str):
+    normalized_ids = _normalize_115_file_ids(file_ids)
     response = await _run_115_write_request(
         client,
         "移动",
@@ -527,8 +561,13 @@ async def _move_115_items(client, file_ids, target_cid: str):
         ),
     )
     move_proid = _extract_115_move_progress_id(response)
+    count = _count_115_file_ids(normalized_ids)
+    return response, move_proid, count
+
+
+async def _move_115_items(client, file_ids, target_cid: str):
+    response, move_proid, count = await _submit_115_move_items(client, file_ids, target_cid)
     if move_proid:
-        count = len(normalized_ids) if isinstance(normalized_ids, list) else 1
         await _wait_115_move_progress(client, move_proid, label=f"移动{count}项到{target_cid}")
     return response
 
@@ -547,7 +586,9 @@ async def _rename_115_items(client, rename_pairs: list[tuple[int, str]]):
 
 async def _rename_115_file(client, file_item: dict, new_name: str, target_cid: str = None, target_path: str = "") -> bool:
     """重命名文件并移动到目标目录"""
+    source_path = ""
     try:
+        total_started_at = time.monotonic()
         fid = int(file_item.get("fid") or file_item.get("id") or 0)
         if not fid:
             logger.error(f"[MediaOrganize] 文件操作失败: 无法获取文件 ID (file_item={file_item})")
@@ -556,18 +597,37 @@ async def _rename_115_file(client, file_item: dict, new_name: str, target_cid: s
         old_name = file_item.get('name', '')
         source_path = str(file_item.get('path', '') or old_name)
         display_name = new_name or old_name
+        write_submit_seconds = 0.0
+        move_wait_seconds = 0.0
+        move_proid = ""
 
-        async with _thread_lock_context(_RENAME_LOCK):
-            if new_name and new_name != old_name:
-                await _rename_115_items(client, [(fid, new_name)])
-                logger.info(f"[MediaOrganize] 文件重命名成功: {old_name} -> {new_name}")
-            if target_cid:
-                await _move_115_items(client, fid, target_cid)
-                if target_path:
-                    final_path = f"{target_path.rstrip('/')}/{display_name}" if display_name else target_path.rstrip('/')
-                    logger.info(f"[MediaOrganize] 文件移动成功: {source_path} -> {final_path}")
-                else:
-                    logger.info(f"[MediaOrganize] 文件移动成功: {source_path} -> {display_name}")
+        write_submit_started_at = time.monotonic()
+        if new_name and new_name != old_name:
+            await _rename_115_items(client, [(fid, new_name)])
+            logger.info(f"[MediaOrganize] 文件重命名成功: {old_name} -> {new_name}")
+        if target_cid:
+            _, move_proid, _ = await _submit_115_move_items(client, fid, target_cid)
+        write_submit_seconds = time.monotonic() - write_submit_started_at
+
+        if move_proid:
+            move_wait_started_at = time.monotonic()
+            await _wait_115_move_progress(client, move_proid, label=f"移动1项到{target_cid}")
+            move_wait_seconds = time.monotonic() - move_wait_started_at
+
+        if target_cid:
+            if target_path:
+                final_path = f"{target_path.rstrip('/')}/{display_name}" if display_name else target_path.rstrip('/')
+                logger.info(f"[MediaOrganize] 文件移动成功: {source_path} -> {final_path}")
+            else:
+                logger.info(f"[MediaOrganize] 文件移动成功: {source_path} -> {display_name}")
+
+        _log_115_file_op_timing(
+            "单文件",
+            count=1,
+            write_submit_seconds=write_submit_seconds,
+            move_wait_seconds=move_wait_seconds,
+            total_seconds=time.monotonic() - total_started_at,
+        )
         return True
     except Exception as e:
         logger.error(
@@ -579,6 +639,7 @@ async def _rename_115_file(client, file_item: dict, new_name: str, target_cid: s
 
 async def _rename_115_files_batch(client, file_ops: list[dict], target_cid: str = None, target_path: str = "") -> dict:
     """批量重命名并移动多个文件到同一目标目录。"""
+    total_started_at = time.monotonic()
     valid_ops = []
     for item in file_ops or []:
         fid = int(item.get("fid") or item.get("id") or 0)
@@ -607,18 +668,30 @@ async def _rename_115_files_batch(client, file_ops: list[dict], target_cid: str 
 
     rename_done = False
     move_done = False
+    write_submit_seconds = 0.0
+    move_wait_seconds = 0.0
+    move_proid = ""
+    move_count = len(move_ids)
 
     try:
-        async with _thread_lock_context(_RENAME_LOCK):
-            if rename_pairs:
-                await _rename_115_items(client, rename_pairs)
-                rename_done = True
-                logger.info(f"[MediaOrganize] 批量重命名成功: {len(rename_pairs)} 条")
+        write_submit_started_at = time.monotonic()
+        if rename_pairs:
+            await _rename_115_items(client, rename_pairs)
+            rename_done = True
+            logger.info(f"[MediaOrganize] 批量重命名成功: {len(rename_pairs)} 条")
 
-            if target_cid:
-                await _move_115_items(client, move_ids, target_cid)
-                move_done = True
-                logger.info(f"[MediaOrganize] 批量移动成功: {len(move_ids)} 条 -> {target_path or target_cid}")
+        if target_cid:
+            _, move_proid, move_count = await _submit_115_move_items(client, move_ids, target_cid)
+        write_submit_seconds = time.monotonic() - write_submit_started_at
+
+        if move_proid:
+            move_wait_started_at = time.monotonic()
+            await _wait_115_move_progress(client, move_proid, label=f"移动{move_count}项到{target_cid}")
+            move_wait_seconds = time.monotonic() - move_wait_started_at
+
+        if target_cid:
+            move_done = True
+            logger.info(f"[MediaOrganize] 批量移动成功: {len(move_ids)} 条 -> {target_path or target_cid}")
 
         for op in valid_ops:
             display_name = op["new_name"] or op["old_name"]
@@ -630,6 +703,13 @@ async def _rename_115_files_batch(client, file_ops: list[dict], target_cid: str 
                     logger.info(f"[MediaOrganize] 文件移动成功: {op['source_path']} -> {final_path}")
                 else:
                     logger.info(f"[MediaOrganize] 文件移动成功: {op['source_path']} -> {display_name}")
+        _log_115_file_op_timing(
+            "批量文件",
+            count=len(valid_ops),
+            write_submit_seconds=write_submit_seconds,
+            move_wait_seconds=move_wait_seconds,
+            total_seconds=time.monotonic() - total_started_at,
+        )
         return {"ok": True, "items": valid_ops, "error": "", "rename_done": rename_done, "move_done": move_done}
     except Exception as e:
         logger.warning(
