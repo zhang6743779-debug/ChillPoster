@@ -362,9 +362,9 @@ async def start_strm_sync(payload: StrmStartPayload):
 @router.post("/stop")
 async def stop_strm_sync(payload: StrmStopPayload):
     """取消同步/监控任务"""
-    from app.dependencies import ACTIVE_TASKS
-    if payload.run_id in ACTIVE_TASKS:
-        ACTIVE_TASKS[payload.run_id]["cancel_requested"] = True
+    from app.dependencies import request_task_cancel
+    task = request_task_cancel(payload.run_id)
+    if task and task.get("status") not in ("finished", "error", "stopped", "interrupted"):
         logger.info(f"[STRM] 已请求取消任务: {payload.run_id}")
         return {"status": "ok", "message": "已发送取消请求"}
     return {"status": "error", "message": "任务不存在或已完成"}

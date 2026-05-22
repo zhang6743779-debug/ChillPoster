@@ -4,6 +4,7 @@ import shutil  # [新增] 用于文件复制
 import asyncio
 import json
 import logging
+import threading
 
 # httpcore_request 在被导入时给 AsyncConnectionPool.__del__ 注入了动态 import，
 # Python 退出时 import 系统已销毁会报 ImportError。
@@ -79,6 +80,7 @@ from app.services.drive115_upload_service import drive115_upload_service
 # ==========================================
 # [新增] 日志屏蔽配置
 # ==========================================
+tasks.load_task_progress_from_file()
 tasks.load_log_buffer_from_file()
 register_log_line_publisher(tasks.publish_log_line)
 
@@ -308,6 +310,10 @@ async def lifespan_ui(app: FastAPI):
     except Exception:
         pass
     try:
+        await asyncio.wait_for(drive115_service.close(), timeout=3)
+    except asyncio.TimeoutError:
+        logger.warning("[启动] 115 客户端关闭超时，强制跳过")
+    try:
         task_service_instance.scheduler.shutdown(wait=False)
     except Exception:
         pass
@@ -412,6 +418,17 @@ proxy_app.include_router(gateway.router)
 # 3. 启动器 (同时运行两个服务)
 # ==========================================
 
+async def _serve_gateway_servers(gateway_servers):
+    await asyncio.gather(*(server.serve() for server in gateway_servers))
+
+
+def _run_gateway_servers(gateway_servers):
+    try:
+        asyncio.run(_serve_gateway_servers(gateway_servers))
+    except Exception as e:
+        logger.error(f"[启动] 网关服务异常退出: {e}")
+
+
 async def serve_apps():
     """读取配置并并发启动多个网关服务器"""
 
@@ -484,13 +501,28 @@ async def serve_apps():
         )
         gateway_servers.append(uvicorn.Server(config_gw))
 
-    # 并发运行 UI 和所有网关服务
+    # 网关独立运行在线程内，避免播放请求阻塞管理后台事件循环。
+    gateway_thread = None
+    if gateway_servers:
+        gateway_thread = threading.Thread(
+            target=_run_gateway_servers,
+            args=(gateway_servers,),
+            name="chillposter-gateway",
+            daemon=True,
+        )
+        gateway_thread.start()
+
+    # UI 服务保持在主事件循环，后台任务与管理 API 不再和网关抢同一个 loop。
     try:
-        servers = [server_ui.serve()] + [gs.serve() for gs in gateway_servers]
-        await asyncio.gather(*servers)
+        await server_ui.serve()
     except asyncio.CancelledError:
         # 捕获任务取消信号，防止控制台打印一大堆 Traceback
         pass
+    finally:
+        for gateway_server in gateway_servers:
+            gateway_server.should_exit = True
+        if gateway_thread and gateway_thread.is_alive():
+            gateway_thread.join(timeout=5)
 
 if __name__ == "__main__":
     # --- [Step 1] 优先执行默认文件恢复 ---

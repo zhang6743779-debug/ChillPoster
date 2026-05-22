@@ -54,6 +54,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         const organizeResult = ref(null);
         const organizeRunId = ref(localStorage.getItem(ORGANIZE_RUN_ID_STORAGE_KEY) || null);
         const organizeProgress = reactive({ percent: 0, status_text: '', detail: null });
+        const isOrganizeTerminalStatus = (status) => ['finished', 'error', 'stopped', 'interrupted'].includes(status);
 
         const syncOrganizeTaskFromTaskMap = (tasks, { adoptRunning = false } = {}) => {
             const taskMap = tasks || {};
@@ -96,6 +97,17 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                 const task = syncOrganizeTaskFromTaskMap(res.data || {}, { adoptRunning: true });
                 if (task && task.status === 'running') {
                     startOrganizePolling();
+                } else if (task && isOrganizeTerminalStatus(task.status)) {
+                    organizeLoading.value = false;
+                    if (task.status === 'interrupted') {
+                        organizeResult.value = {
+                            status: 'error',
+                            message: task.resume_message || task.name || '整理已中断',
+                            detail: task.detail || {},
+                        };
+                    }
+                    organizeRunId.value = null;
+                    localStorage.removeItem(ORGANIZE_RUN_ID_STORAGE_KEY);
                 }
             } catch (_) { }
         };
@@ -1014,13 +1026,17 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                     const task = syncOrganizeTaskFromTaskMap(tasks, { adoptRunning: true });
                     if (!task) return;
 
-                    if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
+                    if (isOrganizeTerminalStatus(task.status)) {
                         organizeLoading.value = false;
                         const detail = task.detail || {};
-                        const label = task.status === 'finished' ? '完成' : (task.status === 'stopped' ? '已取消' : '异常');
+                        const label = task.status === 'finished'
+                            ? '完成'
+                            : (task.status === 'stopped' ? '已取消' : (task.status === 'interrupted' ? '已中断' : '异常'));
                         organizeResult.value = {
                             status: task.status === 'finished' ? 'success' : 'error',
-                            message: `整理${label}: 成功 ${detail.success || 0}/${detail.total || 0} | 失败 ${detail.failed || 0}`,
+                            message: task.status === 'interrupted'
+                                ? (task.resume_message || task.name || '整理已中断')
+                                : `整理${label}: 成功 ${detail.success || 0}/${detail.total || 0} | 失败 ${detail.failed || 0}`,
                             detail: detail,
                         };
                         showToast(`整理${label}`, task.status === 'finished' ? 'success' : 'error');
@@ -1028,7 +1044,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                         const finishedRunId = organizeRunId.value;
                         organizeRunId.value = null;
                         localStorage.removeItem(ORGANIZE_RUN_ID_STORAGE_KEY);
-                        if (finishedRunId) {
+                        if (finishedRunId && task.status !== 'interrupted') {
                             setTimeout(() => axios.post('/api/clear_task_progress', { run_id: finishedRunId }), 3000);
                         }
                     }

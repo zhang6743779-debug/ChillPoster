@@ -13,12 +13,13 @@ import re
 import json
 import uuid
 import asyncio
+import sqlite3
 import time as _time
 import threading
 import hashlib
 from datetime import datetime
 from typing import Optional, List, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from app.services import media_organize_state as _state
 from app.services.media_organize_state import (
@@ -54,7 +55,7 @@ from app.services.media_organize_scrape import (
     _map_remote_to_strm_local_path,
 )
 from app.services.media_server_refresh import media_server_refresh
-from app.dependencies import ACTIVE_TASKS, update_task_progress
+from app.dependencies import ACTIVE_TASKS, set_task_detail, update_task_progress
 from core.logger import logger
 from core.media_library_cache import build_task_key, get_task_index, get_task_item_by_id, remove_items_by_path_prefix, remove_task_item_by_id, update_items_path_prefix, update_task_item_fields, upsert_task_item, upsert_dir_item, merge_task_items
 from core.meta.mediainfo import extract_wash_fields
@@ -83,6 +84,7 @@ _MEDIA_METADATA_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_METADATA_WOR
 _MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 20)
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
+_MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
 
 
 _WASH_CODEC_MULTIPLIERS = {
@@ -94,6 +96,10 @@ _WASH_CODEC_MULTIPLIERS = {
     "DIVX": 0.6,
 }
 _FFPROBE_FILE_CACHE_PATH = "config/media_organize_ffprobe_cache.json"
+_FFPROBE_FILE_CACHE_DB_PATH = (
+    os.getenv("CHILLPOSTER_FFPROBE_CACHE_DB")
+    or os.path.splitext(_FFPROBE_FILE_CACHE_PATH)[0] + ".db"
+)
 _FFPROBE_BATCH_CACHE_PATH = "config/media_organize_ffprobe_batch_cache.json"
 _FFPROBE_BATCH_CACHE_TTL_SECONDS = 1800
 _FFPROBE_BATCH_SAMPLE_LIMIT = 3
@@ -109,38 +115,207 @@ _FFPROBE_PROFILE_FIELDS = (
     "source",
     "release_group",
 )
-_FFPROBE_CACHE_LOCK = threading.Lock()
-_FFPROBE_FILE_CACHE: Optional[dict] = None
+_FFPROBE_CACHE_LOCK = threading.RLock()
+_FFPROBE_FILE_CACHE_DB_READY = False
 _FFPROBE_BATCH_CACHE: Optional[dict] = None
 _FFPROBE_MEDIA_DOWNLOAD_LIMIT = 3
 _FFPROBE_MEDIA_GATE = threading.BoundedSemaphore(_FFPROBE_MEDIA_DOWNLOAD_LIMIT)
 _FFPROBE_EXEC_TIMEOUT_SECONDS = 45
 
 
-def _load_ffprobe_file_cache() -> dict:
-    global _FFPROBE_FILE_CACHE
+def _open_ffprobe_file_cache_db() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(_FFPROBE_FILE_CACHE_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_FFPROBE_FILE_CACHE_DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
+
+
+def _ffprobe_json_cache_signature() -> str:
+    try:
+        stat = os.stat(_FFPROBE_FILE_CACHE_PATH)
+        return f"{int(stat.st_mtime_ns)}:{int(stat.st_size)}"
+    except OSError:
+        return ""
+
+
+def _get_ffprobe_file_cache_meta(conn: sqlite3.Connection, key: str) -> str:
+    row = conn.execute("SELECT value FROM ffprobe_file_cache_meta WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else ""
+
+
+def _set_ffprobe_file_cache_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO ffprobe_file_cache_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(key), str(value)),
+    )
+
+
+def _create_ffprobe_file_cache_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ffprobe_file_cache_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ffprobe_file_cache (
+            cache_key TEXT PRIMARY KEY,
+            fields_json TEXT NOT NULL,
+            resource_pix TEXT NOT NULL DEFAULT '',
+            video_encode TEXT NOT NULL DEFAULT '',
+            audio_encode TEXT NOT NULL DEFAULT '',
+            fps TEXT NOT NULL DEFAULT '',
+            resource_effect TEXT NOT NULL DEFAULT '',
+            video_effect TEXT NOT NULL DEFAULT '',
+            color_depth TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            release_group TEXT NOT NULL DEFAULT '',
+            duration_seconds REAL NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ffprobe_file_cache_updated_at
+            ON ffprobe_file_cache(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_ffprobe_file_cache_size
+            ON ffprobe_file_cache(size);
+        """
+    )
+
+
+def _ffprobe_file_cache_payload(cache_key: str, fields: dict, file_size: int = 0, updated_at: Optional[int] = None) -> tuple:
+    normalized = _normalize_ffprobe_fields(fields)
+    updated_at = int(updated_at or _time.time())
+    file_size = int(file_size or fields.get("size", 0) or 0)
+    payload = {
+        **normalized,
+        "updated_at": updated_at,
+        "size": file_size,
+    }
+    return (
+        str(cache_key or ""),
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        normalized["resource_pix"],
+        normalized["video_encode"],
+        normalized["audio_encode"],
+        normalized["fps"],
+        normalized["resource_effect"],
+        normalized["video_effect"],
+        normalized["color_depth"],
+        normalized["source"],
+        normalized["release_group"],
+        float(normalized["duration_seconds"] or 0.0),
+        file_size,
+        updated_at,
+    )
+
+
+def _upsert_ffprobe_file_cache_rows(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        """
+        INSERT INTO ffprobe_file_cache(
+            cache_key, fields_json, resource_pix, video_encode, audio_encode, fps,
+            resource_effect, video_effect, color_depth, source, release_group,
+            duration_seconds, size, updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            fields_json = excluded.fields_json,
+            resource_pix = excluded.resource_pix,
+            video_encode = excluded.video_encode,
+            audio_encode = excluded.audio_encode,
+            fps = excluded.fps,
+            resource_effect = excluded.resource_effect,
+            video_effect = excluded.video_effect,
+            color_depth = excluded.color_depth,
+            source = excluded.source,
+            release_group = excluded.release_group,
+            duration_seconds = excluded.duration_seconds,
+            size = excluded.size,
+            updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+
+
+def _migrate_ffprobe_file_cache_json(conn: sqlite3.Connection) -> None:
+    signature = _ffprobe_json_cache_signature()
+    if not signature:
+        return
+    if _get_ffprobe_file_cache_meta(conn, "json_migration_signature") == signature:
+        return
+
+    started_at = _time.time()
+    try:
+        with open(_FFPROBE_FILE_CACHE_PATH, "r", encoding="utf-8") as f:
+            raw_cache = json.load(f)
+    except Exception as e:
+        logger.warning(f"[MediaOrganize] ffprobe JSON缓存迁移读取失败: {e}")
+        return
+    if not isinstance(raw_cache, dict):
+        return
+
+    migrated = 0
+    rows: list[tuple] = []
+    now_ts = int(_time.time())
+    for cache_key, fields in raw_cache.items():
+        if not isinstance(fields, dict):
+            continue
+        try:
+            normalized = _normalize_ffprobe_fields(fields)
+        except Exception:
+            continue
+        if not cache_key or not normalized:
+            continue
+        rows.append(
+            _ffprobe_file_cache_payload(
+                str(cache_key),
+                normalized,
+                file_size=int(fields.get("size", 0) or 0),
+                updated_at=int(fields.get("updated_at", 0) or now_ts),
+            )
+        )
+        if len(rows) >= 500:
+            _upsert_ffprobe_file_cache_rows(conn, rows)
+            migrated += len(rows)
+            rows.clear()
+    if rows:
+        _upsert_ffprobe_file_cache_rows(conn, rows)
+        migrated += len(rows)
+
+    _set_ffprobe_file_cache_meta(conn, "json_migration_signature", signature)
+    logger.info(
+        f"[MediaOrganize] ffprobe缓存已迁移到SQLite: {migrated} 条 | "
+        f"耗时:{_time.time() - started_at:.2f}s"
+    )
+
+
+def _ensure_ffprobe_file_cache_db() -> None:
+    global _FFPROBE_FILE_CACHE_DB_READY
+    if _FFPROBE_FILE_CACHE_DB_READY:
+        return
     with _FFPROBE_CACHE_LOCK:
-        if _FFPROBE_FILE_CACHE is not None:
-            return _FFPROBE_FILE_CACHE
-        if os.path.exists(_FFPROBE_FILE_CACHE_PATH):
-            try:
-                with open(_FFPROBE_FILE_CACHE_PATH, "r", encoding="utf-8") as f:
-                    _FFPROBE_FILE_CACHE = json.load(f)
-            except Exception as e:
-                logger.warning(f"[MediaOrganize] ffprobe缓存加载失败: {e}")
-                _FFPROBE_FILE_CACHE = {}
-        else:
-            _FFPROBE_FILE_CACHE = {}
-        return _FFPROBE_FILE_CACHE
-
-
-
-def _save_ffprobe_file_cache() -> None:
-    with _FFPROBE_CACHE_LOCK:
-        cache = _FFPROBE_FILE_CACHE or {}
-        os.makedirs(os.path.dirname(_FFPROBE_FILE_CACHE_PATH), exist_ok=True)
-        with open(_FFPROBE_FILE_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+        if _FFPROBE_FILE_CACHE_DB_READY:
+            return
+        conn = _open_ffprobe_file_cache_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _create_ffprobe_file_cache_schema(conn)
+            _migrate_ffprobe_file_cache_json(conn)
+            conn.commit()
+            _FFPROBE_FILE_CACHE_DB_READY = True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 
@@ -214,27 +389,52 @@ def _get_cached_ffprobe_fields(file_item: dict) -> dict:
     cache_key = _build_ffprobe_file_cache_key(file_item)
     if not cache_key:
         return {}
-    cache = _load_ffprobe_file_cache()
-    return _normalize_ffprobe_fields(cache.get(cache_key) or {})
+    try:
+        _ensure_ffprobe_file_cache_db()
+        conn = _open_ffprobe_file_cache_db()
+        try:
+            row = conn.execute(
+                "SELECT fields_json FROM ffprobe_file_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return {}
+        try:
+            fields = json.loads(row["fields_json"] or "{}")
+        except Exception:
+            fields = {}
+        return _normalize_ffprobe_fields(fields)
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] ffprobe SQLite缓存读取失败: {e}")
+        return {}
 
 
 
 def _set_cached_ffprobe_fields(file_item: dict, fields: dict) -> None:
-    global _FFPROBE_FILE_CACHE
     cache_key = _build_ffprobe_file_cache_key(file_item)
     normalized = _normalize_ffprobe_fields(fields)
     if not cache_key or not normalized:
         return
-    with _FFPROBE_CACHE_LOCK:
-        if _FFPROBE_FILE_CACHE is None:
-            _FFPROBE_FILE_CACHE = {}
-        _FFPROBE_FILE_CACHE[cache_key] = {
-            **normalized,
-            "updated_at": int(_time.time()),
-            "size": int((file_item or {}).get("size", 0) or 0),
-        }
     try:
-        _save_ffprobe_file_cache()
+        _ensure_ffprobe_file_cache_db()
+        row = _ffprobe_file_cache_payload(
+            cache_key,
+            normalized,
+            file_size=int((file_item or {}).get("size", 0) or 0),
+        )
+        with _FFPROBE_CACHE_LOCK:
+            conn = _open_ffprobe_file_cache_db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                _upsert_ffprobe_file_cache_rows(conn, [row])
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
     except Exception as e:
         logger.warning(f"[MediaOrganize] ffprobe缓存保存失败: {e}")
 
@@ -950,6 +1150,45 @@ def _build_source_poll_session_key(drive_index: int, source_cid: str) -> str:
 
 
 _SOURCE_PRE_RUN_DEBOUNCE_SECONDS = 1.0
+_ORGANIZE_PROGRESS_MIN_INTERVAL_SECONDS = 1.0
+_ORGANIZE_PROGRESS_MIN_FILE_DELTA = 10
+_ORGANIZE_PROGRESS_THROTTLE_LOCK = threading.Lock()
+_ORGANIZE_PROGRESS_THROTTLE_STATE: dict[str, dict] = {}
+
+
+def _should_emit_streaming_progress(run_id: str, *, scanned_video_count: int,
+                                    processed_result_count: int, pct: int, status: str) -> bool:
+    if status != "running":
+        with _ORGANIZE_PROGRESS_THROTTLE_LOCK:
+            _ORGANIZE_PROGRESS_THROTTLE_STATE.pop(run_id, None)
+        return True
+
+    now = _time.monotonic()
+    activity_count = int(scanned_video_count or 0) + int(processed_result_count or 0)
+    with _ORGANIZE_PROGRESS_THROTTLE_LOCK:
+        previous = _ORGANIZE_PROGRESS_THROTTLE_STATE.get(run_id)
+        if not previous:
+            should_emit = True
+        else:
+            elapsed = now - float(previous.get("updated_at", 0.0) or 0.0)
+            file_delta = activity_count - int(previous.get("activity_count", 0) or 0)
+            should_emit = (
+                elapsed >= _ORGANIZE_PROGRESS_MIN_INTERVAL_SECONDS
+                or file_delta >= _ORGANIZE_PROGRESS_MIN_FILE_DELTA
+                or pct >= 100 and int(previous.get("pct", 0) or 0) < 100
+            )
+        if should_emit:
+            _ORGANIZE_PROGRESS_THROTTLE_STATE[run_id] = {
+                "updated_at": now,
+                "activity_count": activity_count,
+                "pct": int(pct or 0),
+            }
+        return should_emit
+
+
+def _clear_streaming_progress_throttle(run_id: str) -> None:
+    with _ORGANIZE_PROGRESS_THROTTLE_LOCK:
+        _ORGANIZE_PROGRESS_THROTTLE_STATE.pop(run_id, None)
 
 
 def _update_streaming_progress(run_id: str, *, scanned_video_count: int, processed_result_count: int,
@@ -962,13 +1201,20 @@ def _update_streaming_progress(run_id: str, *, scanned_video_count: int, process
         pct = 5 if scanned_video_count <= 0 else min(5 + scanned_video_count // 20, 90)
         message = f"整理: 已扫描 {scanned_video_count} 个视频，已完成 {processed_result_count} 个"
     effective_status = status or "running"
-    update_task_progress(run_id, message, pct, effective_status)
-    ACTIVE_TASKS[run_id]["detail"] = {
+    if not _should_emit_streaming_progress(
+        run_id,
+        scanned_video_count=scanned_video_count,
+        processed_result_count=processed_result_count,
+        pct=pct,
+        status=effective_status,
+    ):
+        return
+    update_task_progress(run_id, message, pct, effective_status, detail={
         "total": scanned_video_count,
         "success": success_count,
         "failed": error_count,
         "strm": strm_generated_count,
-    }
+    })
 
 
 def _is_organize_cancel_requested(run_id: str) -> bool:
@@ -981,14 +1227,20 @@ def _raise_if_organize_cancelled(run_id: str):
         raise _OrganizeCancelledError("用户取消")
 
 
-def _await_on_main_loop(coro, main_loop: asyncio.AbstractEventLoop):
+def _await_on_main_loop(coro, main_loop: asyncio.AbstractEventLoop, timeout: float = _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS):
     if main_loop is None:
         raise RuntimeError("主事件循环未注册")
     if main_loop.is_closed():
         raise RuntimeError("主事件循环已关闭")
     if not main_loop.is_running():
         raise RuntimeError("主事件循环未运行")
-    return asyncio.run_coroutine_threadsafe(coro, main_loop).result()
+    future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError as e:
+        future.cancel()
+        logger.warning(f"[MediaOrganize] 等待主事件循环执行超时: {timeout:.0f}s")
+        raise TimeoutError(f"等待主事件循环执行超时: {timeout:.0f}s") from e
 
 
 
@@ -1503,6 +1755,7 @@ async def _run_organize_async(run_id: str, req):
         from core.configs import global_config
         api_key = global_config.tmdb_key
         if not api_key:
+            _clear_streaming_progress_throttle(run_id)
             update_task_progress(run_id, "整理失败: TMDb API Key 未配置", 100, "error")
             return
 
@@ -2722,6 +2975,7 @@ async def _run_organize_async(run_id: str, req):
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
             await _wait_source_tree_stable(drive_index, str(source_cid), "无视频清理后")
+            _clear_streaming_progress_throttle(run_id)
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
             return
 
@@ -2828,7 +3082,7 @@ async def _run_organize_async(run_id: str, req):
             if len(failed_results) > 20:
                 logger.warning(f"[MediaOrganize] 失败文件还有 {len(failed_results) - 20} 个未在摘要中展开")
 
-        ACTIVE_TASKS[run_id]["detail"] = {
+        set_task_detail(run_id, {
             "total": total_files,
             "success": success_count,
             "failed": failed_count,
@@ -2842,11 +3096,13 @@ async def _run_organize_async(run_id: str, req):
             "movies": movie_success_count,
             "tv_episodes": tv_success_count,
             "elapsed_seconds": elapsed,
-        }
+        })
         await _run_finish_maintenance("整理结束清理后", include_refresh=True)
+        _clear_streaming_progress_throttle(run_id)
         update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
 
     except _OrganizeCancelledError:
+        _clear_streaming_progress_throttle(run_id)
         organize_cancel_event.set()
         pending_async_tasks = []
         for task_name in ("in_flight_group_tasks", "identify_worker_tasks", "organize_worker_tasks", "postprocess_batcher_tasks", "postprocess_worker_tasks"):
@@ -2866,11 +3122,11 @@ async def _run_organize_async(run_id: str, req):
         movie_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "movie")
         tv_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "tv")
         update_task_progress(run_id, f"整理已取消: 已处理 {_processed}/{scanned_video_count}", 100, "stopped")
-        ACTIVE_TASKS[run_id]["detail"] = {
+        set_task_detail(run_id, {
             "total": scanned_video_count, "success": success_count, "failed": _failed, "strm": strm_generated_count,
             "skipped": skipped_count, "movies": movie_success_count, "tv_episodes": tv_success_count,
             "elapsed_seconds": elapsed, "stopped": True,
-        }
+        }, force=True)
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
         _send_organize_task_notify(
             status="stopped",
@@ -2901,6 +3157,7 @@ async def _run_organize_async(run_id: str, req):
         except Exception:
             pass
         logger.error(f"[MediaOrganize] 整理失败: {e}", exc_info=True)
+        _clear_streaming_progress_throttle(run_id)
         update_task_progress(run_id, f"整理失败: {e}", 0, "error")
         _failed = _count_error_results(results)
         skipped_count = sum(1 for r in results if r.get("status") == "skipped")

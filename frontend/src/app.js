@@ -366,6 +366,7 @@ createApp({
             if (status === 'running') return '运行中';
             if (status === 'finished') return '成功';
             if (status === 'stopped') return '已取消';
+            if (status === 'interrupted') return '已中断';
             if (status === 'error') return '失败';
             return '空闲';
         };
@@ -373,6 +374,7 @@ createApp({
             if (status === 'running') return 'running';
             if (status === 'finished') return 'success';
             if (status === 'stopped') return 'warning';
+            if (status === 'interrupted') return 'warning';
             if (status === 'error') return 'error';
             return 'idle';
         };
@@ -382,17 +384,19 @@ createApp({
                 .map(([id, task]) => ({ id, ...task }));
             const history = tasksState.taskHistory.filter(item => item.category === config.key);
             const latest = history[0] || null;
-            const running = active.find(item => item.status === 'running') || active[0] || null;
-            const status = running ? 'running' : (latest?.status || 'idle');
+            const running = active.find(item => item.status === 'running') || null;
+            const current = running || active[0] || null;
+            const status = running ? 'running' : (current?.status || latest?.status || 'idle');
             return {
                 ...config,
                 running,
+                current,
                 status,
                 statusLabel: getTaskStatusLabel(status),
                 statusClass: getTaskStatusClass(status),
                 historyCount: history.length,
                 latest,
-                summary: running?.name || latest?.summary || '暂无运行记录',
+                summary: current?.name || latest?.summary || '暂无运行记录',
                 time: running ? '实时' : (latest?.time || ''),
             };
         }));

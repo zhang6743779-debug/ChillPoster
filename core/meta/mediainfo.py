@@ -10,11 +10,64 @@ import logging
 import re
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("ChillPoster.mediainfo")
 _FFPROBE_SEMAPHORE = threading.BoundedSemaphore(4)
+
+
+def _probe_target_label(filepath: str) -> str:
+    if filepath.startswith("http://") or filepath.startswith("https://"):
+        return "HTTP(S) URL"
+    return filepath
+
+
+def _summarize_probe(probe: dict) -> str:
+    streams = list((probe or {}).get("streams") or [])
+    fmt = dict((probe or {}).get("format") or {})
+
+    video_streams = [
+        s for s in streams
+        if s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")
+    ]
+    audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    video = video_streams[0] if video_streams else {}
+    audio = max(audio_streams, key=lambda s: int(s.get("channels") or 0), default={})
+
+    video_parts = []
+    if video:
+        video_parts.append(str(video.get("codec_name") or "video"))
+        if video.get("width") and video.get("height"):
+            video_parts.append(f"{video.get('width')}x{video.get('height')}")
+        if video.get("pix_fmt"):
+            video_parts.append(str(video.get("pix_fmt")))
+        fps = _parse_fps(video.get("r_frame_rate", "")) or _parse_fps(video.get("avg_frame_rate", ""))
+        if fps:
+            video_parts.append(fps)
+
+    audio_parts = []
+    if audio:
+        audio_parts.append(str(audio.get("codec_name") or "audio"))
+        if audio.get("channels"):
+            audio_parts.append(f"{audio.get('channels')}ch")
+        if audio.get("channel_layout"):
+            audio_parts.append(str(audio.get("channel_layout")))
+
+    duration = str(fmt.get("duration") or "").strip()
+    try:
+        duration = f"{float(duration):.1f}s" if duration else ""
+    except Exception:
+        pass
+
+    return (
+        f"format={fmt.get('format_name') or '-'} "
+        f"streams={len(streams)} "
+        f"video={' '.join(video_parts) if video_parts else '-'} "
+        f"audio={' '.join(audio_parts) if audio_parts else '-'} "
+        f"duration={duration or '-'}"
+    )
 
 
 def probe_file(filepath: str) -> Optional[dict]:
@@ -39,6 +92,7 @@ def probe_file(filepath: str) -> Optional[dict]:
     cmd.append(filepath)
 
     try:
+        started_at = time.perf_counter()
         with _FFPROBE_SEMAPHORE:
             result = subprocess.run(
                 cmd,
@@ -47,19 +101,19 @@ def probe_file(filepath: str) -> Optional[dict]:
                 timeout=30,
             )
         if result.returncode != 0:
-            logger.debug(f"ffprobe 返回非零状态码 {result.returncode}: {result.stderr[:200]}")
+            logger.debug(f"ffprobe 返回非零状态码 {result.returncode}: {_probe_target_label(filepath)} | {result.stderr[:200]}")
             return None
         probe = json.loads(result.stdout)
-        logger.debug(f"[MediaInfo] ffprobe 全量原始输出: {json.dumps(probe, ensure_ascii=False)}")
+        logger.debug(f"[MediaInfo] ffprobe摘要: {_summarize_probe(probe)} | 耗时:{time.perf_counter() - started_at:.2f}s")
         return probe
     except FileNotFoundError:
         logger.warning("ffprobe 未安装或不在 PATH 中，跳过 MediaInfo 获取")
         return None
     except subprocess.TimeoutExpired:
-        logger.warning(f"ffprobe 超时: {filepath}")
+        logger.warning(f"ffprobe 超时: {_probe_target_label(filepath)}")
         return None
     except (json.JSONDecodeError, Exception) as e:
-        logger.debug(f"ffprobe 解析失败 '{filepath}': {e}")
+        logger.debug(f"ffprobe 解析失败 '{_probe_target_label(filepath)}': {e}")
         return None
 
 

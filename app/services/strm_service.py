@@ -126,10 +126,8 @@ def build_strm_url(url_base: str, pickcode: str, filename: str) -> str:
 
 
 def _update_progress(run_id, name, percent, status="running", detail=None):
-    from app.dependencies import update_task_progress, ACTIVE_TASKS
-    update_task_progress(run_id, name, percent, status)
-    if detail and run_id in ACTIVE_TASKS:
-        ACTIVE_TASKS[run_id]["detail"] = detail
+    from app.dependencies import update_task_progress
+    update_task_progress(run_id, name, percent, status, detail=detail)
 
 
 def _extract_cache_item(item: dict, parent_id: int = 0) -> Optional[Tuple[str, dict]]:

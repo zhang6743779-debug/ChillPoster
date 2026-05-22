@@ -2,9 +2,48 @@ import sys
 import os
 import json
 import logging
+import re
 from .configs import APP_LOG_FILE, CONFIG_DIR, CONFIG_FILE
 
 _log_line_publisher = None
+
+_URL_RE = re.compile(r"https?://[^\s'\"<>，。]+", re.IGNORECASE)
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&;](?:t|u|k|token|access_token|api_key|apikey|key|sign|sig|auth|authorization|cookie|session)=)"
+    r"[^&;\s'\"<>，。)}\]]+"
+)
+_HEADER_SECRET_RE = re.compile(
+    r"(?im)\b(authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+"
+)
+
+
+def _is_115_direct_url(url: str) -> bool:
+    text = str(url or "").lower()
+    return (
+        "115cdn.net" in text
+        or "cdnfhnfile" in text
+        or "cdnfile" in text and "115" in text
+    )
+
+
+def _redact_url(url: str) -> str:
+    if _is_115_direct_url(url):
+        match = re.match(r"(?i)^(https?://[^/?#]+)", url)
+        if match:
+            return f"{match.group(1)}/[115-direct-url-redacted]"
+        return "[115-direct-url-redacted]"
+    return _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}***", url)
+
+
+def sanitize_log_text(message: str) -> str:
+    """Redact credentials and short-lived direct-link parameters before logs leave the process."""
+    text = str(message or "")
+    if not text:
+        return text
+    text = _URL_RE.sub(lambda m: _redact_url(m.group(0)), text)
+    text = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _HEADER_SECRET_RE.sub(lambda m: f"{m.group(1)}: ***", text)
+    return text
 
 HIDDEN_CONSOLE_LOG_FRAGMENTS = (
     "libssl detected, it will be used for encryption",
@@ -104,22 +143,23 @@ class LoggerWriter:
             pass
 
     def write(self, message):
+        safe_message = sanitize_log_text(message)
         # 过滤掉频繁接口日志，防止 Web 端日志刷屏
         if (
-            "GET /api/progress" in message or
-            "GET /api/system_logs" in message or
-            "GET /api/system_logs/stream" in message or
-            "/api/save HTTP/1.1" in message or
-            "/api/clear_task_progress HTTP/1.1" in message or
-            "INFO:" in message and "HTTP/1.1\"" in message or
-            should_hide_console_log_line(message)
+            "GET /api/progress" in safe_message or
+            "GET /api/system_logs" in safe_message or
+            "GET /api/system_logs/stream" in safe_message or
+            "/api/save HTTP/1.1" in safe_message or
+            "/api/clear_task_progress HTTP/1.1" in safe_message or
+            "INFO:" in safe_message and "HTTP/1.1\"" in safe_message or
+            should_hide_console_log_line(safe_message)
         ):
             return
 
         # 1. 写入原始控制台 (Docker/后台可见)
         if self.writer:
             try:
-                self.writer.write(message)
+                self.writer.write(safe_message)
                 self.writer.flush()
             except:
                 pass
@@ -127,9 +167,9 @@ class LoggerWriter:
         # 2. 写入日志文件 (Web 端可见)
         if self.log_file:
             try:
-                self.log_file.write(message)
+                self.log_file.write(safe_message)
                 self.log_file.flush()
-                self._bytes_written += len(message.encode('utf-8'))
+                self._bytes_written += len(safe_message.encode('utf-8'))
                 # 每写入 64KB 检查一次是否需要轮转
                 if self._bytes_written >= 65536:
                     self._bytes_written = 0
@@ -142,7 +182,7 @@ class LoggerWriter:
 
         if _log_line_publisher:
             try:
-                self._line_buffer += message
+                self._line_buffer += safe_message
                 while "\n" in self._line_buffer:
                     line, self._line_buffer = self._line_buffer.split("\n", 1)
                     if line.strip():

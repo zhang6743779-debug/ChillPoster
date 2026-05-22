@@ -10,10 +10,10 @@ from fastapi.responses import StreamingResponse
 from apscheduler.triggers.cron import CronTrigger
 
 from app.schemas import CreateTaskRequest, UpdateTaskRequest, RunTaskRequest, RunSavedTaskRequest, ToggleTaskRequest
-from app.dependencies import ACTIVE_TASKS, update_task_progress, cleanup_stale_tasks
+from app.dependencies import remove_task_progress, request_task_cancel, snapshot_task_progress
 from app.services.task_service import execute_task_logic, task_service_instance
 from core.configs import TASKS_FILE, APP_LOG_FILE, TEMPLATES_DIR
-from core.logger import logger, should_hide_console_log_line
+from core.logger import logger, sanitize_log_text, should_hide_console_log_line
 
 router = APIRouter(tags=["Tasks"])
 
@@ -342,6 +342,7 @@ def format_sse_event(data: dict, event: str | None = None, event_id: int | None 
 def publish_log_line(line: str):
     global NEXT_LOG_EVENT_ID
 
+    line = sanitize_log_text(line)
     if not line or should_hide_console_log_line(line):
         return
 
@@ -379,7 +380,7 @@ def snapshot_recent_logs(level: str = "ALL", keyword: str = "", category: str = 
     limit_value = normalize_log_limit(limit)
     with LOG_STREAM_LOCK:
         matched = [
-            entry["line"]
+            sanitize_log_text(entry["line"])
             for entry in reversed(LOG_BUFFER)
             if is_level_match(entry["level"], filter_level)
             and not should_hide_console_log_line(entry["line"])
@@ -408,6 +409,7 @@ def load_log_buffer_from_file():
             LOG_BUFFER.clear()
             next_id = 1
             for line in lines:
+                line = sanitize_log_text(line)
                 if should_hide_console_log_line(line):
                     continue
                 LOG_BUFFER.append({
@@ -434,8 +436,7 @@ def add_job_to_scheduler(task):
 
 @router.get("/api/progress")
 def get_progress(): 
-    cleanup_stale_tasks()
-    return ACTIVE_TASKS
+    return snapshot_task_progress()
 
 @router.get("/api/system_logs")
 def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL", limit: int = DEFAULT_LOG_RESPONSE_LIMIT):
@@ -455,6 +456,7 @@ def get_system_logs(level: str = "ALL", keyword: str = "", category: str = "ALL"
 
             filtered_lines = []
             for line in lines:
+                line = sanitize_log_text(line)
                 line_level = extract_level_from_line(line)
                 if (
                     is_level_match(line_level, filter_level)
@@ -531,7 +533,7 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
 
             if replay_entries:
                 replay_entries = replay_entries[-MAX_LOG_RESPONSE_LIMIT:]
-                init_chunk = "".join(e["line"] for e in replay_entries)
+                init_chunk = "".join(sanitize_log_text(e["line"]) for e in replay_entries)
                 yield format_sse_event({"chunk": init_chunk, "level": filter_level, "keyword": filter_keyword, "category": filter_category}, event="init")
 
             while True:
@@ -542,7 +544,7 @@ async def stream_system_logs(request: Request, level: str = "ALL", keyword: str 
                     if should_hide_console_log_line(entry["line"]):
                         continue
                     yield format_sse_event({
-                        "chunk": entry["line"],
+                        "chunk": sanitize_log_text(entry["line"]),
                         "id": entry["id"],
                         "level": entry["level"],
                         "category": filter_category
@@ -575,7 +577,7 @@ def clear_system_logs():
 @router.post("/api/clear_task_progress")
 def clear_task_progress(payload: dict = Body(...)):
     run_id = payload.get("run_id")
-    if run_id in ACTIVE_TASKS: del ACTIVE_TASKS[run_id]
+    remove_task_progress(run_id)
     return {"status": "ok"}
 
 @router.post("/api/stop_task")
@@ -584,15 +586,13 @@ def stop_task(payload: dict = Body(...)):
     if not run_id:
         return {"status": "not_found", "message": "任务不存在或已结束"}
 
-    task = ACTIVE_TASKS.get(run_id)
+    task = request_task_cancel(run_id)
     if not task:
         logger.warning(f"[Tasks] 取消任务失败，任务不存在: run_id={run_id}")
         return {"status": "not_found", "message": "任务不存在或已结束"}
 
-    if task.get("status") in ("finished", "error", "stopped"):
+    if task.get("status") in ("finished", "error", "stopped", "interrupted"):
         return {"status": "not_found", "message": "任务已结束"}
-
-    task["cancel_requested"] = True
     logger.info(f"[Tasks] 已请求取消任务: run_id={run_id}, name={task.get('name', '')}")
     return {"status": "ok"}
 

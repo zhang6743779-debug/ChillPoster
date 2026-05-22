@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, PrivateAttr
 from typing import Optional, List
 from core.logger import logger
-from app.dependencies import update_task_progress
+from app.dependencies import get_recent_interrupted_task, remove_task_progress, update_task_progress
 
 # Re-export from service modules for backward compatibility (main.py imports these)
 from app.services.media_organize_state import register_main_event_loop, CONFIG_FILE, VIDEO_EXTS  # noqa: F401
@@ -528,7 +528,11 @@ async def organize_media(req: OrganizeRequest):
         _state._organize_running = True
         _state._organize_done_event = asyncio.Event()
 
-    update_task_progress(run_id, "整理: 准备中...", 0)
+    recent_interrupted = get_recent_interrupted_task("media_organize")
+    initial_message = "整理: 已中断，正在重新扫描续跑..." if recent_interrupted else "整理: 准备中..."
+    update_task_progress(run_id, initial_message, 0)
+    if recent_interrupted:
+        remove_task_progress(recent_interrupted.get("run_id"))
     try:
         t = threading.Thread(target=_start_organize_thread, args=(run_id, req), daemon=True)
         t.start()

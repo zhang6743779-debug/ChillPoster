@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.dependencies import ACTIVE_TASKS, update_task_progress
+from app.dependencies import ACTIVE_TASKS, set_task_detail, update_task_progress
 from app.services.docker_api import DockerAPI, get_current_container_id
 from core.configs import global_config
 from core.logger import logger
@@ -155,10 +155,10 @@ def _has_running_upgrade() -> bool:
 
 
 def _set_detail(run_id: str, **detail):
-    task = ACTIVE_TASKS.setdefault(run_id, {})
+    task = ACTIVE_TASKS.get(run_id, {})
     existing = task.get("detail") if isinstance(task.get("detail"), dict) else {}
     existing.update(detail)
-    task["detail"] = existing
+    set_task_detail(run_id, existing)
 
 
 def _run_docker_upgrade(run_id: str, cfg: dict):

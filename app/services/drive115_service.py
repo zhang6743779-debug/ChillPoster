@@ -10,13 +10,17 @@ import random
 import threading
 from cachetools import TTLCache
 from p115client import P115Client
-from app.services.media_organize_115_ops import _run_115_serial_request, run_115_write_request_sync
+from app.services.media_organize_115_ops import _run_115_serial_request, run_115_write_request, run_115_write_request_sync
 from p115pickcode import to_id
 from p115client.tool.attr import get_attr
 from app.routers.config_302 import get_config_302
 from app.services.wechat_service import wechat_notify_service
 from app.services.telegram_service import telegram_notify_service
 from core.logger import logger
+
+_115_READ_REQUEST_TIMEOUT_SECONDS = 10
+_RAPID_RANGE_READ_TIMEOUT_SECONDS = 15
+_RAPID_UPLOAD_INIT_TIMEOUT_SECONDS = 30
 
 class Drive115Service:
     def __init__(self):
@@ -57,8 +61,9 @@ class Drive115Service:
         self._last_direct_url_batch_at = 0.0
         self._last_gateway_playback_direct_url_at = 0.0
 
-        # 全局 HTTP 客户端
-        self._http_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False)
+        # 每个事件循环单独持有 HTTP 客户端，避免 UI loop 和网关 loop 交叉使用同一个 AsyncClient。
+        self._http_clients: dict[int, httpx.AsyncClient] = {}
+        self._http_clients_lock = threading.Lock()
 
     async def get_client(self, emby_index: int = 0):
         """获取或初始化主 115 账号客户端。"""
@@ -109,6 +114,24 @@ class Drive115Service:
             logger.info("[115] 已请求清理客户端缓存，但未命中现有缓存")
 
         return len(removed)
+
+    async def _run_115_read_request(self, request_name: str, request_factory, *, timeout: float = _115_READ_REQUEST_TIMEOUT_SECONDS):
+        started_at = time.monotonic()
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(request_factory), timeout=timeout)
+        except asyncio.TimeoutError as e:
+            elapsed = time.monotonic() - started_at
+            logger.warning(f"[115] {request_name}超时: 耗时={elapsed:.2f}s")
+            raise TimeoutError(f"{request_name}超时: {elapsed:.2f}s") from e
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        loop_id = id(asyncio.get_running_loop())
+        with self._http_clients_lock:
+            client = self._http_clients.get(loop_id)
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, verify=False)
+                self._http_clients[loop_id] = client
+            return client
 
     async def _run_gateway_playback_direct_url_request(self, request_name: str, request_factory):
         async with self._gateway_playback_direct_url_lock:
@@ -429,8 +452,11 @@ class Drive115Service:
 
             # 2. 获取目标目录 CID
             target_cid = None
-            target_cid_info = client.fs_dir_getid_app(target_dir)
             logger.debug(f"[Sync-{drive_name}] 查询目标目录: {target_dir}")
+            target_cid_info = await self._run_115_read_request(
+                "查询复制目标目录",
+                lambda: client.fs_dir_getid_app(target_dir),
+            )
 
             if target_cid_info and target_cid_info.get('id'):
                 target_cid = target_cid_info.get('id')
@@ -447,7 +473,7 @@ class Drive115Service:
                 if "/" in dir_name:
                     dir_name = dir_name.split("/")[-1]
 
-                make_resp = run_115_write_request_sync(
+                make_resp = await run_115_write_request(
                     client,
                     "创建复制目标目录",
                     lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
@@ -459,7 +485,10 @@ class Drive115Service:
                     
                     # 如果没拿到，再查一次
                     if not target_cid:
-                        target_cid_info = client.fs_dir_getid_app(target_dir)
+                        target_cid_info = await self._run_115_read_request(
+                            "复查复制目标目录",
+                            lambda: client.fs_dir_getid_app(target_dir),
+                        )
                         if target_cid_info:
                             target_cid = target_cid_info.get('id')
                 else:
@@ -472,14 +501,14 @@ class Drive115Service:
 
             # 3. 执行复制
             logger.debug(f"[Sync-{drive_name}] 开始复制: src_id={src_file_id} -> target_cid={target_cid}")
-            resp = run_115_write_request_sync(
+            resp = await run_115_write_request(
                 client,
                 "复制文件",
                 lambda write_client: write_client.fs_copy(src_file_id, target_cid),
             )
-            logger.debug(f"[Sync-{drive_name}] 复制响应: state={resp.get('state')}")
-            if not resp.get('state'):
-                logger.error(f"[Sync-{drive_name}] 复制失败: state={resp.get('state')}")
+            logger.debug(f"[Sync-{drive_name}] 复制响应: state={(resp or {}).get('state')}")
+            if not isinstance(resp, dict) or not resp.get('state'):
+                logger.error(f"[Sync-{drive_name}] 复制失败: state={(resp or {}).get('state')}")
                 return None
 
             # 4. 获取新文件信息 (参照 r302 逻辑)
@@ -490,7 +519,10 @@ class Drive115Service:
                 "asc": 0,
                 "limit": 1
             }
-            list_resp = client.fs_files(list_params)
+            list_resp = await self._run_115_read_request(
+                "复制后获取文件列表",
+                lambda: client.fs_files(list_params),
+            )
             logger.debug(f"[Sync-{drive_name}] 目标目录文件数: {len(list_resp.get('data', []))}")
             
             if not list_resp.get('state') or not list_resp.get('data'):
@@ -534,10 +566,11 @@ class Drive115Service:
         try:
             client, _ = await self.get_client()
             if client:
-                run_115_write_request_sync(
+                await run_115_write_request(
                     client,
                     "删除播放副本",
                     lambda write_client: write_client.fs_delete(file_id),
+                    raise_on_state_false=False,
                 )
                 logger.debug(f"[CopyOnWrite] 副本已清理: {file_id}")
             else:
@@ -623,17 +656,23 @@ class Drive115Service:
         """
         try:
             # 1. 获取/创建目标目录
-            target_cid_info = secondary_client.fs_dir_getid_app(target_dir)
+            target_cid_info = await self._run_115_read_request(
+                "查询秒传目标目录",
+                lambda: secondary_client.fs_dir_getid_app(target_dir),
+            )
             if not target_cid_info or not target_cid_info.get('id'):
                 # 创建目录
                 dir_name = target_dir.strip("/").split("/")[-1]
-                make_resp = run_115_write_request_sync(
+                make_resp = await run_115_write_request(
                     secondary_client,
                     "创建秒传目标目录",
                     lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
                 )
                 if make_resp and make_resp.get('state'):
-                    target_cid_info = secondary_client.fs_dir_getid_app(target_dir)
+                    target_cid_info = await self._run_115_read_request(
+                        "复查秒传目标目录",
+                        lambda: secondary_client.fs_dir_getid_app(target_dir),
+                    )
 
             if not target_cid_info or not target_cid_info.get('id'):
                 logger.error(f"[Rapid] 无法获取目标目录: {target_dir}")
@@ -671,7 +710,7 @@ class Drive115Service:
                     resp = httpx.get(
                         download_url,
                         headers=headers,
-                        timeout=60.0,
+                        timeout=_RAPID_RANGE_READ_TIMEOUT_SECONDS,
                         verify=False,
                         follow_redirects=True
                     )
@@ -697,13 +736,17 @@ class Drive115Service:
             # 这个方法会自动处理 status=7 的验证流程
             logger.debug(f"[Rapid] 发起秒传请求: SHA1={sha1_info['sha1'][:16]}...")
 
-            result = secondary_client.upload_file_init(
-                filename=filename,
-                filesize=sha1_info['size'],
-                filesha1=sha1_info['sha1'],
-                read_range_bytes_or_hash=read_range_callback,  # 传入范围读取回调
-                pid=target_cid,
-                async_=True
+            result = await self._run_115_read_request(
+                "秒传初始化",
+                lambda: secondary_client.upload_file_init(
+                    filename=filename,
+                    filesize=sha1_info['size'],
+                    filesha1=sha1_info['sha1'],
+                    read_range_bytes_or_hash=read_range_callback,  # 传入范围读取回调
+                    pid=target_cid,
+                    async_=False,
+                ),
+                timeout=_RAPID_UPLOAD_INIT_TIMEOUT_SECONDS,
             )
 
             if asyncio.iscoroutine(result):
@@ -729,7 +772,10 @@ class Drive115Service:
                         "asc": 0,
                         "limit": 1
                     }
-                    list_resp = secondary_client.fs_files(list_params)
+                    list_resp = await self._run_115_read_request(
+                        "秒传后获取文件列表",
+                        lambda: secondary_client.fs_files(list_params),
+                    )
 
                     if list_resp.get('state') and list_resp.get('data'):
                         new_file_data = list_resp['data'][0]
@@ -770,20 +816,22 @@ class Drive115Service:
         try:
             # 优先使用 file_id，其次使用 pickcode
             if file_id is not None:
-                run_115_write_request_sync(
+                await run_115_write_request(
                     secondary_client,
                     "删除小号副本",
                     lambda write_client: write_client.fs_delete(file_id),
+                    raise_on_state_false=False,
                 )
                 logger.debug(f"[Rapid] 小号副本已清理: file_id={file_id}")
             elif pickcode:
                 # p115client 的 fs_delete 也支持 pickcode
                 from p115client import P115Client
                 file_id_to_delete = P115Client.to_id(pickcode)
-                run_115_write_request_sync(
+                await run_115_write_request(
                     secondary_client,
                     "删除小号副本",
                     lambda write_client: write_client.fs_delete(file_id_to_delete),
+                    raise_on_state_false=False,
                 )
                 logger.debug(f"[Rapid] 小号副本已清理: pickcode={pickcode}")
             else:
@@ -889,7 +937,7 @@ class Drive115Service:
             return None
 
         url = f"{base_url}/emby/Items/{item_id}/PlaybackInfo?api_key={api_key}"
-        resp = await self._http_client.post(url, json={"Profile": "Unknown"}, timeout=5.0)
+        resp = await self._get_http_client().post(url, json={"Profile": "Unknown"}, timeout=5.0)
         if resp.status_code != 200:
             return None
 
@@ -982,7 +1030,7 @@ class Drive115Service:
             if path.startswith("http://") or path.startswith("https://"):
                 # 网络路径，直接获取内容
                 try:
-                    strm_resp = await self._http_client.get(path, timeout=5.0)
+                    strm_resp = await self._get_http_client().get(path, timeout=5.0)
                     if strm_resp.status_code == 200:
                         strm_content = strm_resp.text.strip()
                     else:
@@ -1002,7 +1050,7 @@ class Drive115Service:
                 for endpoint in api_endpoints:
                     try:
                         logger.debug(f"[115] 尝试通过Emby API读取strm: {endpoint}")
-                        file_resp = await self._http_client.get(endpoint, timeout=5.0)
+                        file_resp = await self._get_http_client().get(endpoint, timeout=5.0)
                         logger.debug(f"[115] API响应: status={file_resp.status_code}, content-type={file_resp.headers.get('content-type', 'N/A')}")
                         if file_resp.status_code == 200:
                             strm_content = file_resp.text.strip()
@@ -1224,7 +1272,10 @@ class Drive115Service:
         try:
             logger.info(f"[CleanUp] 开始清理账号: {name} (类型: {account_type})")
             client = P115Client(cookie)
-            dir_info = client.fs_dir_getid_app(upload_dir)
+            dir_info = await self._run_115_read_request(
+                "查询清理目录",
+                lambda: client.fs_dir_getid_app(upload_dir),
+            )
             target_cid = dir_info.get('id') if dir_info else None
             if not target_cid:
                 logger.warning(f"[CleanUp] 目录不存在: {upload_dir}")
@@ -1233,15 +1284,19 @@ class Drive115Service:
             deleted_count = 0
             max_iterations = 100
             for _ in range(max_iterations):
-                resp = client.fs_files({'cid': target_cid, 'limit': 1000})
+                resp = await self._run_115_read_request(
+                    "列出清理目录",
+                    lambda: client.fs_files({'cid': target_cid, 'limit': 1000}),
+                )
                 if not resp.get('data'): break
                 file_list = resp['data']
                 if not file_list: break
                 fids = [item['fid'] for item in file_list]
-                run_115_write_request_sync(
+                await run_115_write_request(
                     client,
                     "清理复制目录",
                     lambda write_client: write_client.fs_delete(fids),
+                    raise_on_state_false=False,
                 )
                 deleted_count += len(fids)
                 logger.debug(f"[CleanUp] 本轮已删除 {len(fids)} 个文件")
@@ -1432,8 +1487,11 @@ class Drive115Service:
         return {"status": "ok", "deleted_count": total_deleted_count, "folders": folder_results, "message": f"清理完成，共删除 {total_deleted_count} 项"}
 
     async def close(self):
-        if self._http_client:
-            await self._http_client.aclose()
+        loop_id = id(asyncio.get_running_loop())
+        with self._http_clients_lock:
+            client = self._http_clients.pop(loop_id, None)
+        if client and not client.is_closed:
+            await client.aclose()
             logger.info("[115Service] HTTP 客户端已关闭")
 
 drive115_service = Drive115Service()

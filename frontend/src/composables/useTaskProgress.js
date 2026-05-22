@@ -169,6 +169,13 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
 
         const processedTaskIds = new Set();
         let isFirstPoll = true;
+        const isTerminalTaskStatus = (status) => ['finished', 'error', 'stopped', 'interrupted'].includes(status);
+        const terminalTaskLabel = (status) => {
+            if (status === 'finished') return '完成';
+            if (status === 'stopped') return '已取消';
+            if (status === 'interrupted') return '已中断';
+            return '失败';
+        };
 
 
         const startPolling = () => {
@@ -187,10 +194,12 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
                         for (const id in activeMap) {
                             const task = activeMap[id];
                             if (task.status === 'running') running = true;
-                            if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
+                            if (isTerminalTaskStatus(task.status)) {
                                 addTaskHistory(id, task);
                                 processedTaskIds.add(id);
-                                setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
+                                if (task.status !== 'interrupted') {
+                                    setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
+                                }
                             }
                         }
                         tasksState.hasRunning = running;
@@ -202,9 +211,9 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
                         const task = activeMap[id];
                         if (task.status === 'running') running = true;
 
-                        if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
+                        if (isTerminalTaskStatus(task.status)) {
                             if (!processedTaskIds.has(id)) {
-                                const label = task.status === 'finished' ? '完成' : (task.status === 'stopped' ? '已取消' : '失败');
+                                const label = terminalTaskLabel(task.status);
                                 const msgText = `${task.name} ${label}`;
                                 addTaskHistory(id, task);
                                 addLog(task.status === 'finished' ? 'success' : 'error', msgText);
@@ -222,7 +231,9 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
 
                                 processedTaskIds.add(id);
 
-                                setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
+                                if (task.status !== 'interrupted') {
+                                    setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
+                                }
                             }
                         }
                     }
