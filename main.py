@@ -75,12 +75,13 @@ from app.services.rss_service import rss_service_instance
 from app.services.hdhive_service import hdhive_service
 from app.services.telegram_service import telegram_notify_service
 from app.services.drive115_upload_service import drive115_upload_service
+from app.dependencies import load_task_progress_from_file
 # ============================================
 
 # ==========================================
 # [新增] 日志屏蔽配置
 # ==========================================
-tasks.load_task_progress_from_file()
+load_task_progress_from_file()
 tasks.load_log_buffer_from_file()
 register_log_line_publisher(tasks.publish_log_line)
 
