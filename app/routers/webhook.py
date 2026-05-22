@@ -242,12 +242,10 @@ async def emby_webhook_trigger(request: Request):
 
     allowed_events = ["library.new", "item.added", "library.scan_complete"]
     delete_events = ["item.removed", "library.deleted", "deep.delete"]
+    delete_sync_events = {"deep.delete"}
 
     webhook_enabled = bool(wh_config.get("enabled", False))
     delete_sync_enabled = True
-
-    if not webhook_enabled and not (delete_sync_enabled and event_type in delete_events):
-        return {"status": "ignored", "reason": "Webhook Disabled"}
 
     if event_type not in allowed_events and event_type not in delete_events:
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
@@ -264,13 +262,16 @@ async def emby_webhook_trigger(request: Request):
             f"webhook_enabled={webhook_enabled} delete_sync_enabled={delete_sync_enabled}"
         )
         delete_sync_result = None
-        try:
-            from app.services.emby_delete_sync import sync_emby_delete_to_115
-            delete_sync_result = sync_emby_delete_to_115(data, wh_config)
-            if delete_sync_result and delete_sync_result.get("status") != "disabled":
-                logger.info(f"[Webhook] Emby删除同步115结果: {delete_sync_result}")
-        except Exception as e:
-            logger.error(f"[Webhook] Emby删除同步115失败: {e}", exc_info=True)
+        if event_type in delete_sync_events:
+            try:
+                from app.services.emby_delete_sync import sync_emby_delete_to_115
+                delete_sync_result = sync_emby_delete_to_115(data, wh_config)
+                if delete_sync_result and delete_sync_result.get("status") != "disabled":
+                    logger.info(f"[Webhook] Emby删除同步115结果: {delete_sync_result}")
+            except Exception as e:
+                logger.error(f"[Webhook] Emby删除同步115失败: {e}", exc_info=True)
+        else:
+            delete_sync_result = {"status": "skipped", "message": f"非 deep.delete 删除通知不触发115删除: {event_type}"}
 
         patched = False
         servers = get_emby_configs_sync()
@@ -594,6 +595,15 @@ async def emby_webhook_trigger(request: Request):
             "stats_patched": stats_patched_count,
             "discover_index_patched": discover_index_patched_count,
             "reason": "No Preset Selected",
+        }
+
+    if not webhook_enabled:
+        return {
+            "status": "ok",
+            "action": "cover_replace_disabled",
+            "targets_matched": len(targets),
+            "stats_patched": stats_patched_count,
+            "discover_index_patched": discover_index_patched_count,
         }
 
     mode = wh_config.get("mode", "random")

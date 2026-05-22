@@ -3,11 +3,13 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from core.configs import BASE_DIR
 from core.logger import logger
 from core.media_library_cache import (
     build_task_key,
+    get_item_by_pickcode,
     get_task_item_by_path,
     remove_items_by_path_prefix,
     remove_task_item_by_id,
@@ -22,6 +24,9 @@ VIDEO_EXTS = {
 }
 
 _RECENT_DELETE_KEYS: dict[str, float] = {}
+DEEP_DELETE_EVENT = "deep.delete"
+DEEP_DELETE_TITLE = "神医助手 - 媒体深度删除"
+DEEP_DELETE_ALLOWED_TYPES = {"Movie", "Episode", "Season", "Series"}
 
 
 def _read_json(path: str, default: Any):
@@ -50,6 +55,46 @@ def _extract_description_item_path(description: str) -> str:
     if not match:
         return ""
     return _normalize_path(match.group("path").strip())
+
+
+def _extract_mount_pickcodes(description: str) -> list[str]:
+    match = re.search(r"(?:^|\n)Mount Paths:\s*\n(?P<paths>.+?)(?:\n\n|$)", str(description or ""), re.S)
+    if not match:
+        return []
+
+    pickcodes: list[str] = []
+    for raw_line in match.group("paths").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parsed = urlparse(line)
+        path = unquote(parsed.path or line)
+        name = path.rstrip("/").rsplit("/", 1)[-1]
+        pickcode = name.rsplit(".", 1)[0].strip()
+        if pickcode and pickcode not in pickcodes:
+            pickcodes.append(pickcode)
+    return pickcodes
+
+
+def _validate_deep_delete_payload(payload: dict, item: dict, source_path: str) -> str:
+    title = str(payload.get("Title") or "")
+    user = payload.get("User") if isinstance(payload.get("User"), dict) else {}
+    description = str(payload.get("Description") or "")
+    item_type = str(item.get("Type") or "")
+
+    if str(payload.get("Event") or "") != DEEP_DELETE_EVENT:
+        return f"非 {DEEP_DELETE_EVENT} 事件不触发 115 删除"
+    if title != DEEP_DELETE_TITLE:
+        return f"deep.delete 标题不匹配，跳过: {title}"
+    if not (user.get("Id") or user.get("Name")):
+        return "deep.delete 缺少用户信息，跳过"
+    if "Mount Paths:" not in description:
+        return "deep.delete 缺少 Mount Paths，跳过"
+    if item_type not in DEEP_DELETE_ALLOWED_TYPES:
+        return f"不支持的 deep.delete 类型: {item_type}"
+    if not source_path:
+        return "deep.delete 缺少 Item Path，跳过"
+    return ""
 
 
 def _load_strm_tasks() -> list[dict]:
@@ -144,32 +189,33 @@ def _resolve_delete_scope(payload: dict) -> dict:
     item_type = str(item.get("Type") or "")
     item_path = _normalize_path(str(item.get("Path") or ""))
     desc_path = _extract_description_item_path(str(payload.get("Description") or ""))
-    title = str(payload.get("Title") or "")
 
-    if event_type == "deep.delete":
-        source_path = desc_path or item_path
-        if item_type == "Movie":
-            return {"kind": "folder", "item_type": item_type, "emby_path": _dirname(source_path) if _is_video_path(source_path) else source_path}
-        if item_type == "Episode":
-            return {"kind": "file", "item_type": item_type, "emby_path": source_path}
-        if item_type in ("Season", "Series"):
-            return {"kind": "folder", "item_type": item_type, "emby_path": source_path}
-        return {"kind": "", "item_type": item_type, "emby_path": source_path, "message": f"不支持的 deep.delete 类型: {item_type}"}
+    source_path = desc_path or item_path
+    validation_message = _validate_deep_delete_payload(payload, item, source_path)
+    if validation_message:
+        return {"kind": "", "item_type": item_type, "emby_path": source_path or item_path, "message": validation_message}
 
-    if event_type in ("library.deleted", "item.removed"):
-        if item_type == "Movie":
-            return {"kind": "folder", "item_type": item_type, "emby_path": _dirname(item_path) if _is_video_path(item_path) else item_path}
-        if item_type == "Episode":
-            return {"kind": "file", "item_type": item_type, "emby_path": item_path}
-        if item_type == "Season":
-            return {"kind": "folder", "item_type": item_type, "emby_path": item_path}
-        if item_type == "Series":
-            # Emby may send Series summaries for partial episode deletes, e.g.
-            # "ChillFlix 从 某剧 中删除了 2 项目"; do not treat those as full-series deletes.
-            if re.search(r"从\s+.+?\s+中删除了\s+\d+\s*项目", title):
-                return {"kind": "", "item_type": item_type, "emby_path": item_path, "message": f"跳过剧集局部删除汇总: {title}"}
-            if item_path:
-                return {"kind": "folder", "item_type": item_type, "emby_path": item_path}
+    if item_type == "Movie":
+        return {
+            "kind": "folder",
+            "item_type": item_type,
+            "emby_path": _dirname(source_path) if _is_video_path(source_path) else source_path,
+            "pickcodes": _extract_mount_pickcodes(str(payload.get("Description") or "")),
+        }
+    if item_type == "Episode":
+        return {
+            "kind": "file",
+            "item_type": item_type,
+            "emby_path": source_path,
+            "pickcodes": _extract_mount_pickcodes(str(payload.get("Description") or "")),
+        }
+    if item_type in ("Season", "Series"):
+        return {
+            "kind": "folder",
+            "item_type": item_type,
+            "emby_path": source_path,
+            "pickcodes": _extract_mount_pickcodes(str(payload.get("Description") or "")),
+        }
 
     return {"kind": "", "item_type": item_type, "emby_path": item_path, "message": f"跳过事件: {event_type}/{item_type}"}
 
@@ -212,6 +258,44 @@ def _is_recent_duplicate(key: str, ttl_seconds: int = 300) -> bool:
     return False
 
 
+def _find_file_cache_item_by_pickcode(pickcodes: list[str]) -> dict:
+    for pickcode in pickcodes or []:
+        cache_entry = get_item_by_pickcode(pickcode)
+        cache_item = (cache_entry or {}).get("item") if isinstance(cache_entry, dict) else None
+        if not isinstance(cache_item, dict):
+            continue
+        if bool(cache_item.get("is_dir")):
+            logger.warning(f"[WebhookDeleteSync] Mount Paths 命中目录缓存，跳过 pickcode={pickcode}")
+            continue
+
+        remote_path = _normalize_path(str(cache_item.get("path") or "")).rstrip("/")
+        drive_index, task_remote = _get_task_for_remote_path(remote_path)
+        if not task_remote:
+            logger.warning(f"[WebhookDeleteSync] Mount Paths 路径未命中任务，跳过 pickcode={pickcode} path={remote_path}")
+            continue
+
+        task_key = build_task_key(drive_index, task_remote)
+        entry_task_key = str((cache_entry or {}).get("task_key") or "")
+        if entry_task_key and entry_task_key != task_key:
+            logger.warning(
+                f"[WebhookDeleteSync] Mount Paths 缓存任务不匹配，跳过 "
+                f"pickcode={pickcode} cache_task={entry_task_key} expected_task={task_key}"
+            )
+            continue
+
+        return {
+            "status": "ok",
+            "cache_item": cache_item,
+            "remote_path": remote_path,
+            "drive_index": drive_index,
+            "task_remote": task_remote,
+            "task_key": task_key,
+            "pickcode": pickcode,
+        }
+
+    return {"status": "not_found"}
+
+
 def sync_emby_delete_to_115(payload: dict, config: dict) -> dict:
     if not bool(config.get("delete_sync_enabled", False)):
         return {"status": "disabled"}
@@ -220,24 +304,39 @@ def sync_emby_delete_to_115(payload: dict, config: dict) -> dict:
     if not scope.get("kind"):
         return {"status": "skipped", "message": scope.get("message", "未命中删除范围")}
 
-    mapped = resolve_emby_path_to_remote_path(scope.get("emby_path", ""))
-    if mapped.get("status") != "ok":
-        logger.warning(f"[WebhookDeleteSync] 路径映射失败: {mapped.get('message')}")
-        return {"status": "error", "message": mapped.get("message")}
+    pickcode_match = {}
+    if scope.get("kind") == "file":
+        pickcode_match = _find_file_cache_item_by_pickcode(scope.get("pickcodes") or [])
+        if pickcode_match.get("status") != "ok" and os.path.splitext(str(scope.get("emby_path") or "").lower())[1] == ".strm":
+            message = f"STRM 单集深度删除未命中 Mount Paths 缓存，跳过真实文件删除: {scope.get('emby_path')}"
+            logger.warning(f"[WebhookDeleteSync] {message}")
+            return {"status": "cache_miss", "message": message, "emby_path": scope.get("emby_path")}
 
-    remote_path = str(mapped.get("remote_path") or "").rstrip("/")
-    drive_index, task_remote = _get_task_for_remote_path(remote_path)
-    if not task_remote:
-        message = f"远端路径未命中 STRM/媒体库任务: {remote_path}"
-        logger.warning(f"[WebhookDeleteSync] {message}")
-        return {"status": "error", "message": message, "remote_path": remote_path}
+    if pickcode_match.get("status") == "ok":
+        cache_item = pickcode_match["cache_item"]
+        remote_path = str(pickcode_match.get("remote_path") or "").rstrip("/")
+        drive_index = int(pickcode_match.get("drive_index") or 0)
+        task_remote = str(pickcode_match.get("task_remote") or "").rstrip("/")
+        task_key = str(pickcode_match.get("task_key") or "")
+    else:
+        mapped = resolve_emby_path_to_remote_path(scope.get("emby_path", ""))
+        if mapped.get("status") != "ok":
+            logger.warning(f"[WebhookDeleteSync] 路径映射失败: {mapped.get('message')}")
+            return {"status": "error", "message": mapped.get("message")}
 
-    task_key = build_task_key(drive_index, task_remote)
-    cache_item = get_task_item_by_path(task_key, remote_path)
-    if not cache_item:
-        message = f"媒体库缓存未命中，跳过删除: {remote_path}"
-        logger.warning(f"[WebhookDeleteSync] {message}")
-        return {"status": "cache_miss", "message": message, "remote_path": remote_path}
+        remote_path = str(mapped.get("remote_path") or "").rstrip("/")
+        drive_index, task_remote = _get_task_for_remote_path(remote_path)
+        if not task_remote:
+            message = f"远端路径未命中 STRM/媒体库任务: {remote_path}"
+            logger.warning(f"[WebhookDeleteSync] {message}")
+            return {"status": "error", "message": message, "remote_path": remote_path}
+
+        task_key = build_task_key(drive_index, task_remote)
+        cache_item = get_task_item_by_path(task_key, remote_path)
+        if not cache_item:
+            message = f"媒体库缓存未命中，跳过删除: {remote_path}"
+            logger.warning(f"[WebhookDeleteSync] {message}")
+            return {"status": "cache_miss", "message": message, "remote_path": remote_path}
 
     expected_dir = scope.get("kind") == "folder"
     cached_is_dir = bool(cache_item.get("is_dir"))
