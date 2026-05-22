@@ -8,6 +8,7 @@ export function useFeedbackDialogs() {
         const id = toastId++;
         let icon = 'fa-circle-check';
         if (type === 'error') icon = 'fa-circle-xmark';
+        if (type === 'warning') icon = 'fa-circle-exclamation';
         if (type === 'info') icon = 'fa-circle-info';
         
         toasts.value.push({ id, msg, type, icon });

@@ -64,7 +64,19 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
                 if (detail.tv_episodes) parts.push(`剧集 ${detail.tv_episodes}`);
                 if (detail.total !== undefined) parts.push(`成功 ${detail.success || 0}/${detail.total || 0}`);
                 if (detail.failed) parts.push(`失败 ${detail.failed}`);
-                if (detail.skipped) parts.push(`跳过 ${detail.skipped}`);
+                if (detail.sha1_duplicate_skipped) parts.push(`SHA1重复 ${detail.sha1_duplicate_skipped}`);
+                if (detail.wash_rejected_skipped) parts.push(`洗版未通过 ${detail.wash_rejected_skipped}`);
+                if (detail.same_batch_duplicate_skipped) parts.push(`同批次重复 ${detail.same_batch_duplicate_skipped}`);
+                if (detail.trailer_skipped) parts.push(`预告片 ${detail.trailer_skipped}`);
+                if (detail.other_skipped) parts.push(`其他跳过 ${detail.other_skipped}`);
+                if (
+                    detail.skipped
+                    && !detail.sha1_duplicate_skipped
+                    && !detail.wash_rejected_skipped
+                    && !detail.same_batch_duplicate_skipped
+                    && !detail.trailer_skipped
+                    && !detail.other_skipped
+                ) parts.push(`跳过 ${detail.skipped}`);
                 if (detail.strm) parts.push(`STRM ${detail.strm}`);
                 summary = parts.length ? `媒体整理：${parts.join(' · ')}` : summary;
             } else if (category === 'strm') {

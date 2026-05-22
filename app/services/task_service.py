@@ -301,7 +301,7 @@ class TaskService:
                 logger.error(f"[TaskService] 恢复任务失败 {task.get('name')}: {e}")
 
         if loaded > 0:
-            logger.info(f"[启动] 自动封面任务已恢复: {loaded} 个")
+            logger.trace(f"[启动] 自动封面任务已恢复: {loaded} 个")
 
     def add_task(self, task_id, cron_str, preset_filename, targets, mode, name="Unknown"):
         """添加新任务到调度器 (封面生成任务)"""
@@ -375,7 +375,7 @@ class TaskService:
 
             drives = data.get("drives", [])
 
-            logger.info(f"[启动] 刷新 115 清理任务: 配置 {len(drives)} 个")
+            logger.trace(f"[启动] 刷新 115 清理任务: 配置 {len(drives)} 个")
 
             job_counter = 0
             for idx, drive in enumerate(drives):
@@ -402,7 +402,7 @@ class TaskService:
                             self._add_cleanup_job(r_job_id, drive, "rapid", r_idx, cron_exp, r_name)
                             job_counter += 1
 
-            logger.info(f"[启动] 115 清理任务已加载: {job_counter} 个")
+            logger.trace(f"[启动] 115 清理任务已加载: {job_counter} 个")
 
         except Exception as e:
             logger.error(f"[启动] 读取 302 配置失败: {e}")
@@ -469,7 +469,7 @@ class TaskService:
                     continue
                 self._add_selected_cleanup_job(f"selected_cleanup_{task_id}", task)
                 loaded += 1
-            logger.info(f"[启动] 115 定时清空任务已加载: {loaded} 个")
+            logger.trace(f"[启动] 115 定时清空任务已加载: {loaded} 个")
         except Exception as e:
             logger.error(f"[启动] 读取 115 定时清空任务失败: {e}")
 
@@ -558,7 +558,7 @@ class TaskService:
             id=self.daily_signin_job_id,
             replace_existing=True
         )
-        logger.info(f"[SignIn] 下次 115 自动签到时间: {next_run_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.trace(f"[SignIn] 下次 115 自动签到时间: {next_run_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def _compute_next_signin_datetime(self):
         now = datetime.now()

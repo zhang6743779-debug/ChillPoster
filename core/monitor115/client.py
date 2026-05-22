@@ -41,7 +41,7 @@ class LifeClient:
                     raw = json.load(f)
                 if isinstance(raw, dict):
                     self._file_id_path_map = raw
-                    logger.info(f"[115Life] 已加载路径映射: {len(self._file_id_path_map)} 条")
+                    logger.trace(f"[115Life] 已加载路径映射: {len(self._file_id_path_map)} 条")
         except Exception as e:
             logger.warning(f"[115Life] 路径映射加载失败: {e}")
             self._file_id_path_map = {}

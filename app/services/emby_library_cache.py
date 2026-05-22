@@ -445,9 +445,9 @@ def init_cache():
             save_state(state)
 
         if _enabled:
-            logger.info(f"[EmbyLibCache] 已同步 {count} 个 Emby 媒体库快照")
+            logger.trace(f"[EmbyLibCache] 已同步 {count} 个 Emby 媒体库快照")
         else:
-            logger.info("[EmbyLibCache] 开关未启用，已同步规则期望状态")
+            logger.trace("[EmbyLibCache] 开关未启用，已同步规则期望状态")
     except Exception as e:
         logger.warning(f"[EmbyLibCache] 初始化失败: {e}")
 
@@ -1172,7 +1172,7 @@ def load_discover_index_cache(server_idx: int = 0) -> bool:
     loaded = _apply_discover_index_cache(payload, server_idx)
     if loaded:
         meta = payload.get("_meta") or {}
-        logger.info(
+        logger.trace(
             f"[EmbyLibCache] 已加载 Emby 可用性索引缓存: keys={meta.get('index_key_count', 0)} "
             f"series={meta.get('series_count', 0)} updated_at={meta.get('updated_at', 0)}"
         )

@@ -234,7 +234,7 @@ def rss_worker_loop():
     """
     RSS 队列消费者线程
     """
-    logger.info("[启动] RSS 串行处理器已启动")
+    logger.trace("[启动] RSS 串行处理器已启动")
     while True:
         try:
             task_id = RSS_JOB_QUEUE.get()
@@ -272,7 +272,7 @@ class RssService:
                     self.add_rss_job(task)
                     active_count += 1
 
-            logger.info(f"[RSS] 已恢复 {active_count} 个订阅监控")
+            logger.trace(f"[RSS] 已恢复 {active_count} 个订阅监控")
         except Exception as e:
             logger.error(f"[RSS] 加载任务列表失败: {e}")
 

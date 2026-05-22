@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from apscheduler.triggers.cron import CronTrigger
 
 from app.schemas import CreateTaskRequest, UpdateTaskRequest, RunTaskRequest, RunSavedTaskRequest, ToggleTaskRequest
-from app.dependencies import remove_task_progress, request_task_cancel, snapshot_task_progress
+from app.dependencies import cleanup_stale_tasks, remove_task_progress, request_task_cancel, snapshot_task_progress
 from app.services.task_service import execute_task_logic, task_service_instance
 from core.configs import TASKS_FILE, APP_LOG_FILE, TEMPLATES_DIR
 from core.logger import logger, sanitize_log_text, should_hide_console_log_line
@@ -435,7 +435,8 @@ def add_job_to_scheduler(task):
         logger.error(f"[Scheduler] 装载任务失败 {task['name']}: {e}")
 
 @router.get("/api/progress")
-def get_progress(): 
+def get_progress():
+    cleanup_stale_tasks()
     return snapshot_task_progress()
 
 @router.get("/api/system_logs")

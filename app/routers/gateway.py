@@ -186,6 +186,10 @@ def _derive_media_display_name_from_path(path: str) -> str:
 
     file_name = parts[-1]
     stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+    parent_name = parts[-2]
+    if re.search(r"(?i)\.(mkv|mp4|ts|m2ts|avi|mov|wmv|flv|webm|strm)$", file_name):
+        if parent_name in {"转存目录", "下载目录", "下载库", "整理目录"} or "转存" in parent_name:
+            return stem
     season_idx = next((i for i, p in enumerate(parts) if re.match(r"(?i)^season\s*\d+$", p)), None)
     if season_idx is not None and season_idx >= 1:
         series_name = parts[season_idx - 1]
@@ -194,7 +198,7 @@ def _derive_media_display_name_from_path(path: str) -> str:
         episode_name = episode_match.group(0).upper() if episode_match else ""
         return " / ".join(p for p in [series_name, season_name, episode_name] if p)
 
-    return parts[-2]
+    return parent_name
 
 
 def _resolve_direct_pickcode_name(pickcode: str, fallback_name: str) -> str:

@@ -23,7 +23,12 @@ from app.services.media_organize_state import _organize_trigger_lock
 from app.services.media_organize_115_ops import (
     _get_115_client,
 )
-from app.services.media_organize_tmdb import _load_config_data, _fetch_tmdb_data, _build_scraping_config
+from app.services.media_organize_tmdb import (
+    _load_config_data, _fetch_tmdb_data, _build_scraping_config,
+    _parse_filename, _search_tmdb_for_title, _extract_tmdb_id_from_text,
+    _validate_tmdb_tv_episode,
+)
+from app.services.media_organize_template import _build_template_variables, _render_template
 from app.services.media_organize_scrape import _noop_transfer, _write_nfo, _download_image
 
 router = APIRouter(prefix="/api/media_organize", tags=["media_organize"])
@@ -130,6 +135,282 @@ class Browse115Payload(BaseModel):
 class CategoryRulesPayload(BaseModel):
     movie: List[dict] = []
     tv: List[dict] = []
+
+
+class IdentifyTestPayload(BaseModel):
+    input: str = ""
+    folder_name: str = ""
+    file_name: str = ""
+    media_type: str = "auto"
+
+
+def _tmdb_image_url(path: str, size: str = "w500") -> str:
+    path = str(path or "").strip()
+    if not path:
+        return ""
+    return f"https://image.tmdb.org/t/p/{size}{path}"
+
+
+def _display_media_type(media_type: str) -> str:
+    return "电影" if media_type == "movie" else "剧集"
+
+
+def _identify_source(tmdb_data: dict, media_type: str) -> dict:
+    if media_type == "tv":
+        source = tmdb_data.get("series_details") if isinstance(tmdb_data, dict) else {}
+        return source if isinstance(source, dict) else {}
+    return tmdb_data if isinstance(tmdb_data, dict) else {}
+
+
+def _year_from_source(source: dict, media_type: str) -> str:
+    date = source.get("release_date") if media_type == "movie" else source.get("first_air_date")
+    return str(date or "")[:4]
+
+
+def _normalize_identify_input(raw_input: str = "", folder_name: str = "", file_name: str = "") -> dict:
+    folder = str(folder_name or "").strip().strip("/\\")
+    file_value = str(file_name or "").strip().strip("/\\")
+    raw = str(raw_input or "").strip()
+    input_tmdb_id = (
+        _extract_tmdb_id_from_text(folder)
+        or _extract_tmdb_id_from_text(file_value)
+        or _extract_tmdb_id_from_text(raw)
+    )
+
+    if folder or file_value:
+        base_name = os.path.basename(file_value.replace("\\", "/")) if file_value else ""
+        folder_base = os.path.basename(folder.replace("\\", "/")) if folder else ""
+        ext = os.path.splitext(base_name)[1].lower()
+        is_file = bool(base_name and ext and ext in VIDEO_EXTS)
+        if is_file:
+            file_path = f"/识别测试/{folder_base}/{base_name}" if folder_base else f"/识别测试/{base_name}"
+            return {
+                "input": raw,
+                "folder_name": folder_base,
+                "file_name": base_name,
+                "input_tmdb_id": input_tmdb_id,
+                "kind": "file",
+                "filename": base_name,
+                "file_path": file_path,
+                "ext": ext,
+            }
+
+        folder_title = folder_base or base_name
+        return {
+            "input": raw,
+            "folder_name": folder_title,
+            "file_name": base_name,
+            "input_tmdb_id": input_tmdb_id,
+            "kind": "folder",
+            "filename": folder_title,
+            "file_path": f"/识别测试/{folder_title}/{folder_title}.mkv",
+            "ext": "",
+        }
+
+    normalized = raw.replace("\\", "/").strip().rstrip("/")
+    base_name = os.path.basename(normalized) if normalized else ""
+    ext = os.path.splitext(base_name)[1].lower()
+    is_file = bool(ext and ext in VIDEO_EXTS)
+
+    if is_file:
+        file_path = normalized if "/" in normalized else f"/识别测试/{base_name}"
+        return {
+            "input": raw,
+            "folder_name": os.path.basename(os.path.dirname(file_path)) if "/" in file_path else "",
+            "file_name": base_name,
+            "input_tmdb_id": input_tmdb_id,
+            "kind": "file",
+            "filename": base_name,
+            "file_path": file_path,
+            "ext": ext,
+        }
+
+    folder_name = base_name or normalized
+    return {
+        "input": raw,
+        "folder_name": folder_name,
+        "file_name": "",
+        "input_tmdb_id": input_tmdb_id,
+        "kind": "folder",
+        "filename": folder_name,
+        "file_path": f"/识别测试/{folder_name}/{folder_name}.mkv",
+        "ext": "",
+    }
+
+
+def _identify_candidate_hints(media_type: str, input_kind: str) -> list[Optional[str]]:
+    normalized = str(media_type or "auto").strip().lower()
+    if normalized in {"movie", "tv"}:
+        return [normalized]
+    if input_kind == "folder":
+        return ["tv", "movie", None]
+    return [None, "tv", "movie"]
+
+
+def _actual_tmdb_id(tmdb_data: dict, media_type: str) -> Optional[int]:
+    source = _identify_source(tmdb_data, media_type)
+    try:
+        value = int(source.get("id") or 0)
+        return value or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_identify_preview(tmdb_data: dict, parsed: dict, search_result: dict,
+                            media_type: str, config_data: dict, input_meta: dict) -> dict:
+    from app.services.category_matcher import CategoryMatcher
+
+    source = _identify_source(tmdb_data, media_type)
+    tmdb_id = _actual_tmdb_id(tmdb_data, media_type) or search_result.get("tmdb_id")
+    season_num = search_result.get("season", parsed.get("season"))
+    episode_num = search_result.get("episode", parsed.get("episode"))
+    ext = input_meta.get("ext") or ""
+    meta_info = parsed.get("meta_info", {}) if isinstance(parsed, dict) else {}
+    file_req = type("Obj", (), {
+        "media_type": media_type,
+        "tmdb_id": tmdb_id,
+        "season_number": season_num,
+        "episode_number": episode_num,
+        "is_bluray": False,
+        "drive_index": 0,
+        "overwrite": False,
+    })()
+
+    variables = _build_template_variables(tmdb_data, file_req, ext, meta_info, _title_cache={})
+    category_path = CategoryMatcher().match(tmdb_data, media_type)
+    target_root = str(config_data.get("target_name", "") or "").rstrip("/")
+    target_base = target_root
+    if category_path and category_path != "其他":
+        target_base = f"{target_base}/{category_path}" if target_base else category_path
+
+    if media_type == "movie":
+        folder_format = config_data.get("movie_folder_format", "{title} ({year}) {tmdb-{tmdb_id}}")
+        rename_format = config_data.get("movie_rename_format", "{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
+        folder_name = _render_template(folder_format, variables)
+        file_name = (_render_template(rename_format, variables) + ext) if ext else ""
+        season_folder = ""
+    else:
+        folder_format = config_data.get("tv_folder_format", "{title} ({year}) {tmdb-{tmdb_id}}")
+        rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
+        folder_name = _render_template(folder_format, variables)
+        season_folder = f"Season {int(season_num or 1):02d}"
+        file_name = (_render_template(rename_format, variables) + ext) if ext else ""
+
+    folder_path = f"{target_base}/{folder_name}" if target_base and folder_name else (folder_name or target_base)
+    if season_folder:
+        folder_path = f"{folder_path}/{season_folder}" if folder_path else season_folder
+
+    genres = source.get("genres") or []
+    countries = source.get("origin_country") or []
+    if not countries:
+        countries = [
+            item.get("iso_3166_1", "")
+            for item in (source.get("production_countries") or [])
+            if isinstance(item, dict) and item.get("iso_3166_1")
+        ]
+
+    return {
+        "title": source.get("title") or source.get("name") or search_result.get("title") or parsed.get("title", ""),
+        "original_title": source.get("original_title") or source.get("original_name") or "",
+        "year": _year_from_source(source, media_type),
+        "overview": source.get("overview") or "",
+        "media_type": media_type,
+        "media_type_label": _display_media_type(media_type),
+        "tmdb_id": tmdb_id,
+        "poster_url": _tmdb_image_url(source.get("poster_path"), "w500"),
+        "backdrop_url": _tmdb_image_url(source.get("backdrop_path"), "w780"),
+        "rating": source.get("vote_average") or 0,
+        "genres": [g.get("name", "") if isinstance(g, dict) else str(g) for g in genres],
+        "countries": [str(c) for c in countries if c],
+        "season": season_num,
+        "episode": episode_num,
+        "category_path": category_path or "其他",
+        "target_root": target_root,
+        "target_base": target_base,
+        "target_folder": folder_path,
+        "folder_name": folder_name,
+        "season_folder": season_folder,
+        "file_name": file_name,
+        "variables": {
+            key: variables.get(key, "")
+            for key in [
+                "title", "year", "en_title", "season_episode",
+                "resource_pix", "web_source", "resource_type", "video_encode",
+                "color_depth", "video_effect", "fps", "audio_encode", "resource_team",
+            ]
+        },
+    }
+
+
+async def _run_identify_test_attempt(input_meta: dict, media_type_hint: Optional[str], api_key: str, config_data: dict) -> dict:
+    parsed = _parse_filename(
+        input_meta["filename"],
+        media_type_hint=media_type_hint,
+        file_path=input_meta["file_path"],
+    )
+    attempt = {
+        "mode": media_type_hint or "auto",
+        "ok": False,
+        "message": "",
+        "parsed": parsed or None,
+    }
+    if not parsed:
+        attempt["message"] = "无法解析输入名称"
+        return attempt
+
+    if parsed.get("tmdb_id_direct"):
+        search_result = {
+            "tmdb_id": parsed["tmdb_id_direct"],
+            "media_type": parsed["media_type"],
+            "title": parsed["title"],
+            "season": parsed.get("season"),
+            "episode": parsed.get("episode"),
+        }
+    else:
+        search_result = await _search_tmdb_for_title(parsed, api_key, set())
+
+    if not search_result:
+        attempt["message"] = "未识别到 TMDb 条目"
+        return attempt
+
+    media_type = search_result.get("media_type") or parsed.get("media_type")
+    season_num = search_result.get("season", parsed.get("season"))
+    episode_num = search_result.get("episode", parsed.get("episode"))
+    required_episodes = []
+    if media_type == "tv" and season_num is not None and episode_num is not None:
+        required_episodes.append((season_num, episode_num))
+
+    tmdb_data = await _fetch_tmdb_data(
+        search_result["tmdb_id"],
+        media_type,
+        season_num,
+        parsed,
+        required_episodes=required_episodes,
+    )
+    if not tmdb_data:
+        attempt["message"] = f"无法获取 TMDb 详情: {search_result.get('tmdb_id', '')}"
+        attempt["search_result"] = search_result
+        return attempt
+
+    actual_id = _actual_tmdb_id(tmdb_data, media_type)
+    if actual_id and str(actual_id) != str(search_result.get("tmdb_id")):
+        search_result = {**search_result, "tmdb_id": actual_id}
+
+    episode_validation = _validate_tmdb_tv_episode(tmdb_data, season_num, episode_num) if media_type == "tv" else {
+        "ok": True,
+        "message": "",
+    }
+    preview = _build_identify_preview(tmdb_data, parsed, search_result, media_type, config_data, input_meta)
+    preview["episode_validation"] = episode_validation
+
+    attempt.update({
+        "ok": True,
+        "message": "识别成功" if episode_validation.get("ok", True) else "识别成功，但季集校验失败",
+        "search_result": search_result,
+        "episode_validation": episode_validation,
+        "result": preview,
+    })
+    return attempt
 
 
 # ==========================================
@@ -247,7 +528,7 @@ async def _toggle_life_monitor(enabled: bool, config: MediaOrganizeConfig, force
                 start_mode="latest",
             )
             if monitor.start():
-                logger.info("[MediaOrganize] 115 Life 事件监控已启动")
+                logger.trace("[MediaOrganize] 115 Life 事件监控已启动")
             else:
                 logger.warning("[MediaOrganize] 115 Life 事件监控启动失败")
         else:
@@ -333,6 +614,86 @@ async def save_sub_classify(payload: dict):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/identify_test")
+async def identify_test(payload: IdentifyTestPayload):
+    """测试媒体名称识别，不移动文件，不写入整理结果。"""
+    raw_input = str(payload.input or "").strip()
+    folder_name = str(payload.folder_name or "").strip()
+    file_name = str(payload.file_name or "").strip()
+    if not raw_input and not folder_name and not file_name:
+        return {"status": "error", "message": "请输入文件夹名或文件名"}
+
+    media_type = str(payload.media_type or "auto").strip().lower()
+    if media_type not in {"auto", "movie", "tv"}:
+        return {"status": "error", "message": "识别类型只能是 自动、电影或剧集"}
+
+    from core.configs import global_config
+
+    global_config.load()
+    api_key = global_config.tmdb_key
+    if not api_key:
+        return {"status": "error", "message": "TMDb API Key 未配置"}
+
+    config_data = await _load_config_data()
+    input_meta = _normalize_identify_input(raw_input, folder_name, file_name)
+    hints = []
+    for hint in _identify_candidate_hints(media_type, input_meta["kind"]):
+        if hint not in hints:
+            hints.append(hint)
+
+    attempts = []
+    for hint in hints:
+        try:
+            attempt = await _run_identify_test_attempt(input_meta, hint, api_key, config_data)
+        except Exception as e:
+            logger.warning(f"[MediaIdentifyTest] 识别尝试异常: 输入={raw_input} 类型={hint or 'auto'} 错误={e}", exc_info=True)
+            attempt = {
+                "mode": hint or "auto",
+                "ok": False,
+                "message": str(e),
+            }
+        attempts.append({
+            "mode": attempt.get("mode"),
+            "ok": bool(attempt.get("ok")),
+            "message": attempt.get("message", ""),
+            "parsed_title": (attempt.get("parsed") or {}).get("title", ""),
+            "parsed_year": (attempt.get("parsed") or {}).get("year", ""),
+            "parsed_media_type": (attempt.get("parsed") or {}).get("media_type", ""),
+            "tmdb_id": ((attempt.get("result") or {}).get("tmdb_id") or (attempt.get("search_result") or {}).get("tmdb_id") or ""),
+        })
+        if attempt.get("ok"):
+            parsed = attempt.get("parsed") or {}
+            return {
+                "status": "success",
+                "message": attempt.get("message") or "识别成功",
+                "input": input_meta,
+                "attempts": attempts,
+                "parsed": {
+                    "input_tmdb_id": input_meta.get("input_tmdb_id"),
+                    "filename": parsed.get("filename", ""),
+                    "title": parsed.get("title", ""),
+                    "cn_name": parsed.get("cn_name", ""),
+                    "en_name": parsed.get("en_name", ""),
+                    "year": parsed.get("year", ""),
+                    "season": parsed.get("season"),
+                    "episode": parsed.get("episode"),
+                    "media_type": parsed.get("media_type", ""),
+                    "tmdb_id_direct": parsed.get("tmdb_id_direct"),
+                    "tmdb_id_source": parsed.get("tmdb_id_source", ""),
+                    "title_source": parsed.get("title_source", ""),
+                    "titles_to_try": parsed.get("titles_to_try", []),
+                },
+                "result": attempt.get("result"),
+            }
+
+    return {
+        "status": "error",
+        "message": "没有识别到匹配媒体",
+        "input": input_meta,
+        "attempts": attempts,
+    }
 
 
 @router.post("/emby_lib_cache/refresh")

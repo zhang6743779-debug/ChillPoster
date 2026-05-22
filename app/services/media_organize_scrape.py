@@ -100,7 +100,7 @@ def _metadata_done_label(tmdb_data: Optional[dict] = None, folder_name: str = ""
 
 
 def _log_metadata_download_done(label: str):
-    logger.info(f"[MediaOrganize] {label} 元数据下载完成")
+    logger.info(f"[MediaOrganize] 元数据下载完成: {label}")
 
 
 def _noop_transfer(src: str, dst: str):

@@ -25,7 +25,7 @@ from app.services.media_organize_state import (
     _organize_trigger_lock, _target_event_lock, _target_event_queue,
     _source_poll_lock, _read_lock,
     VIDEO_EXTS, SUBTITLE_EXTS, CONFIG_FILE,
-    _record_organized_source_path, _is_self_organized_event,
+    _record_organized_source_path, _is_self_organized_event, _record_self_organized_event_skip,
 )
 from app.services.strm_service import (
     classify_file,
@@ -42,7 +42,8 @@ from app.services.media_organize_115_ops import (
 )
 from app.services.media_organize_tmdb import (
     _parse_filename, _search_tmdb_for_title, _fetch_tmdb_data,
-    _load_config_data, _build_scraping_config,
+    _load_config_data, _build_scraping_config, _validate_tmdb_tv_episode,
+    _tmdb_series_is_ended,
 )
 from app.services.media_organize_template import (
     _build_template_variables, _render_template,
@@ -691,6 +692,40 @@ def _count_error_results(results: list[dict]) -> int:
     return sum(1 for item in results if item.get("status") == "error")
 
 
+def _summarize_skipped_results(results: list[dict]) -> dict:
+    skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+    sha1_duplicate_skipped_count = sum(
+        1 for r in results
+        if r.get("status") == "skipped" and "SHA1 匹配" in str(r.get("message", ""))
+    )
+    wash_rejected_skipped_count = sum(
+        1 for r in results
+        if r.get("status") == "skipped" and "洗版未通过" in str(r.get("message", ""))
+    )
+    same_batch_duplicate_skipped_count = sum(
+        1 for r in results
+        if r.get("status") == "skipped" and "同批次重复剧集" in str(r.get("message", ""))
+    )
+    trailer_skipped_count = sum(
+        1 for r in results
+        if r.get("status") == "skipped" and "预告片" in str(r.get("message", ""))
+    )
+    categorized_skipped_count = (
+        sha1_duplicate_skipped_count
+        + wash_rejected_skipped_count
+        + same_batch_duplicate_skipped_count
+        + trailer_skipped_count
+    )
+    return {
+        "skipped": skipped_count,
+        "sha1_duplicate_skipped": sha1_duplicate_skipped_count,
+        "wash_rejected_skipped": wash_rejected_skipped_count,
+        "same_batch_duplicate_skipped": same_batch_duplicate_skipped_count,
+        "trailer_skipped": trailer_skipped_count,
+        "other_skipped": max(0, skipped_count - categorized_skipped_count),
+    }
+
+
 def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, old_info: dict,
                                   tolerance_ratio: float = 0.0) -> dict:
     new_resolution = _normalize_wash_resolution(new_info.get("resource_pix"))
@@ -726,6 +761,54 @@ def _compare_equivalent_size_wash(new_size: int, new_info: dict, old_size: int, 
         "new_gbph": 0.0,
         "old_gbph": 0.0,
     }
+
+
+def _human_wash_reason(reason: str) -> str:
+    reason_map = {
+        "equivalent_size_not_enough": "新文件等效体积不足",
+        "equivalent_size_higher": "新文件等效体积更高",
+        "missing_resolution_or_codec": "缺少分辨率或编码信息",
+        "missing_codec_multiplier": "缺少编码换算规则",
+        "exact_name": "文件名完全匹配",
+        "single_candidate": "目录内唯一候选",
+        "ambiguous_exact_name": "同名候选不唯一",
+        "ambiguous_candidates": "候选不唯一",
+        "keep_existing": "保留旧文件",
+        "replace_existing": "替换旧文件",
+        "wash_disabled": "未启用洗版",
+        "missing_season_or_episode": "缺少季集信息",
+        "no_duplicate": "无重复剧集",
+    }
+    return reason_map.get(str(reason or ""), str(reason or "未知原因"))
+
+
+def _human_wash_match_reason(reason: str) -> str:
+    reason_map = {
+        "exact_name": "文件名完全匹配",
+        "single_candidate": "目录内唯一候选",
+        "ambiguous_exact_name": "同名候选不唯一",
+        "ambiguous_candidates": "候选不唯一",
+        "no_candidate": "未找到候选",
+    }
+    return reason_map.get(str(reason or ""), _human_wash_reason(reason))
+
+
+def _format_wash_media_summary(info: dict) -> str:
+    resolution = str((info or {}).get("resource_pix") or "未知分辨率")
+    codec = str((info or {}).get("video_encode") or "未知编码")
+    try:
+        duration_seconds = int(float((info or {}).get("duration_seconds") or 0))
+    except (TypeError, ValueError):
+        duration_seconds = 0
+    duration_text = f"{duration_seconds}秒" if duration_seconds > 0 else "时长未知"
+    return f"{resolution} / {codec} / {duration_text}"
+
+
+def _size_gb(size_value) -> float:
+    try:
+        return float(size_value or 0) / (1024 ** 3)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 async def _evaluate_library_replacement(config_data: dict, drive_index: int,
@@ -951,7 +1034,8 @@ def _clear_streaming_progress_throttle(run_id: str) -> None:
 
 def _update_streaming_progress(run_id: str, *, scanned_video_count: int, processed_result_count: int,
                                success_count: int, error_count: int, strm_generated_count: int,
-                               scan_complete: bool = False, status: Optional[str] = None):
+                               scan_complete: bool = False, status: Optional[str] = None,
+                               results: Optional[list[dict]] = None):
     if scan_complete:
         pct = min(int(processed_result_count / scanned_video_count * 90) + 10, 100) if scanned_video_count > 0 else 100
         message = f"整理: {processed_result_count}/{scanned_video_count}"
@@ -967,11 +1051,18 @@ def _update_streaming_progress(run_id: str, *, scanned_video_count: int, process
         status=effective_status,
     ):
         return
+    skipped_summary = (
+        _summarize_skipped_results(results)
+        if results is not None
+        else {"skipped": max(0, processed_result_count - success_count - error_count)}
+    )
     update_task_progress(run_id, message, pct, effective_status, detail={
         "total": scanned_video_count,
+        "processed": processed_result_count,
         "success": success_count,
         "failed": error_count,
         "strm": strm_generated_count,
+        **skipped_summary,
     })
 
 
@@ -1224,11 +1315,14 @@ async def _run_source_poll_loop():
                         current["active_run_id"] = run_id
                         current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
                     elif run_status == "organize_running":
-                        logger.info(f"[115Life] 源目录事件不排队补跑，转入整理后复查: key={session_key}")
+                        current["last_event_at"] = _time.time()
+                        logger.info(f"[115Life] 源目录事件不排队补跑，等待现有整理结束后再检查: key={session_key}")
+                        continue
                     current["phase"] = "post_run"
                     current["last_scan_signature"] = ""
                     current["unchanged_polls"] = 0
                     logger.debug(f"[115Life] 自动整理完成，等待整理后复查 | 会话={session_key} | run_id={run_id} | 状态={run_status}")
+                    continue
                 else:
                     snapshot = await _scan_source_poll_snapshot(drive_index, source_cid)
                     signature = _source_scan_signature(snapshot)
@@ -1261,16 +1355,16 @@ async def _run_source_poll_loop():
                             _state._source_poll_sessions.pop(session_key, None)
                         logger.warning(f"[115Life] 源目录自动补跑达到上限，停止: key={session_key} reason=max_runs_exceeded 条目={entry_count}")
                         continue
-                    logger.info(f"[115Life] 源目录仍有残留条目，继续自动补跑: key={session_key} reason=source_still_has_entries count={entry_count}")
+                    logger.info(f"[115Life] 源目录仍有残留条目，继续自动补跑: key={session_key} reason=source_still_has_entries 残留条目数={entry_count}")
                     run_id, run_status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
-                    if run_id:
-                        current["active_run_id"] = run_id
-                        current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
-                        logger.info(f"[115Life] 自动补跑完成: key={session_key} run_id={run_id} status={run_status}")
-                    elif run_status == "organize_running":
-                        logger.info(f"[115Life] 源目录补跑跳过，已有整理任务运行: key={session_key}")
-                    else:
-                        logger.warning(f"[115Life] 自动补跑未启动: key={session_key} reason={run_status or 'unknown'}")
+                if run_id:
+                    current["active_run_id"] = run_id
+                    current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
+                    logger.info(f"[115Life] 自动补跑完成: key={session_key} run_id={run_id} status={run_status}")
+                elif run_status == "organize_running":
+                    logger.info(f"[115Life] 源目录补跑跳过，已有整理任务运行: key={session_key}")
+                else:
+                    logger.warning(f"[115Life] 自动补跑未启动: key={session_key} reason={run_status or 'unknown'}")
 
             await asyncio.sleep(5)
     except Exception as e:
@@ -1575,18 +1669,33 @@ async def _run_organize_async(run_id: str, req):
                             break
                     if not missing_required:
                         return cached_data
+                    if _tmdb_series_is_ended(cached_data):
+                        return cached_data
                 tmdb_cache.pop(cache_key, None)
             if cache_key not in _tmdb_fetch_locks:
                 _tmdb_fetch_locks[cache_key] = asyncio.Lock()
             async with _tmdb_fetch_locks[cache_key]:
                 if cache_key not in tmdb_cache:
-                    tmdb_cache[cache_key] = await _fetch_tmdb_data(
+                    fetched_data = await _fetch_tmdb_data(
                         tmdb_id,
                         media_type,
                         season_num,
                         first_parsed,
                         required_episodes=required_episodes,
                     )
+                    tmdb_cache[cache_key] = fetched_data
+                    if fetched_data:
+                        source = fetched_data.get("series_details") if media_type == "tv" else fetched_data
+                        actual_tmdb_id = None
+                        if isinstance(source, dict):
+                            actual_tmdb_id = source.get("id")
+                        if actual_tmdb_id and str(actual_tmdb_id) != str(tmdb_id):
+                            logger.warning(
+                                f"[MediaOrganize] 使用修正后的TMDb编号: 原TMDb编号：{tmdb_id} | 新TMDb编号：{actual_tmdb_id}"
+                            )
+                            search_result["tmdb_id"] = actual_tmdb_id
+                            corrected_cache_key = (actual_tmdb_id, media_type)
+                            tmdb_cache[corrected_cache_key] = fetched_data
                 return tmdb_cache[cache_key]
 
         async def _identify_group(key, group):
@@ -1787,12 +1896,33 @@ async def _run_organize_async(run_id: str, req):
                             success_count=success_count,
                             error_count=_count_error_results(results),
                             strm_generated_count=strm_generated_count,
+                            results=results,
                             scan_complete=scan_complete,
                         )
                         _raise_if_organize_cancelled(run_id)
                         continue
                     if media_type == 'tv' and season_num is None:
                         season_num = 1
+                    if media_type == 'tv':
+                        episode_validation = _validate_tmdb_tv_episode(tmdb_data, season_num, episode_num)
+                        if not episode_validation.get("ok", True):
+                            validation_message = episode_validation.get("message") or "TMDb 中不存在该季集"
+                            logger.warning(f"[MediaOrganize] 剧集季集校验失败: {file_name} | {validation_message}")
+                            results.append({"file": file_name, "status": "error", "message": validation_message})
+                            group_failed.append(file_item)
+                            _processed = len(results)
+                            _update_streaming_progress(
+                                run_id,
+                                scanned_video_count=scanned_video_count,
+                                processed_result_count=_processed,
+                                success_count=success_count,
+                                error_count=_count_error_results(results),
+                                strm_generated_count=strm_generated_count,
+                                results=results,
+                                scan_complete=scan_complete,
+                            )
+                            _raise_if_organize_cancelled(run_id)
+                            continue
 
                     # 构建模板变量
                     file_req = type('Obj', (), {
@@ -1898,13 +2028,20 @@ async def _run_organize_async(run_id: str, req):
                     target_name = str(config_data.get("target_name", "") or "").strip()
                     target_base = target_name.rstrip("/") if target_name else ""
                     if category_path and category_path != "其他":
-                        effective_target_cid = _ensure_115_dir_chain_cached(
-                            client,
-                            str(target_cid),
-                            category_path,
-                            _dir_chain_cache,
-                            task_key=library_task_key,
-                            base_path=target_base,
+                        logger.debug(f"[CategoryDir] 开始确认目录链: {file_name} -> {category_path}")
+                        effective_target_cid = await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None,
+                                lambda _c=client, _tc=str(target_cid), _cp=category_path, _tb=target_base: _ensure_115_dir_chain_cached(
+                                    _c,
+                                    _tc,
+                                    _cp,
+                                    _dir_chain_cache,
+                                    task_key=library_task_key,
+                                    base_path=_tb,
+                                ),
+                            ),
+                            timeout=90,
                         )
                         logger.debug(f"[CategoryDir] {file_name} -> {category_path} (cid={effective_target_cid})")
                     else:
@@ -1932,37 +2069,31 @@ async def _run_organize_async(run_id: str, req):
                         new_info = wash_result.get("new_info") or {}
                         old_info = wash_result.get("old_info") or {}
                         logger.info(
-                            "[Wash] 命中洗版候选: new=%s -> existing=%s | dir=%s | match=%s | "
-                            "new_meta=%s/%s/%ss | old_meta=%s/%s/%ss",
+                            "[Wash] 命中洗版候选: 新文件：%s；旧文件：%s；目录：%s；匹配方式：%s；"
+                            "新文件参数：%s；旧文件参数：%s",
                             file_name,
                             candidate.get("name", ""),
                             wash_result.get("candidate_dir", ""),
-                            wash_result.get("match_reason", ""),
-                            new_info.get("resource_pix", ""),
-                            new_info.get("video_encode", ""),
-                            int(float(new_info.get("duration_seconds") or 0)),
-                            old_info.get("resource_pix", ""),
-                            old_info.get("video_encode", ""),
-                            int(float(old_info.get("duration_seconds") or 0)),
+                            _human_wash_match_reason(wash_result.get("match_reason", "")),
+                            _format_wash_media_summary(new_info),
+                            _format_wash_media_summary(old_info),
                         )
                     if wash_decision == "keep_existing":
                         wash_reason = wash_result.get("reason", "keep_existing")
                         logger.info(
-                            "[Wash] 保留旧文件，跳过入库: %s | reason=%s | new_size=%.2fGB | old_size=%.2fGB | "
-                            "new_eq=%.2f | old_eq=%.2f | new_gbph=%.2f | old_gbph=%.2f",
+                            "[Wash] 保留旧文件，跳过入库: %s | 原因：%s | 新文件大小：%.2fGB | 旧文件大小：%.2fGB | "
+                            "新文件等效体积：%.2f | 旧文件等效体积：%.2f",
                             file_name,
-                            wash_reason,
-                            float(file_item.get("size", 0) or 0) / (1024 ** 3),
-                            float((wash_result.get("candidate") or {}).get("size", 0) or 0) / (1024 ** 3),
+                            _human_wash_reason(wash_reason),
+                            _size_gb(file_item.get("size", 0)),
+                            _size_gb((wash_result.get("candidate") or {}).get("size", 0)),
                             float(wash_result.get("new_equivalent_size") or 0.0),
                             float(wash_result.get("old_equivalent_size") or 0.0),
-                            float(wash_result.get("new_gbph") or 0.0),
-                            float(wash_result.get("old_gbph") or 0.0),
                         )
                         results.append({
                             "file": file_name,
                             "status": "skipped",
-                            "message": f"洗版未通过，保留旧文件（{wash_reason}）",
+                            "message": f"洗版未通过，保留旧文件（{_human_wash_reason(wash_reason)}）",
                         })
                         if wash_dir_cid:
                             pending_wash_reject_moves.append(file_item)
@@ -1975,6 +2106,7 @@ async def _run_organize_async(run_id: str, req):
                             success_count=success_count,
                             error_count=_count_error_results(results),
                             strm_generated_count=strm_generated_count,
+                            results=results,
                             scan_complete=scan_complete,
                         )
                         _raise_if_organize_cancelled(run_id)
@@ -2002,6 +2134,7 @@ async def _run_organize_async(run_id: str, req):
                                 success_count=success_count,
                                 error_count=_count_error_results(results),
                                 strm_generated_count=strm_generated_count,
+                                results=results,
                                 scan_complete=scan_complete,
                             )
                             _raise_if_organize_cancelled(run_id)
@@ -2023,17 +2156,15 @@ async def _run_organize_async(run_id: str, req):
                                 meta={"last_status": "updated_by_media_organize_wash_replace"},
                             )
                         logger.info(
-                            "[Wash] 新文件通过洗版，将替换旧文件: %s -> %s | reason=%s | new_size=%.2fGB | old_size=%.2fGB | "
-                            "new_eq=%.2f | old_eq=%.2f | new_gbph=%.2f | old_gbph=%.2f",
+                            "[Wash] 新文件通过洗版，将替换旧文件: 新文件：%s；旧文件：%s | 原因：%s | "
+                            "新文件大小：%.2fGB | 旧文件大小：%.2fGB | 新文件等效体积：%.2f | 旧文件等效体积：%.2f",
                             file_name,
                             candidate.get('name', ''),
-                            wash_result.get("reason", "replace_existing"),
-                            float(file_item.get("size", 0) or 0) / (1024 ** 3),
-                            float(candidate.get("size", 0) or 0) / (1024 ** 3),
+                            _human_wash_reason(wash_result.get("reason", "replace_existing")),
+                            _size_gb(file_item.get("size", 0)),
+                            _size_gb(candidate.get("size", 0)),
                             float(wash_result.get("new_equivalent_size") or 0.0),
                             float(wash_result.get("old_equivalent_size") or 0.0),
-                            float(wash_result.get("new_gbph") or 0.0),
-                            float(wash_result.get("old_gbph") or 0.0),
                         )
 
                     if media_type == 'movie':
@@ -2151,8 +2282,8 @@ async def _run_organize_async(run_id: str, req):
                         )
                         if existing_plan is not None:
                             existing_name = str((existing_plan.get("vf") or {}).get("name", "") or "")
-                            incoming_size_gb = float((vf or {}).get("size", 0) or 0) / (1024 ** 3)
-                            existing_size_gb = float(((existing_plan.get("vf") or {}).get("size", 0) or 0)) / (1024 ** 3)
+                            incoming_size_gb = _size_gb((vf or {}).get("size", 0))
+                            existing_size_gb = _size_gb((existing_plan.get("vf") or {}).get("size", 0))
                             if keep_incoming:
                                 pending_tv_batches[batch_key]["items"] = [
                                     item for item in pending_tv_batches[batch_key]["items"]
@@ -2160,19 +2291,19 @@ async def _run_organize_async(run_id: str, req):
                                 ]
                                 pending_tv_batches[batch_key]["item_index"].pop((season_num, episode_num), None)
                                 logger.info(
-                                    "[Wash] 同批次重复剧集命中，保留新文件: %s -> %s | S%02dE%02d | reason=%s | new_size=%.2fGB | old_size=%.2fGB",
+                                    "[Wash] 同批次重复剧集命中，保留新文件: 新文件：%s；旧文件：%s | 第%02d季第%02d集 | 原因：%s | 新文件大小：%.2fGB | 旧文件大小：%.2fGB",
                                     file_name,
                                     existing_name,
                                     int(season_num or 0),
                                     int(episode_num or 0),
-                                    dedupe_reason,
+                                    _human_wash_reason(dedupe_reason),
                                     incoming_size_gb,
                                     existing_size_gb,
                                 )
                                 results.append({
                                     "file": existing_name,
                                     "status": "skipped",
-                                    "message": f"同批次重复剧集，已被更优文件替换（{dedupe_reason}）",
+                                    "message": f"同批次重复剧集，已被更优文件替换（{_human_wash_reason(dedupe_reason)}）",
                                 })
                                 if wash_dir_cid:
                                     await _move_top_dir_to_failed(
@@ -2186,19 +2317,19 @@ async def _run_organize_async(run_id: str, req):
                                     )
                             else:
                                 logger.info(
-                                    "[Wash] 同批次重复剧集命中，保留旧文件: %s -> %s | S%02dE%02d | reason=%s | new_size=%.2fGB | old_size=%.2fGB",
+                                    "[Wash] 同批次重复剧集命中，保留旧文件: 新文件：%s；旧文件：%s | 第%02d季第%02d集 | 原因：%s | 新文件大小：%.2fGB | 旧文件大小：%.2fGB",
                                     file_name,
                                     existing_name,
                                     int(season_num or 0),
                                     int(episode_num or 0),
-                                    dedupe_reason,
+                                    _human_wash_reason(dedupe_reason),
                                     incoming_size_gb,
                                     existing_size_gb,
                                 )
                                 results.append({
                                     "file": file_name,
                                     "status": "skipped",
-                                    "message": f"同批次重复剧集，已保留更优文件（{dedupe_reason}）",
+                                    "message": f"同批次重复剧集，已保留更优文件（{_human_wash_reason(dedupe_reason)}）",
                                 })
                                 if wash_dir_cid:
                                     await _move_top_dir_to_failed(
@@ -2228,6 +2359,7 @@ async def _run_organize_async(run_id: str, req):
                     success_count=success_count,
                     error_count=_count_error_results(results),
                     strm_generated_count=strm_generated_count,
+                    results=results,
                     scan_complete=scan_complete,
                 )
                 _raise_if_organize_cancelled(run_id)
@@ -2291,6 +2423,7 @@ async def _run_organize_async(run_id: str, req):
                         success_count=success_count,
                         error_count=_count_error_results(results),
                         strm_generated_count=strm_generated_count,
+                        results=results,
                         scan_complete=scan_complete,
                     )
                     _raise_if_organize_cancelled(run_id)
@@ -2404,6 +2537,7 @@ async def _run_organize_async(run_id: str, req):
                 success_count=success_count,
                 error_count=_count_error_results(results),
                 strm_generated_count=strm_generated_count,
+                results=results,
                 scan_complete=scan_complete,
             )
 
@@ -2593,6 +2727,7 @@ async def _run_organize_async(run_id: str, req):
                     success_count=success_count,
                     error_count=_count_error_results(results),
                     strm_generated_count=strm_generated_count,
+                    results=results,
                     scan_complete=False,
                 )
                 _raise_if_organize_cancelled(run_id)
@@ -2606,6 +2741,7 @@ async def _run_organize_async(run_id: str, req):
                 success_count=success_count,
                 error_count=_count_error_results(results),
                 strm_generated_count=strm_generated_count,
+                results=results,
                 scan_complete=False,
             )
             _raise_if_organize_cancelled(run_id)
@@ -2629,6 +2765,7 @@ async def _run_organize_async(run_id: str, req):
                     success_count=success_count,
                     error_count=_count_error_results(results),
                     strm_generated_count=strm_generated_count,
+                    results=results,
                     scan_complete=False,
                 )
                 _raise_if_organize_cancelled(run_id)
@@ -2648,6 +2785,7 @@ async def _run_organize_async(run_id: str, req):
                     success_count=success_count,
                     error_count=_count_error_results(results),
                     strm_generated_count=strm_generated_count,
+                    results=results,
                     scan_complete=False,
                 )
                 _raise_if_organize_cancelled(run_id)
@@ -2689,6 +2827,7 @@ async def _run_organize_async(run_id: str, req):
                         success_count=success_count,
                         error_count=_count_error_results(results),
                         strm_generated_count=strm_generated_count,
+                        results=results,
                         scan_complete=False,
                     )
                     _raise_if_organize_cancelled(run_id)
@@ -2703,6 +2842,7 @@ async def _run_organize_async(run_id: str, req):
                 success_count=success_count,
                 error_count=_count_error_results(results),
                 strm_generated_count=strm_generated_count,
+                results=results,
                 scan_complete=False,
             )
             _raise_if_organize_cancelled(run_id)
@@ -2853,20 +2993,27 @@ async def _run_organize_async(run_id: str, req):
             if not task.done():
                 task.cancel()
         try:
+            flushed_count = _flush_pending_library_cache_updates()
+            if flushed_count:
+                logger.info(f"[MediaOrganize] 取消前已写入待处理媒体库缓存: {flushed_count} 条")
+        except Exception as flush_err:
+            logger.error(f"[MediaOrganize] 取消前批量写缓存失败: {flush_err}")
+        try:
             if metadata_executor:
                 metadata_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
         _processed = len(results)
         _failed = _count_error_results(results)
-        skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+        skipped_summary = _summarize_skipped_results(results)
+        skipped_count = skipped_summary["skipped"]
         elapsed = _time.time() - locals().get("_org_start", _time.time())
         movie_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "movie")
         tv_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "tv")
         update_task_progress(run_id, f"整理已取消: 已处理 {_processed}/{scanned_video_count}", 100, "stopped")
         set_task_detail(run_id, {
             "total": scanned_video_count, "success": success_count, "failed": _failed, "strm": strm_generated_count,
-            "skipped": skipped_count, "movies": movie_success_count, "tv_episodes": tv_success_count,
+            **skipped_summary, "movies": movie_success_count, "tv_episodes": tv_success_count,
             "elapsed_seconds": elapsed, "stopped": True,
         }, force=True)
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
@@ -3086,6 +3233,17 @@ def _finalize_organize_result(
             "is_dir": bool(item_data.get("is_dir", False)),
             "parent_id": int(item_data.get("parent_id", 0) or 0),
         }
+        item_path = _normalize_remote_path(normalized_item.get("path", ""))
+        source_base = _normalize_remote_path(str(config_data.get("source_name", "") or "")).rstrip("/")
+        target_base_cfg = _normalize_remote_path(str(config_data.get("target_name", "") or "")).rstrip("/")
+        if (
+            item_path
+            and source_base
+            and (item_path == source_base or item_path.startswith(source_base + "/"))
+            and not (target_base_cfg and (item_path == target_base_cfg or item_path.startswith(target_base_cfg + "/")))
+        ):
+            logger.error(f"[媒体库缓存] 拒绝写入源目录路径到媒体库缓存: {item_path}")
+            return
         pending_library_cache_items[normalized_key] = normalized_item
         library_index.add_or_update_items({normalized_key: normalized_item})
 
@@ -3463,7 +3621,12 @@ def _execute_tv_batch_plan(client, plan_items: list[dict], subtitles_by_parent=N
                 "metadata_context": item.get("metadata_context", {}),
                 "strm_context": item.get("strm_context", {}),
             }
-            _record_organized_source_path(video_id, item.get("season_dir_path", ""))
+            file_op = item.get("file_op") or {}
+            _record_organized_source_path(
+                video_id,
+                item.get("season_dir_path", ""),
+                source_path=file_op.get("source_path") or file_op.get("path") or (item.get("vf") or {}).get("path", ""),
+            )
             result["moved_subtitles"] = subtitle_result_map.get(video_id, [])
             executed.append(result)
         return executed
@@ -3495,7 +3658,11 @@ def _execute_tv_batch_plan(client, plan_items: list[dict], subtitles_by_parent=N
                 "message": f"文件移动失败: {file_item.get('name', '')}",
             })
             continue
-        _record_organized_source_path(str(file_item.get("id", "") or ""), item.get("season_dir_path", ""))
+        _record_organized_source_path(
+            str(file_item.get("id", "") or ""),
+            item.get("season_dir_path", ""),
+            source_path=file_item.get("path", ""),
+        )
         moved_subtitles = []
         if subtitles_by_parent:
             moved_subtitles = _await_on_main_loop(
@@ -3567,7 +3734,7 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
         for item in plan_items:
             vf = item.get("vf") or {}
             file_id = str(vf.get("id", "") or "")
-            _record_organized_source_path(file_id, "")
+            _record_organized_source_path(file_id, "", source_path=vf.get("path", ""))
             executed.append({
                 "status": "success",
                 "file": str(vf.get("name", "") or ""),
@@ -3601,7 +3768,7 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
                 "message": f"重复文件移动失败: {file_name}",
             })
             continue
-        _record_organized_source_path(str(vf.get("id", "") or ""), "")
+        _record_organized_source_path(str(vf.get("id", "") or ""), "", source_path=vf.get("path", ""))
         moved_subtitles = []
         if subtitles_by_parent:
             moved_subtitles = _await_on_main_loop(
@@ -3679,7 +3846,11 @@ def _organize_movie(client, file_item, file_name, ext, tmdb_data,
     if not ok:
         return {"status": "error", "message": f"文件移动失败: {file_name}"}
 
-    _record_organized_source_path(str(file_item.get("id", "") or ""), target_dir_path)
+    _record_organized_source_path(
+        str(file_item.get("id", "") or ""),
+        target_dir_path,
+        source_path=file_item.get("path", ""),
+    )
 
     # 移动匹配的字幕文件到目标目录
     moved_subtitles = []
@@ -3828,7 +3999,7 @@ def create_life_event_callback(
         # 过滤整理自身产生的事件（move/rename 事件 file_id 命中记录表且 current_path 匹配绑定目标路径）
         if is_move_event or event_name in ("file_rename", "folder_rename"):
             if _is_self_organized_event(str(file_id or ""), current_path_for_move):
-                logger.debug(f"[115Life] 跳过整理自身产生的事件: event={event_name}, path={current_path_for_move}, file_id={file_id}")
+                _record_self_organized_event_skip(event_name)
                 return
 
         if event_name in ("file_rename", "folder_rename"):
@@ -3840,6 +4011,16 @@ def create_life_event_callback(
             cached_is_dir = bool(cached_rename_item.get("is_dir"))
             new_remote_path = str(file_path or "") or cached_rename_path
             new_name = str(file_name or os.path.basename(new_remote_path) or cached_rename_item.get("name", "") or "")
+            normalized_new_remote_path = _normalize_remote_path(new_remote_path)
+            normalized_target_dir = _normalize_remote_path(target_dir).rstrip("/")
+            if normalized_target_dir and normalized_new_remote_path and not (
+                normalized_new_remote_path == normalized_target_dir
+                or normalized_new_remote_path.startswith(normalized_target_dir + "/")
+            ):
+                logger.debug(
+                    f"[115Life] 跳过非媒体库 rename 事件缓存更新: file_id={file_id}, path={new_remote_path}"
+                )
+                return
 
             logger.trace(f"[115Life] rename事件通过file_id命中媒体库缓存: file_id={file_id}, file={file_name}")
 

@@ -15,6 +15,72 @@ _QUERY_SECRET_RE = re.compile(
 _HEADER_SECRET_RE = re.compile(
     r"(?im)\b(authorization|cookie|set-cookie)\s*[:=]\s*[^\r\n]+"
 )
+_LOG_LABEL_TRANSLATIONS = (
+    ("new_meta", "新文件参数"),
+    ("old_meta", "旧文件参数"),
+    ("new_size", "新文件大小"),
+    ("old_size", "旧文件大小"),
+    ("new_eq", "新文件等效体积"),
+    ("old_eq", "旧文件等效体积"),
+    ("new_gbph", "新文件每小时体积"),
+    ("old_gbph", "旧文件每小时体积"),
+    ("existing", "旧文件"),
+    ("new", "新文件"),
+    ("old", "旧文件"),
+    ("reason", "原因"),
+    ("match", "匹配方式"),
+    ("dir", "目录"),
+    ("path", "路径"),
+    ("event", "事件"),
+    ("source", "来源"),
+    ("status", "状态"),
+    ("ttl", "有效期"),
+    ("count", "数量"),
+    ("key", "键"),
+    ("run_id", "运行ID"),
+    ("pid", "进程ID"),
+    ("cid", "目录ID"),
+    ("id", "ID"),
+    ("err", "错误"),
+    ("required", "要求"),
+)
+_LOG_VALUE_TRANSLATIONS = {
+    "movie": "电影",
+    "tv": "剧集",
+    "series": "剧集",
+    "single_candidate": "目录内唯一候选",
+    "exact_name": "文件名完全匹配",
+    "ambiguous_exact_name": "同名候选不唯一",
+    "ambiguous_candidates": "候选不唯一",
+    "no_candidate": "未找到候选",
+    "equivalent_size_not_enough": "新文件等效体积不足",
+    "equivalent_size_higher": "新文件等效体积更高",
+    "missing_resolution_or_codec": "缺少分辨率或编码信息",
+    "missing_codec_multiplier": "缺少编码换算规则",
+    "keep_existing": "保留旧文件",
+    "replace_existing": "替换旧文件",
+    "finished": "已完成",
+    "running": "运行中",
+    "stopped": "已停止",
+    "interrupted": "已中断",
+    "error": "错误",
+    "success": "成功",
+    "unknown": "未知",
+}
+_LOG_LABEL_RE = re.compile(
+    r"(?<![A-Za-z0-9_\u4e00-\u9fff])("
+    + "|".join(re.escape(key) for key, _label in _LOG_LABEL_TRANSLATIONS)
+    + r")\s*="
+)
+_LOG_VALUE_RE = re.compile(
+    r"(原因|匹配方式|状态|类型)：("
+    + "|".join(re.escape(key) for key in _LOG_VALUE_TRANSLATIONS)
+    + r")(?=$|[\s|,，;；)])",
+    re.IGNORECASE,
+)
+_LOG_TTL_RE = re.compile(r"有效期：(\d+)s\b")
+_TMDB_ID_RE = re.compile(r"\bTMDb:(\d+)")
+_TMDB_LEGACY_TYPE_RE = re.compile(r":\s*(movie|tv|series)\s+TMDb编号：", re.IGNORECASE)
 
 
 def _is_115_direct_url(url: str) -> bool:
@@ -35,6 +101,29 @@ def _redact_url(url: str) -> str:
     return _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}***", url)
 
 
+def _format_log_ttl(match: re.Match) -> str:
+    seconds = int(match.group(1))
+    if seconds >= 86400 and seconds % 86400 == 0:
+        return f"有效期：{seconds // 86400}天"
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"有效期：{seconds // 3600}小时"
+    return f"有效期：{seconds}秒"
+
+
+def humanize_log_text(message: str) -> str:
+    text = str(message or "")
+    if not text:
+        return text
+
+    labels = dict(_LOG_LABEL_TRANSLATIONS)
+    text = _LOG_LABEL_RE.sub(lambda m: f"{labels.get(m.group(1), m.group(1))}：", text)
+    text = _LOG_VALUE_RE.sub(lambda m: f"{m.group(1)}：{_LOG_VALUE_TRANSLATIONS.get(m.group(2).lower(), m.group(2))}", text)
+    text = _LOG_TTL_RE.sub(_format_log_ttl, text)
+    text = _TMDB_ID_RE.sub(lambda m: f"TMDb编号：{m.group(1)}", text)
+    text = _TMDB_LEGACY_TYPE_RE.sub(lambda m: f": 类型：{_LOG_VALUE_TRANSLATIONS.get(m.group(1).lower(), m.group(1))} | TMDb编号：", text)
+    return text
+
+
 def sanitize_log_text(message: str) -> str:
     """Redact credentials and short-lived direct-link parameters before logs leave the process."""
     text = str(message or "")
@@ -43,6 +132,7 @@ def sanitize_log_text(message: str) -> str:
     text = _URL_RE.sub(lambda m: _redact_url(m.group(0)), text)
     text = _QUERY_SECRET_RE.sub(lambda m: f"{m.group(1)}***", text)
     text = _HEADER_SECRET_RE.sub(lambda m: f"{m.group(1)}: ***", text)
+    text = humanize_log_text(text)
     return text
 
 HIDDEN_CONSOLE_LOG_FRAGMENTS = (
@@ -243,7 +333,7 @@ def _quiet_noisy_dependency_loggers():
         "telethon.network.mtprotosender",
     )
     for logger_name in noisy_loggers:
-        logging.getLogger(logger_name).setLevel(logging.WARNING)
+        logging.getLogger(logger_name).setLevel(logging.ERROR if logger_name.startswith("telethon") else logging.WARNING)
 
 
 

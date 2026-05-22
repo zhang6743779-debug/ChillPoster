@@ -6,6 +6,7 @@ __pycache__
 venv/
 .venv/
 .env
+scripts/deploy-nas-dev.env
 .git
 .gitignore
 .idea
@@ -29,6 +30,14 @@ docker-compose.yml
 config/*.json
 config/*.log
 config/app.log
+config/*.log.*
+config/*.jsonl
+config/*.db
+config/*.db-journal
+config/*.db-wal
+config/*.db-shm
+config/telegram_user.session*
+config/telegram_avatars/
 !config/media_organize_category_rules.json
 
 # 排除本地产生的备份、测试脚本和字体缓存

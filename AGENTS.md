@@ -64,6 +64,18 @@ python test_makedirs.py
 
 The root `test_*.py` scripts are ad-hoc integration/debug scripts and may require local `config/config_302.json` credentials or 115 network access. There is no configured pytest suite at the root.
 
+## NAS direct testing workflow
+
+When the user asks to test on NAS, deploy to NAS, or "NAS 直测", prefer the local LAN deployment flow instead of DockerHub:
+
+- NAS host: `192.168.2.2`
+- SSH port: `225`
+- SSH user: `Chill`
+- The NAS runs ChillPoster with Docker Compose.
+- Use `scripts/deploy-nas-dev.env` for the local deployment configuration and `scripts/deploy-nas-dev.sh` for the workflow.
+- Expected flow: build the local test image, transfer it directly to the NAS over SSH/LAN, load it on the NAS, and restart the Compose service there.
+- This path is for quick testing of local uncommitted changes. Do not use DockerHub unless the user explicitly asks for a release, DockerHub push, tag build, or formal publish.
+
 ## Versioning and release workflow
 
 GitHub repository: `https://github.com/Chill-lucky/ChillPoster`

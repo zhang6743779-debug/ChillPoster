@@ -273,6 +273,141 @@ def _tmdb_data_has_required_episodes(data: Optional[dict], required_episode_keys
     return all(key in episode_keys for key in required_episode_keys)
 
 
+def _tmdb_series_is_ended(data: Optional[dict]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    source = data.get("series_details") if isinstance(data.get("series_details"), dict) else data
+    status = str((source or {}).get("status") or "").strip().lower()
+    return status in {"ended", "canceled", "cancelled"}
+
+
+def _validate_tmdb_tv_episode(tmdb_data: Optional[dict], season_number, episode_number) -> dict:
+    """Validate that a parsed TV season/episode exists in the fetched TMDb aggregate."""
+    result = {
+        "ok": True,
+        "message": "",
+        "season": season_number,
+        "episode": episode_number,
+    }
+    if not isinstance(tmdb_data, dict):
+        return result
+    if "series_details" not in tmdb_data:
+        return result
+    if season_number is None or episode_number is None:
+        return result
+
+    try:
+        season_num = int(season_number)
+        episode_num = int(episode_number)
+    except (TypeError, ValueError):
+        return {
+            **result,
+            "ok": False,
+            "message": "季集号不是有效数字",
+        }
+
+    result["season"] = season_num
+    result["episode"] = episode_num
+    if season_num < 0 or episode_num <= 0:
+        return {
+            **result,
+            "ok": False,
+            "message": f"季集号无效：S{season_num:02d}E{episode_num:02d}",
+        }
+
+    series = tmdb_data.get("series_details") or {}
+    season_summaries = series.get("seasons") if isinstance(series, dict) else []
+    season_summary = None
+    if isinstance(season_summaries, list):
+        for item in season_summaries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                if int(item.get("season_number")) == season_num:
+                    season_summary = item
+                    break
+            except (TypeError, ValueError):
+                continue
+        known_season_numbers = {
+            int(item.get("season_number"))
+            for item in season_summaries
+            if isinstance(item, dict) and str(item.get("season_number", "")).lstrip("-").isdigit()
+        }
+        if known_season_numbers and season_num not in known_season_numbers:
+            return {
+                **result,
+                "ok": False,
+                "message": f"TMDb 中不存在第 {season_num} 季",
+            }
+
+    episode_key = f"S{season_num}E{episode_num}"
+    episodes = tmdb_data.get("episodes_details")
+    if isinstance(episodes, dict):
+        if episode_key in episodes:
+            return result
+        season_episode_numbers = []
+        for key in episodes.keys():
+            match = re.match(r"^S(-?\d+)E(\d+)$", str(key or ""))
+            if not match:
+                continue
+            try:
+                if int(match.group(1)) == season_num:
+                    season_episode_numbers.append(int(match.group(2)))
+            except (TypeError, ValueError):
+                continue
+        if season_episode_numbers:
+            max_episode = max(season_episode_numbers)
+            return {
+                **result,
+                "ok": False,
+                "message": f"TMDb 中不存在 S{season_num:02d}E{episode_num:02d}，本季当前最多到第 {max_episode} 集",
+            }
+
+    season_details = tmdb_data.get("seasons_details")
+    if isinstance(season_details, list):
+        for season_data in season_details:
+            if not isinstance(season_data, dict):
+                continue
+            try:
+                if int(season_data.get("season_number")) != season_num:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            season_episodes = season_data.get("episodes")
+            if not isinstance(season_episodes, list):
+                break
+            episode_numbers = []
+            for episode in season_episodes:
+                if not isinstance(episode, dict):
+                    continue
+                try:
+                    episode_numbers.append(int(episode.get("episode_number")))
+                except (TypeError, ValueError):
+                    continue
+            if episode_num in episode_numbers:
+                return result
+            if episode_numbers:
+                return {
+                    **result,
+                    "ok": False,
+                    "message": f"TMDb 中不存在 S{season_num:02d}E{episode_num:02d}，本季当前最多到第 {max(episode_numbers)} 集",
+                }
+
+    if season_summary and season_summary.get("episode_count") is not None:
+        try:
+            episode_count = int(season_summary.get("episode_count"))
+            if episode_count >= 0 and episode_num > episode_count:
+                return {
+                    **result,
+                    "ok": False,
+                    "message": f"TMDb 中不存在 S{season_num:02d}E{episode_num:02d}，本季当前共 {episode_count} 集",
+                }
+        except (TypeError, ValueError):
+            pass
+
+    return result
+
+
 def _contains_chinese_text(text: str) -> bool:
     return bool(re.search(r"[一-鿿]", str(text or "")))
 
@@ -294,6 +429,43 @@ def _tmdb_detail_status(media_type: str, data: Optional[dict]) -> str:
         return "movie"
     series_details = data.get("series_details") if isinstance(data.get("series_details"), dict) else data
     return str(series_details.get("status", "") or "")
+
+
+def _human_tmdb_media_type(media_type: str) -> str:
+    value = str(media_type or "").strip().lower()
+    if value == "movie":
+        return "电影"
+    if value in {"tv", "series"}:
+        return "剧集"
+    return value or "未知"
+
+
+def _human_tmdb_status(status: str) -> str:
+    value = str(status or "").strip()
+    lower = value.lower()
+    status_map = {
+        "movie": "电影",
+        "ended": "已完结",
+        "returning series": "连载中",
+        "in production": "制作中",
+        "planned": "计划中",
+        "canceled": "已取消",
+        "cancelled": "已取消",
+        "pilot": "试播",
+    }
+    return status_map.get(lower, value or "未知")
+
+
+def _format_ttl_days(ttl_seconds: int | float) -> str:
+    try:
+        seconds = float(ttl_seconds or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds >= 86400 and seconds % 86400 == 0:
+        return f"{int(seconds // 86400)}天"
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return f"{int(seconds // 3600)}小时"
+    return f"{int(seconds)}秒"
 
 
 def _tmdb_detail_ttl(media_type: str, data: Optional[dict]) -> int:
@@ -322,15 +494,18 @@ def _get_cached_tmdb_detail(tmdb_id: int, media_type: str, required_episode_keys
             return None
         data = json.loads(row["payload_json"])
         if _tmdb_cached_detail_needs_title_fallback_refresh(media_type, data):
-            logger.debug(f"[TMDbCache] 详情缓存未做中文备选语言检查，强制刷新: {media_type} TMDb:{tmdb_id}")
+            logger.debug(f"[TMDbCache] 详情缓存需要刷新: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 原因：缺少中文备选语言检查")
             return None
         if media_type != "movie" and not _tmdb_data_has_required_episodes(data, list(required_episode_keys or [])):
-            logger.debug(f"[TMDbCache] 剧集详情缓存缺少目标集，强制刷新: TMDb:{tmdb_id} required={required_episode_keys}")
+            if _tmdb_series_is_ended(data):
+                logger.debug(f"[TMDbCache] 剧集详情缓存命中但目标集不存在: TMDb编号：{tmdb_id} | 目标集：{required_episode_keys}")
+                return data
+            logger.debug(f"[TMDbCache] 剧集详情缓存需要刷新: TMDb编号：{tmdb_id} | 原因：缺少目标集 | 目标集：{required_episode_keys}")
             return None
-        logger.trace(f"[TMDbCache] 详情缓存命中: {media_type} TMDb:{tmdb_id}")
+        logger.trace(f"[TMDbCache] TMDb详情缓存命中: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id}")
         return data if isinstance(data, dict) else None
     except Exception as e:
-        logger.debug(f"[TMDbCache] 读取详情缓存失败: {media_type} TMDb:{tmdb_id} err={e}")
+        logger.debug(f"[TMDbCache] 读取详情缓存失败: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 错误：{e}")
         return None
 
 
@@ -367,9 +542,145 @@ def _set_cached_tmdb_detail(tmdb_id: int, media_type: str, data: Optional[dict])
                     payload_json,
                 ),
             )
-        logger.debug(f"[TMDbCache] 详情缓存写入: {media_type} TMDb:{tmdb_id} ttl={ttl_seconds}s status={status}")
+        logger.debug(f"[TMDbCache] TMDb详情已缓存: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 有效期：{_format_ttl_days(ttl_seconds)} | 状态：{_human_tmdb_status(status)}")
     except Exception as e:
-        logger.debug(f"[TMDbCache] 写入详情缓存失败: {media_type} TMDb:{tmdb_id} err={e}")
+        logger.debug(f"[TMDbCache] 写入详情缓存失败: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 错误：{e}")
+
+
+def _tmdb_data_actual_id(media_type: str, data: Optional[dict]) -> Optional[int]:
+    if not isinstance(data, dict):
+        return None
+    source = data.get("series_details") if media_type != "movie" else data
+    if not isinstance(source, dict):
+        source = data
+    try:
+        actual_id = int(source.get("id") or 0)
+        return actual_id or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_tmdb_id_from_text(text: str) -> str:
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r'\s*[\{\[]tmdb(?:id)?[-=: ]*\d+[\}\]]\s*', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s*(?<!\d)tmdb(?:id)?[-=: ]*\d+(?!\d)\s*', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned.strip('.-_ ')
+
+
+def _title_dirs_for_invalid_tmdb_id(parsed: dict, failed_tmdb_id: Optional[int]) -> list[str]:
+    file_path = str((parsed or {}).get("file_path") or "")
+    if not file_path:
+        return []
+
+    path = Path(file_path)
+    parent_dirs = [parent.name for parent in path.parents if parent.name and parent.name not in {"/", "."}]
+    matched_dirs: list[str] = []
+    fallback_dirs: list[str] = []
+
+    for index, dir_name in enumerate(parent_dirs[:4]):
+        if not dir_name:
+            continue
+        extracted_id = _extract_tmdb_id_from_text(dir_name)
+        if extracted_id and (not failed_tmdb_id or int(extracted_id) == int(failed_tmdb_id)):
+            matched_dirs.append(dir_name)
+        if index == 0 and SEASON_DIR_PATTERN.match(dir_name):
+            continue
+        fallback_dirs.append(dir_name)
+
+    return matched_dirs or fallback_dirs[:2]
+
+
+def _build_parsed_without_invalid_tmdb_id(parsed: Optional[dict], media_type: str, failed_tmdb_id: Optional[int]) -> Optional[dict]:
+    if not parsed:
+        return None
+
+    from core.meta import MetaInfo
+
+    fallback = dict(parsed)
+    fallback["media_type"] = media_type or fallback.get("media_type") or ""
+    fallback["tmdb_id_direct"] = None
+    fallback["tmdb_id_source"] = ""
+
+    dir_titles: list[str] = []
+    dir_cn_name = ""
+    dir_en_name = ""
+    dir_year = None
+
+    for dir_name in _title_dirs_for_invalid_tmdb_id(parsed, failed_tmdb_id):
+        cleaned_dir_name = _strip_tmdb_id_from_text(dir_name)
+        if not cleaned_dir_name:
+            continue
+        dir_titles.append(cleaned_dir_name)
+        try:
+            dir_meta = MetaInfo(_preprocess_dir_name(cleaned_dir_name))
+        except Exception:
+            continue
+        cn_name, en_name, title = _select_titles_from_meta(dir_meta)
+        if title:
+            dir_titles.append(title)
+        if not dir_cn_name and cn_name:
+            dir_cn_name = cn_name
+        if not dir_en_name and en_name:
+            dir_en_name = en_name
+        if not dir_year and dir_meta.year:
+            dir_year = dir_meta.year
+
+    if dir_cn_name or dir_en_name:
+        fallback["cn_name"] = dir_cn_name or ""
+        fallback["en_name"] = dir_en_name or ""
+        fallback["title"] = dir_cn_name or dir_en_name
+    if dir_year:
+        fallback["year"] = dir_year
+
+    title_candidates = []
+    title_candidates.extend(dir_titles)
+    title_candidates.extend(fallback.get("titles_to_try") or [])
+    title_candidates.extend([
+        fallback.get("title") or "",
+        fallback.get("cn_name") or "",
+        fallback.get("en_name") or "",
+    ])
+    fallback["titles_to_try"] = _build_titles_to_try(*title_candidates)
+
+    season = fallback.get("season")
+    year = fallback.get("year")
+    title_key = (
+        _normalize_title_for_match(fallback.get("cn_name") or ""),
+        _normalize_title_for_match(fallback.get("en_name") or ""),
+        fallback["media_type"],
+        season or "",
+        year or "",
+    )
+    fallback["title_key"] = title_key
+    fallback["group_key"] = title_key[:2] + (fallback["media_type"], year or "")
+    return fallback
+
+
+def _search_after_invalid_direct_tmdb_id(parsed: Optional[dict], media_type: str, api_key: str, failed_tmdb_id: Optional[int]) -> Optional[dict]:
+    fallback_parsed = _build_parsed_without_invalid_tmdb_id(parsed, media_type, failed_tmdb_id)
+    if not fallback_parsed:
+        return None
+
+    logger.warning(
+        f"[MediaOrganize] 直写TMDb编号无效，改用标题重新识别: 原TMDb编号：{failed_tmdb_id or ''} | 标题候选：{' | '.join(fallback_parsed.get('titles_to_try') or [])}"
+    )
+    matched = _search_tmdb_for_title_sync(fallback_parsed, api_key, set())
+    if not matched:
+        logger.warning(
+            f"[MediaOrganize] 直写TMDb编号无效，标题重新识别未命中: 原TMDb编号：{failed_tmdb_id or ''}"
+        )
+        return None
+
+    corrected_tmdb_id = matched.get("tmdb_id")
+    if failed_tmdb_id and corrected_tmdb_id and int(corrected_tmdb_id) == int(failed_tmdb_id):
+        logger.warning(
+            f"[MediaOrganize] 直写TMDb编号无效，标题重新识别仍命中原编号，已忽略: TMDb编号：{failed_tmdb_id}"
+        )
+        return None
+    return matched
 
 
 def _fetch_tmdb_data_uncached_sync(tmdb_id: int, media_type: str, api_key: str, season_number: Optional[int] = None, parsed: Optional[dict] = None) -> Optional[dict]:
@@ -382,12 +693,13 @@ def _fetch_tmdb_data_uncached_sync(tmdb_id: int, media_type: str, api_key: str, 
                 return data
             last_error = tmdb.get_last_tmdb_error()
             if last_error and last_error.get("status_code") == 404 and parsed:
-                corrected_tmdb_id = _find_corrected_tmdb_id_by_title_year(parsed, "movie", api_key, failed_tmdb_id=tmdb_id)
-                if corrected_tmdb_id:
-                    _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
+                corrected = _search_after_invalid_direct_tmdb_id(parsed, "movie", api_key, tmdb_id)
+                if corrected and corrected.get("tmdb_id"):
+                    corrected_tmdb_id = int(corrected["tmdb_id"])
                     fallback = tmdb.get_movie_details(corrected_tmdb_id, api_key)
                     if fallback:
-                        logger.warning(f"[MediaOrganize] 404 后按标题年份重新识别电影成功: {parsed.get('title')} ({parsed.get('year')}) -> TMDb:{corrected_tmdb_id}")
+                        _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
+                        logger.warning(f"[MediaOrganize] 无效TMDb编号已修正: 原TMDb编号：{tmdb_id} | 新TMDb编号：{corrected_tmdb_id} | 类型：电影")
                         return fallback
             return None
         else:
@@ -396,12 +708,13 @@ def _fetch_tmdb_data_uncached_sync(tmdb_id: int, media_type: str, api_key: str, 
                 return data
             last_error = tmdb.get_last_tmdb_error()
             if last_error and last_error.get("status_code") == 404 and parsed:
-                corrected_tmdb_id = _find_corrected_tmdb_id_by_title_year(parsed, "tv", api_key, failed_tmdb_id=tmdb_id)
-                if corrected_tmdb_id:
-                    _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
+                corrected = _search_after_invalid_direct_tmdb_id(parsed, "tv", api_key, tmdb_id)
+                if corrected and corrected.get("tmdb_id"):
+                    corrected_tmdb_id = int(corrected["tmdb_id"])
                     fallback = tmdb.aggregate_full_series_data_from_tmdb(corrected_tmdb_id, api_key)
                     if fallback:
-                        logger.warning(f"[MediaOrganize] 404 后按标题年份重新识别剧集成功: {parsed.get('title')} ({parsed.get('year')}) -> TMDb:{corrected_tmdb_id}")
+                        _cache_corrected_tmdb_id(parsed, corrected_tmdb_id)
+                        logger.warning(f"[MediaOrganize] 无效TMDb编号已修正: 原TMDb编号：{tmdb_id} | 新TMDb编号：{corrected_tmdb_id} | 类型：剧集")
                         return fallback
             return None
     except Exception as e:
@@ -423,7 +736,8 @@ def _fetch_tmdb_data_sync(
         return cached
     data = _fetch_tmdb_data_uncached_sync(tmdb_id, media_type, api_key, season_number, parsed)
     if data:
-        _set_cached_tmdb_detail(tmdb_id, media_type, data)
+        cache_tmdb_id = _tmdb_data_actual_id(media_type, data) or tmdb_id
+        _set_cached_tmdb_detail(cache_tmdb_id, media_type, data)
     return data
 
 
@@ -883,6 +1197,69 @@ def _select_titles_from_meta(meta) -> tuple[str, str, str]:
     return cn_name, en_name, title
 
 
+def _is_clear_file_title(title: str) -> bool:
+    cleaned = str(title or "").strip()
+    normalized = _normalize_title_for_match(cleaned)
+    if not normalized:
+        return False
+    if normalized in NOISY_SHORT_WORDS:
+        return False
+    if re.fullmatch(r'\d+', normalized):
+        return False
+    if re.search(r'[一-鿿]', cleaned):
+        return len(normalized) >= 2
+    return len(normalized) >= 4
+
+
+def _titles_are_clear_conflict(dir_title: str, file_title: str) -> bool:
+    dir_clean = str(dir_title or "").strip()
+    file_clean = str(file_title or "").strip()
+    dir_norm = _normalize_title_for_match(dir_clean)
+    file_norm = _normalize_title_for_match(file_clean)
+    if not dir_norm or not file_norm or dir_norm == file_norm:
+        return False
+
+    dir_has_cn = bool(re.search(r'[一-鿿]', dir_clean))
+    file_has_cn = bool(re.search(r'[一-鿿]', file_clean))
+    dir_has_latin = bool(re.search(r'[A-Za-z]', dir_clean))
+    file_has_latin = bool(re.search(r'[A-Za-z]', file_clean))
+
+    if dir_has_cn != file_has_cn:
+        # 中文目录 + 英文文件名常见于正常资源命名，不能仅凭文本不同判为冲突。
+        return False
+    if dir_has_latin != file_has_latin and not dir_has_cn and not file_has_cn:
+        return False
+    return True
+
+
+def _dir_title_tmdb_conflicts_with_file_title(file_meta, path_title: str, file_path: str, media_type: str) -> tuple[bool, str]:
+    if not file_path:
+        return False, ""
+    file_cn, file_en, file_title = _select_titles_from_meta(file_meta)
+    if not _is_clear_file_title(file_title):
+        return False, ""
+    file_norm = _normalize_title_for_match(file_title)
+
+    parent_dir = os.path.basename(os.path.dirname(file_path))
+    grandparent_dir = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
+    candidates = [(parent_dir, "parent")]
+    if media_type != "movie":
+        candidates.append((grandparent_dir, "grandparent"))
+
+    from core.meta import MetaInfo
+
+    for dir_name, source in candidates:
+        if not dir_name or not _extract_tmdb_id_from_text(dir_name):
+            continue
+        cleaned_dir_name = _strip_tmdb_id_from_text(dir_name)
+        dir_meta = MetaInfo(_preprocess_dir_name(cleaned_dir_name))
+        _, _, dir_title = _select_titles_from_meta(dir_meta)
+        if _titles_are_clear_conflict(dir_title or cleaned_dir_name, file_title):
+            return True, source
+
+    return False, ""
+
+
 def _normalize_media_type(meta_type, season: Optional[int], episode: Optional[int], force_movie: bool, media_type_hint: str = None) -> str:
     from core.meta.types import MediaType
 
@@ -1136,6 +1513,24 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         return None
 
     media_type = _normalize_media_type(path_meta.type, season, episode, force_movie, media_type_hint)
+    prefer_file_title_on_dir_conflict, conflict_dir_tmdb_source = _dir_title_tmdb_conflicts_with_file_title(
+        file_meta,
+        title,
+        file_path,
+        media_type,
+    )
+    if prefer_file_title_on_dir_conflict:
+        file_cn_name, file_en_name, file_title = _select_titles_from_meta(file_meta)
+        cn_name = file_cn_name or ""
+        en_name = file_en_name or ""
+        title = file_title
+        if file_meta.year:
+            year = file_meta.year
+        title_source = "filename_conflict_priority"
+        if not quiet:
+            logger.info(
+                f"[MediaIdentify] 文件名标题与目录TMDb线索不一致，优先使用文件名: 文件名标题={title} | 目录ID来源={conflict_dir_tmdb_source}"
+            )
 
     title_key = (
         _normalize_title_for_match(cn_name),
@@ -1151,10 +1546,14 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         tmdb_id_direct = cached_tmdb_id_direct
         tmdb_id_source = cached_tmdb_id_source
     else:
-        tmdb_id_direct = path_meta.tmdbid or file_meta.tmdbid or _extract_tmdb_id_from_text(filename)
+        path_tmdb_id = None if prefer_file_title_on_dir_conflict else path_meta.tmdbid
+        tmdb_id_direct = file_meta.tmdbid or _extract_tmdb_id_from_text(filename) or path_tmdb_id
         tmdb_id_source = "file"
         if not tmdb_id_direct:
-            tmdb_id_direct, tmdb_id_source = _extract_tmdb_id_from_dirs(file_path, media_type)
+            if prefer_file_title_on_dir_conflict:
+                tmdb_id_direct, tmdb_id_source = None, ""
+            else:
+                tmdb_id_direct, tmdb_id_source = _extract_tmdb_id_from_dirs(file_path, media_type)
             if tmdb_id_direct:
                 _set_cached_direct_tmdb_id(direct_tmdb_cache_key, tmdb_id_direct, tmdb_id_source)
 
@@ -1173,11 +1572,33 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         "part": path_meta.part or "",
     }, filename, path_meta)
 
+    folder_fallback_titles: list[str] = []
+    folder_fallback_title = ""
+    folder_fallback_cn_name = ""
+    folder_fallback_en_name = ""
+    folder_fallback_year = None
     parent_title = ""
     if file_path and parent_dir_name and parent_dir_name not in {"/", "."}:
         parent_meta = MetaInfo(_preprocess_dir_name(parent_dir_name))
         parent_title = parent_meta.cn_name or ""
-    titles_to_try = _build_titles_to_try(parent_title, title, cn_name, en_name, file_meta.en_name)
+    if prefer_file_title_on_dir_conflict:
+        titles_to_try = _build_titles_to_try(title, cn_name, en_name, file_meta.en_name)
+        fallback_dir_name = ""
+        if conflict_dir_tmdb_source == "parent":
+            fallback_dir_name = parent_dir_name
+        elif conflict_dir_tmdb_source == "grandparent" and file_path:
+            fallback_dir_name = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
+        if fallback_dir_name:
+            cleaned_fallback_dir = _strip_tmdb_id_from_text(fallback_dir_name)
+            fallback_meta = MetaInfo(_preprocess_dir_name(cleaned_fallback_dir))
+            fallback_cn, fallback_en, fallback_title = _select_titles_from_meta(fallback_meta)
+            folder_fallback_title = fallback_title or cleaned_fallback_dir
+            folder_fallback_cn_name = fallback_cn or ""
+            folder_fallback_en_name = fallback_en or ""
+            folder_fallback_year = fallback_meta.year
+            folder_fallback_titles = _build_titles_to_try(cleaned_fallback_dir, fallback_title, fallback_cn, fallback_en)
+    else:
+        titles_to_try = _build_titles_to_try(parent_title, title, cn_name, en_name, file_meta.en_name)
 
     return {
         "filename": filename,
@@ -1191,6 +1612,11 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         "media_type": media_type,
         "meta_info": meta_info,
         "titles_to_try": titles_to_try,
+        "folder_fallback_titles": folder_fallback_titles,
+        "folder_fallback_title": folder_fallback_title,
+        "folder_fallback_cn_name": folder_fallback_cn_name,
+        "folder_fallback_en_name": folder_fallback_en_name,
+        "folder_fallback_year": folder_fallback_year,
         "tmdb_id_direct": tmdb_id_direct,
         "tmdb_id_source": tmdb_id_source,
         "title_source": title_source,
@@ -1520,10 +1946,11 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 def _tmdb_search_cache_key(parsed: dict) -> str:
     payload = {
-        "v": 1,
+        "v": 2,
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],
+        "folder_fallback_titles": parsed.get("folder_fallback_titles") or [],
         "year": parsed.get("year"),
         "season": parsed.get("season"),
     }
@@ -1556,7 +1983,7 @@ def _get_cached_tmdb_search_result(parsed: dict) -> tuple[bool, Optional[dict]]:
         logger.trace(f"[TMDbCache] 搜索缓存命中: {parsed.get('filename', '')} -> TMDb:{data.get('tmdb_id')}")
         return True, data
     except Exception as e:
-        logger.debug(f"[TMDbCache] 读取搜索缓存失败: {parsed.get('filename', '') if parsed else ''} err={e}")
+        logger.debug(f"[TMDbCache] 读取搜索缓存失败: 文件：{parsed.get('filename', '') if parsed else ''} | 错误：{e}")
         return False, None
 
 
@@ -1584,9 +2011,9 @@ def _set_cached_tmdb_search_result(parsed: dict, result: Optional[dict]) -> None
                 (cache_key, now_ts, now_ts + ttl_seconds, hit, payload_json),
             )
         if hit:
-            logger.debug(f"[TMDbCache] 搜索缓存写入: {parsed.get('filename', '')} -> TMDb:{(result or {}).get('tmdb_id')}")
+            logger.debug(f"[TMDbCache] 搜索缓存写入: 文件：{parsed.get('filename', '')} | TMDb编号：{(result or {}).get('tmdb_id')}")
     except Exception as e:
-        logger.debug(f"[TMDbCache] 写入搜索缓存失败: {parsed.get('filename', '') if parsed else ''} err={e}")
+        logger.debug(f"[TMDbCache] 写入搜索缓存失败: 文件：{parsed.get('filename', '') if parsed else ''} | 错误：{e}")
 
 
 def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -> Optional[dict]:
@@ -1625,6 +2052,34 @@ def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -
         return None
 
     matched = _search_tmdb_candidates(titles_to_try, filename, media_type, year, season, api_key)
+    if not matched and parsed.get("title_source") == "filename_conflict_priority":
+        folder_fallback_titles = parsed.get("folder_fallback_titles") or []
+        if folder_fallback_titles:
+            fallback_year = parsed.get("folder_fallback_year") or year
+            logger.info(
+                f"[MediaIdentify] 文件名识别未命中，回退文件夹标题识别: {filename} -> {' | '.join(folder_fallback_titles)}"
+            )
+            matched = _search_tmdb_candidates(
+                folder_fallback_titles,
+                filename,
+                media_type,
+                fallback_year,
+                season,
+                api_key,
+                log_prefix="[MediaIdentify][FolderFallback]",
+            )
+            if not matched:
+                folder_parsed = dict(parsed)
+                folder_parsed["title_source"] = "folder_fallback"
+                folder_parsed["title"] = parsed.get("folder_fallback_title") or folder_fallback_titles[0]
+                folder_parsed["cn_name"] = parsed.get("folder_fallback_cn_name") or (
+                    folder_parsed["title"] if StringUtils.is_chinese(str(folder_parsed["title"] or "")) else ""
+                )
+                folder_parsed["en_name"] = parsed.get("folder_fallback_en_name") or ""
+                folder_parsed["year"] = fallback_year
+                folder_parsed["titles_to_try"] = folder_fallback_titles
+                folder_parsed["folder_fallback_titles"] = []
+                matched = _search_tmdb_via_douban_fallback(folder_parsed, api_key)
     if matched:
         _set_cached_tmdb_search_result(parsed, matched)
         return matched

@@ -92,13 +92,13 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("websockets.client").setLevel(logging.WARNING)
 logging.getLogger("websockets.server").setLevel(logging.WARNING)
 logging.getLogger("websockets.protocol").setLevel(logging.WARNING)
-logging.getLogger("telethon").setLevel(logging.WARNING)
-logging.getLogger("telethon.client").setLevel(logging.WARNING)
-logging.getLogger("telethon.crypto").setLevel(logging.WARNING)
-logging.getLogger("telethon.extensions").setLevel(logging.WARNING)
-logging.getLogger("telethon.network").setLevel(logging.WARNING)
-logging.getLogger("telethon.network.connection").setLevel(logging.WARNING)
-logging.getLogger("telethon.network.mtprotosender").setLevel(logging.WARNING)
+logging.getLogger("telethon").setLevel(logging.ERROR)
+logging.getLogger("telethon.client").setLevel(logging.ERROR)
+logging.getLogger("telethon.crypto").setLevel(logging.ERROR)
+logging.getLogger("telethon.extensions").setLevel(logging.ERROR)
+logging.getLogger("telethon.network").setLevel(logging.ERROR)
+logging.getLogger("telethon.network.connection").setLevel(logging.ERROR)
+logging.getLogger("telethon.network.mtprotosender").setLevel(logging.ERROR)
 
 # 2. [新增] 屏蔽 apscheduler 的英文启动日志
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -123,7 +123,7 @@ def restore_defaults():
         "defaults/layouts": "layouts"
     }
 
-    logger.info("[启动] 检查默认资源完整性")
+    logger.trace("[启动] 检查默认资源完整性")
 
     for src_rel, dst_rel in folder_map.items():
         src_path = os.path.join(base_dir, src_rel)
@@ -208,7 +208,7 @@ PROJECT_VERSION = get_project_version()
 @asynccontextmanager
 async def lifespan_ui(app: FastAPI):
     # --- 启动逻辑 ---
-    logger.info("[启动] 初始化系统组件")
+    logger.trace("[启动] 初始化系统组件")
     # 注册主事件循环，供 115 Life 监控回调线程投递整理任务
     try:
         from app.routers.media_organize import register_main_event_loop
@@ -222,7 +222,7 @@ async def lifespan_ui(app: FastAPI):
         global_config.load()
         if global_config.proxy_url:
             tmdb.set_proxy(global_config.proxy_url)
-            logger.info(f"[启动] 已应用代理: {global_config.proxy_url}")
+            logger.trace(f"[启动] 已应用代理: {global_config.proxy_url}")
     except Exception as e:
         logger.warning(f"[启动] 应用代理失败: {e}")
 
@@ -259,7 +259,7 @@ async def lifespan_ui(app: FastAPI):
     try:
         from app.routers.discover import _get_reference_sources
         _get_reference_sources()
-        logger.info("[启动] 发现页扩展源缓存预热完成")
+        logger.trace("[启动] 发现页扩展源缓存预热完成")
     except Exception as e:
         logger.warning(f"[启动] 发现页扩展源预热失败: {e}")
 
@@ -296,7 +296,7 @@ async def lifespan_ui(app: FastAPI):
                         start_mode="latest",
                     )
                     monitor.start()
-                    logger.info("[启动] 115 Life 事件监控已启动")
+                    logger.trace("[启动] 115 Life 事件监控已启动")
                 else:
                     logger.warning("[启动] 115 客户端未就绪，跳过 Life 事件监控")
     except Exception as e:
@@ -384,7 +384,7 @@ async def root():
 # [新增] 网关的生命周期，用于优雅关闭 httpx 客户端
 @asynccontextmanager
 async def lifespan_gateway(app: FastAPI):
-    logger.info("[Gateway] 网关服务启动")
+    logger.trace("[Gateway] 网关服务启动")
     yield
     logger.info("[Gateway] 正在关闭连接池...")
 
@@ -474,7 +474,7 @@ async def serve_apps():
     if not gateway_ports:
         gateway_ports = [8011]
 
-    logger.info(f"[启动] UI 端口: 5256 | 网关端口: {gateway_ports}")
+    logger.info(f"[启动] 服务端口: UI=5256，网关={','.join(str(p) for p in gateway_ports)}")
 
     # ==========================================================
     # 启动多个网关服务器
@@ -494,7 +494,7 @@ async def serve_apps():
     from app.routers.gateway import register_gateway_port
     for port, emby_idx in port_to_emby_map.items():
         register_gateway_port(port, emby_idx)
-        logger.info(f"[启动] 端口映射: {port} -> Emby[{emby_idx}]")
+        logger.trace(f"[启动] 端口映射: {port} -> Emby[{emby_idx}]")
 
     # 为每个端口创建一个网关服务器
     gateway_servers = []
@@ -542,8 +542,8 @@ if __name__ == "__main__":
         os.makedirs("fonts")
         logger.info("创建 fonts 目录")
     
-    logger.info("[启动] 正在启动服务")
-    logger.info("[启动] 管理后台: http://localhost:5256/static/index.html")
+    logger.trace("[启动] 正在启动服务")
+    logger.trace("[启动] 管理后台: http://localhost:5256/static/index.html")
 
     # 运行异步主程序
     try:

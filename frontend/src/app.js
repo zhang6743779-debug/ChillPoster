@@ -378,6 +378,13 @@ createApp({
             if (status === 'error') return 'error';
             return 'idle';
         };
+        const formatActiveTaskTitle = (task = {}) => {
+            const detail = task.detail || {};
+            if (task.task_type === 'media_organize' && detail.processed !== undefined && detail.total !== undefined) {
+                return `已处理: ${detail.processed}/${detail.total}`;
+            }
+            return task.name || '任务';
+        };
         const dashboardTaskCategories = computed(() => dashboardTaskCategoryConfig.map(config => {
             const active = activeTaskEntries.value
                 .filter(([id, task]) => getTaskCategoryKey(task, id) === config.key)
@@ -584,6 +591,10 @@ createApp({
             organizeProgress,
             runOrganize,
             cancelOrganize,
+            identifyTest,
+            openIdentifyTest,
+            closeIdentifyTest,
+            runIdentifyTest,
             categoryRulesEditor,
             categoryRulesSaving,
             ruleListEl,
@@ -1785,7 +1796,7 @@ createApp({
             currentSchema, accountForm, updateAccount, updatingAccount,
             transServerIdx, loadTransFromLib, editingTaskId, editTask, cancelEdit, runSavedTask,
             tasksState, activeTaskEntries, dashboardTaskCategories, selectedTaskCategory, selectedTaskCategoryHistory,
-            getTaskStatusLabel, getTaskStatusClass, runDashboardTaskCategory,
+            getTaskStatusLabel, getTaskStatusClass, formatActiveTaskTitle, runDashboardTaskCategory,
             toggleTaskLog, openTaskCategoryLog, closeTaskCategoryLog, accordions, toggleAccordion, showCreateTask, clearLogs, clearTaskHistoryCategory,
             dashboardStats, dashboardRecentItems, dashboardVisibleRecentItems, dashboardRecentPlaybacks, dashboardVisibleRecentPlaybacks, dashboardVisibleMediaLibraries, dashboardMediaStats,
             onDashboardLazyScroll,
@@ -1942,6 +1953,7 @@ createApp({
             mediaOrganizeConfig,
             organizeForm, organizeLoading, organizeResult, organizeProgress,
             runOrganize, cancelOrganize,
+            identifyTest, openIdentifyTest, closeIdentifyTest, runIdentifyTest,
             categoryRulesEditor, categoryRulesSaving, ruleListEl,
             subClassify, subClassifyVars, subClassifyVarExamples, subClassifyBaseExamples, subClassifyPreviewSegments, subClassifyToggleLevel, embyLibCount, embyLibLevelOptions,
             embyCacheRefreshing, refreshEmbyCache,

@@ -243,7 +243,7 @@ def schedule_daily_full_sync_job(scheduler):
             name="STRM每日全量同步",
             replace_existing=True,
         )
-        logger.info("[STRM] 已注册每日全量同步任务: 04:00-05:00 随机启动")
+        logger.trace("[STRM] 已注册每日全量同步任务: 04:00-05:00 随机启动")
     except Exception as e:
         logger.error(f"[STRM] 注册每日全量同步任务失败: {e}")
 

@@ -1,0 +1,66 @@
+ARG CHILLPOSTER_BASE_IMAGE=chillne/chillposter:latest
+
+# Fast LAN test image.
+# It reuses the published runtime dependencies, then overlays local source files
+# without Nuitka/source protection so NAS testing is much faster than releases.
+
+FROM --platform=$BUILDPLATFORM node:22-slim AS frontend
+
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build \
+    && mkdir -p /protected-static \
+    && cp -a dist/. /protected-static/
+
+FROM ${CHILLPOSTER_BASE_IMAGE}
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Shanghai
+ARG CHILLPOSTER_VERSION=vdev-nas
+ARG BUILD_DATE
+LABEL org.opencontainers.image.version=$CHILLPOSTER_VERSION
+LABEL org.opencontainers.image.created=$BUILD_DATE
+RUN echo "$CHILLPOSTER_VERSION" > /app/VERSION
+
+RUN find /app \( -name '*.so' -o -name '*.pyc' \) -delete
+
+COPY requirements.txt ./
+RUN python - <<'PY'
+import importlib.util
+import subprocess
+import sys
+
+missing = []
+if importlib.util.find_spec("telethon") is None:
+    missing.append("Telethon")
+if importlib.util.find_spec("socks") is None:
+    missing.append("PySocks")
+if importlib.util.find_spec("python_socks") is None:
+    missing.append("python-socks[asyncio]")
+if missing:
+    subprocess.check_call([
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--default-timeout=300",
+        *missing,
+    ])
+PY
+COPY main.py client.py config_manager.py constants.py utils.py ./
+COPY app ./app
+COPY core ./core
+COPY layouts ./layouts
+COPY templates ./templates
+COPY config/media_organize_category_rules.json ./config/media_organize_category_rules.json
+COPY --from=frontend /protected-static/ static/
+
+EXPOSE 5256
+VOLUME ["/app/config", "/app/templates", "/app/layouts", "/app/fonts", "/app/backups"]
+CMD ["python", "main.py"]

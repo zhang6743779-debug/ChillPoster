@@ -249,22 +249,19 @@ def load_task_progress_from_file():
             return
 
         now = time.time()
-        current_pid = os.getpid()
         loaded_count = 0
         interrupted_count = 0
         for run_id, raw_task in raw_data.items():
             record = _normalize_task_record(run_id, raw_task, now=now)
             if not record:
                 continue
-            heartbeat_at = _coerce_float(record.get("heartbeat_at"), 0.0)
-            old_pid = _coerce_pid(record.get("pid"))
-            heartbeat_stale = not heartbeat_at or now - heartbeat_at > RUNNING_TASK_HEARTBEAT_TIMEOUT_SECONDS
-            process_changed = bool(old_pid and old_pid != current_pid)
-            if record.get("status") == "running" and (process_changed or heartbeat_stale):
+            if record.get("status") == "running":
                 if _is_upgrade_restart_handoff_task(run_id, record):
                     record = _mark_upgrade_handoff_finished_locked(run_id, record, now=now)
                 else:
-                    record = _mark_task_interrupted_locked(run_id, record, now=now, reason="服务重启或心跳超时")
+                    # 任务进度文件只会在进程启动时恢复；旧 running 任务不可能仍由当前进程持有。
+                    # Docker 重建后应用 PID 常会复用，不能依赖 pid/heartbeat 判断是否存活。
+                    record = _mark_task_interrupted_locked(run_id, record, now=now, reason="服务重启")
                     interrupted_count += 1
             elif record.get("status") == "interrupted" and _is_upgrade_restart_handoff_task(run_id, record):
                 record = _mark_upgrade_handoff_finished_locked(run_id, record, now=now)
@@ -386,7 +383,9 @@ def _cleanup_stale_tasks_locked(now):
         if task.get("status") == "running":
             heartbeat_at = _coerce_float(task.get("heartbeat_at"), updated_at)
             old_pid = _coerce_pid(task.get("pid"))
-            if old_pid and old_pid != current_pid and now - heartbeat_at > RUNNING_TASK_HEARTBEAT_TIMEOUT_SECONDS:
+            heartbeat_stale = not heartbeat_at or now - heartbeat_at > RUNNING_TASK_HEARTBEAT_TIMEOUT_SECONDS
+            process_changed = bool(old_pid and old_pid != current_pid)
+            if heartbeat_stale or process_changed:
                 ACTIVE_TASKS[run_id] = _mark_task_interrupted_locked(run_id, task, now=now, reason="心跳超时")
                 changed = True
                 continue

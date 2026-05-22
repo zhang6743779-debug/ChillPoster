@@ -7,7 +7,7 @@ from typing import Callable, Optional
 from p115client.exception import P115AuthenticationError
 
 from core.logger import logger
-from app.services.media_organize_state import _is_recent_created_target_dir_id
+from app.services.media_organize_state import _is_recent_created_target_dir_id, _record_self_organized_event_skip
 from .client import LifeClient
 from .models import LifeEvent
 
@@ -72,9 +72,9 @@ class LifeEventMonitor:
                 self._from_time = time()
 
             if self._start_mode == "latest":
-                logger.info("[115Life] 监控起始点: 从当前时间开始，只处理新事件")
+                logger.trace("[115Life] 监控起始点: 从当前时间开始，只处理新事件")
             elif self._start_mode == "last":
-                logger.info("[115Life] 监控起始点: 从上次保存的位置继续")
+                logger.trace("[115Life] 监控起始点: 从上次保存的位置继续")
             else:
                 logger.debug(f"[115Life] 监控起始点: mode={self._start_mode}, from_id={self._from_id}, from_time={self._from_time}")
 
@@ -130,9 +130,9 @@ class LifeEventMonitor:
                         parent_id = str(event.get("parent_id", "") or "")
 
                         try:
-                            logger.debug(f"[115Life] 原始事件: {json.dumps(event, ensure_ascii=False, sort_keys=True)}")
+                            logger.trace(f"[115Life] 原始事件: {json.dumps(event, ensure_ascii=False, sort_keys=True)}")
                         except Exception:
-                            logger.debug(f"[115Life] 原始事件(无法序列化): {event}")
+                            logger.trace(f"[115Life] 原始事件(无法序列化): {event}")
 
                         if event_name == "delete_file":
                             event_kind = "delete"
@@ -152,9 +152,7 @@ class LifeEventMonitor:
                             continue
 
                         if event_name == "new_folder" and _is_recent_created_target_dir_id(str(event.get("file_id", "") or "")):
-                            logger.debug(
-                                f"[115Life] 跳过整理自身新建目录事件: event={event_name}, file_id={event.get('file_id', '')}"
-                            )
+                            _record_self_organized_event_skip(event_name)
                             continue
 
                         if is_delete_like:

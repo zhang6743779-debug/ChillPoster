@@ -68,7 +68,7 @@ class Drive115UploadService:
             self._started = True
             self._ensure_workers_locked()
             self._sync_watchers_locked()
-        logger.info("[Drive115Upload] 本地监听上传服务已启动")
+        logger.trace("[Drive115Upload] 本地监听上传服务已启动")
 
     def stop(self) -> None:
         with self._lock:
@@ -463,7 +463,7 @@ class Drive115UploadService:
 
     def _watch_task_loop(self, task_id: str, stop_event: threading.Event) -> None:
         task = self._get_task_copy(task_id) or {}
-        logger.info(
+        logger.trace(
             f"[Drive115Upload] 监听任务启动: {task_id} | 本地={task.get('local_folder') or '-'} | "
             f"115={task.get('target_path') or task.get('target_name') or task.get('target_cid') or '-'} | 递归扫描=开启"
         )

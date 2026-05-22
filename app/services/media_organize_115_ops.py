@@ -499,15 +499,23 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
                 if isinstance(result, dict) and not result.get("state", True):
                     raise RuntimeError(f"{request_name}失败: {result}")
                 elapsed = time.monotonic() - request_started_at
-                if request_name == "获取直链":
-                    logger.debug(f"[115] {request_name}完成: 请求耗时={elapsed:.2f}s")
+                if request_name.startswith("获取直链"):
+                    label = request_name.split(":", 1)[1].strip() if ":" in request_name else ""
+                    label_text = f": {label}" if label else ""
+                    logger.debug(f"[115] 直链获取完成{label_text} | 请求耗时={elapsed:.2f}s")
                 return result
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - request_started_at
+                if request_name.startswith("获取直链"):
+                    label = request_name.split(":", 1)[1].strip() if ":" in request_name else ""
+                    label_text = f": {label}" if label else ""
+                    request_name_for_log = f"直链获取{label_text}"
+                else:
+                    request_name_for_log = request_name
                 if attempt < _DIRECT_URL_TIMEOUT_MAX_RETRIES:
-                    logger.warning(f"[115] {request_name}超时: 请求耗时={elapsed:.2f}s，准备重试 ({attempt + 1}/{_DIRECT_URL_TIMEOUT_MAX_RETRIES})")
+                    logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s，准备重试 ({attempt + 1}/{_DIRECT_URL_TIMEOUT_MAX_RETRIES})")
                     continue
-                logger.warning(f"[115] {request_name}超时: 请求耗时={elapsed:.2f}s")
+                logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s")
                 return {}
     finally:
         _DIRECT_URL_LOCK.release()
@@ -533,10 +541,11 @@ def _log_115_file_op_timing(
     move_wait_seconds: float,
     total_seconds: float,
 ):
+    subject = f"{count} 个文件" if count > 1 else "1 个文件"
     message = (
-        f"[MediaOrganize] 115文件操作耗时: {label} count={count} "
-        f"总耗时={total_seconds:.2f}s 写提交={write_submit_seconds:.2f}s "
-        f"移动等待={move_wait_seconds:.2f}s"
+        f"[MediaOrganize] 115文件操作较慢: {label}，{subject}，"
+        f"总耗时 {total_seconds:.2f} 秒，提交耗时 {write_submit_seconds:.2f} 秒，"
+        f"等待移动完成 {move_wait_seconds:.2f} 秒"
     )
     if (
         total_seconds >= _FILE_OP_TIMING_INFO_THRESHOLD_SECONDS
@@ -545,7 +554,7 @@ def _log_115_file_op_timing(
     ):
         logger.info(message)
     else:
-        logger.debug(message)
+        logger.trace(message)
 
 
 async def _submit_115_move_items(client, file_ids, target_cid: str):
@@ -713,7 +722,7 @@ async def _rename_115_files_batch(client, file_ops: list[dict], target_cid: str 
         return {"ok": True, "items": valid_ops, "error": "", "rename_done": rename_done, "move_done": move_done}
     except Exception as e:
         logger.warning(
-            f"[MediaOrganize] 批量文件操作失败，将回退逐条处理: count={len(valid_ops)}, "
+            f"[MediaOrganize] 批量文件操作失败，将回退逐条处理: 文件数={len(valid_ops)}, "
             f"target={target_path or target_cid or ''}, rename_done={rename_done}, move_done={move_done}, "
             f"err={type(e).__name__}: {e}"
         )
@@ -939,7 +948,7 @@ async def _move_subtitle_ops(client, parent_id: str, subs: list, matched_ops: li
         if batch_result.get("ok"):
             for op in matched_ops:
                 subtitle_id = str(op.get("id") or op.get("fid") or "")
-                _record_organized_source_path(subtitle_id, target_path)
+                _record_organized_source_path(subtitle_id, target_path, source_path=op.get("source_path") or op.get("path", ""))
                 if subtitle_id.isdigit():
                     succeeded_ids.add(int(subtitle_id))
             await _apply_subtitle_move_results(parent_id, subs, succeeded_ids, subtitles_by_parent)
@@ -951,7 +960,7 @@ async def _move_subtitle_ops(client, parent_id: str, subs: list, matched_ops: li
         ok = await _rename_115_file(client, op, new_sub_name, target_cid=target_cid, target_path=target_path)
         if ok:
             subtitle_id = str(op.get("id") or op.get("fid") or "")
-            _record_organized_source_path(subtitle_id, target_path)
+            _record_organized_source_path(subtitle_id, target_path, source_path=op.get("source_path") or op.get("path", ""))
             if subtitle_id.isdigit():
                 succeeded_ids.add(int(subtitle_id))
             moved_subtitles.append({"name": new_sub_name, "pickcode": op.get("pickcode", "")})
@@ -981,7 +990,7 @@ async def _match_and_move_subtitles(client, file_item: dict, video_new_name: str
         logger.info(f"[MediaOrganize] 目录下有字幕但未匹配视频 {file_item.get('name','')!r}: {sub_names}")
         return []
 
-    logger.info(f"[MediaOrganize] 字幕匹配命中: video={file_item.get('name', '')!r} mode={match_mode} count={len(matched_ops)}")
+    logger.info(f"[MediaOrganize] 字幕匹配命中: video={file_item.get('name', '')!r} mode={match_mode} 字幕数={len(matched_ops)}")
     for op in matched_ops:
         logger.info(f"[MediaOrganize] 移动字幕: {op['old_name']!r} -> {op['new_name']!r}")
 
@@ -1008,7 +1017,7 @@ async def _move_matched_subtitles_to_target(client, file_item: dict, subtitles_b
     if not subs or not matched_ops:
         return []
 
-    logger.info(f"[MediaOrganize] 去重/失败分支字幕联动: video={file_item.get('name', '')!r} mode={match_mode} count={len(matched_ops)}")
+    logger.info(f"[MediaOrganize] 去重/失败分支字幕联动: video={file_item.get('name', '')!r} mode={match_mode} 字幕数={len(matched_ops)}")
     return await _move_subtitle_ops(
         client,
         parent_id,
@@ -1047,7 +1056,7 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
             logger.info(f"[MediaOrganize] 目录下有字幕但未匹配视频 {file_item.get('name','')!r}: {sub_names}")
             continue
 
-        logger.info(f"[MediaOrganize] {log_prefix}: video={file_item.get('name', '')!r} mode={match_mode} count={len(matched_ops)}")
+        logger.info(f"[MediaOrganize] {log_prefix}: video={file_item.get('name', '')!r} mode={match_mode} 字幕数={len(matched_ops)}")
         for op in matched_ops:
             op["video_id"] = video_id
             grouped_ops.setdefault(parent_id, []).append(op)
@@ -1074,7 +1083,7 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
             succeeded_ids = set()
             for op in unique_ops:
                 subtitle_id = str(op.get("id") or op.get("fid") or "")
-                _record_organized_source_path(subtitle_id, target_path)
+                _record_organized_source_path(subtitle_id, target_path, source_path=op.get("source_path") or op.get("path", ""))
                 if subtitle_id.isdigit():
                     succeeded_ids.add(int(subtitle_id))
                 video_id = str(op.get("video_id") or "")
@@ -1105,7 +1114,7 @@ async def _match_and_move_subtitles_batch(client, subtitle_plans: list[dict], su
                 logger.warning(f"[MediaOrganize] 字幕移动失败: {op['old_name']!r}")
                 continue
             subtitle_id = str(op.get("id") or op.get("fid") or "")
-            _record_organized_source_path(subtitle_id, target_path)
+            _record_organized_source_path(subtitle_id, target_path, source_path=op.get("source_path") or op.get("path", ""))
             succeeded_ids = {int(subtitle_id)} if subtitle_id.isdigit() else set()
             await _apply_subtitle_move_results(parent_id, subtitles_by_parent.get(parent_id, subs), succeeded_ids, subtitles_by_parent)
             video_id = str(op.get("video_id") or "")
@@ -1191,7 +1200,7 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
             if file_id:
                 moved_dirs.add(file_id)
             if target_path:
-                _record_organized_source_path(file_id or target_id, target_path)
+                _record_organized_source_path(file_id or target_id, target_path, source_path=file_item.get("path", ""))
             label = "目录" if moving_dir else "文件"
             logger.debug(f"[MediaOrganize] 移动失败{label}: {target_name or file_item.get('name', '')} -> 整理失败目录")
         if subtitles_by_parent and not moving_dir:
@@ -1242,7 +1251,7 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
             label = "目录" if moving_dir_by_target.get(target_id) else "文件"
             logger.debug(f"[MediaOrganize] 移动失败{label}: {name} -> 整理失败目录")
     except Exception as e:
-        logger.warning(f"[MediaOrganize] 批量移动失败文件/目录失败: count={len(ids_to_move)}, err={e}")
+        logger.warning(f"[MediaOrganize] 批量移动失败文件/目录失败: 条目数={len(ids_to_move)}, err={e}")
         # 降级逐个移动
         for fi in group_failed:
             await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,

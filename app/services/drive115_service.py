@@ -87,7 +87,7 @@ class Drive115Service:
             try:
                 self._clients[cookie] = P115Client(cookie)
                 self._cookies[cookie] = 0
-                logger.info(f"[115] 客户端已就绪: {drive_name}")
+                logger.trace(f"[115] 客户端已就绪: {drive_name}")
             except Exception as e:
                 logger.error(f"[115] 客户端登录失败 ({drive_name}): {e}")
                 return None, {}
@@ -375,15 +375,22 @@ class Drive115Service:
             else:
                 logger.warning(f"[Sync-{drive_name}] 复制失败，降级使用原文件")
 
-        logger.debug(f"[115-{drive_name}] 开始获取直链: {display_name}")
-        final_url = await self._fetch_download_url(pickcode, user_agent, emby_index=emby_index, direct_link_context=direct_link_context)
+        direct_log_label = f"媒体/路径={display_name}"
+        logger.debug(f"[115-{drive_name}] 开始获取直链: {direct_log_label}")
+        final_url = await self._fetch_download_url(
+            pickcode,
+            user_agent,
+            emby_index=emby_index,
+            direct_link_context=direct_link_context,
+            log_label=direct_log_label,
+        )
 
         if final_url:
             self._url_cache[cache_key] = final_url
-            logger.debug(f"[115-{drive_name}] 直链获取成功: {display_name}")
+            logger.trace(f"[115-{drive_name}] 直链获取成功: {direct_log_label}")
             return final_url
 
-        logger.warning(f"[115-{drive_name}] 直链获取失败: {display_name}")
+        logger.warning(f"[115-{drive_name}] 直链获取失败: {direct_log_label}")
         return None
 
     async def _resolve_filename_for_item(self, item_id: str, media_source_id: str | None, emby_index: int) -> str:
@@ -854,7 +861,8 @@ class Drive115Service:
         client, _ = await self.get_client(resolved_emby_index)
         return client
 
-    async def _download_urls_via_client(self, pickcodes, user_agent: str = "", emby_index=None, cookie=None, direct_link_context: str = "default") -> dict[str, str]:
+    async def _download_urls_via_client(self, pickcodes, user_agent: str = "", emby_index=None, cookie=None,
+                                        direct_link_context: str = "default", log_label: str | None = None) -> dict[str, str]:
         normalized = []
         seen = set()
         for pickcode in (pickcodes or []):
@@ -873,6 +881,10 @@ class Drive115Service:
 
             urls: dict[str, str] = {}
             batch_pickcodes = ",".join(normalized)
+            label = str(log_label or "").strip()
+            if not label and len(normalized) == 1:
+                label = normalized[0]
+            request_name = f"获取直链: {label}" if label else f"获取直链: {len(normalized)} 个文件"
             try:
                 request_factory = lambda: asyncio.to_thread(
                     client.download_url_app,
@@ -883,9 +895,9 @@ class Drive115Service:
                     timeout=_DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS,
                 )
                 if direct_link_context == "gateway_playback":
-                    result = await self._run_gateway_playback_direct_url_request("获取直链", request_factory)
+                    result = await self._run_gateway_playback_direct_url_request(request_name, request_factory)
                 else:
-                    result = await _run_115_serial_request("获取直链", request_factory)
+                    result = await _run_115_serial_request(request_name, request_factory)
             except Exception as e:
                 logger.debug(f"[115] 批量获取直链失败: count={len(normalized)}, err={e}")
                 return {}
@@ -918,7 +930,8 @@ class Drive115Service:
             logger.error(f"[115] 批量获取直链异常: {e}")
             return {}
 
-    async def _fetch_download_url(self, pickcode, user_agent, cookie=None, emby_index=None, direct_link_context: str = "default"):
+    async def _fetch_download_url(self, pickcode, user_agent, cookie=None, emby_index=None,
+                                  direct_link_context: str = "default", log_label: str | None = None):
         """通过 p115client download_url(s) 获取直链。"""
         normalized_pickcode = str(pickcode or "").strip()
         if not normalized_pickcode:
@@ -929,6 +942,7 @@ class Drive115Service:
             emby_index=emby_index,
             cookie=cookie,
             direct_link_context=direct_link_context,
+            log_label=log_label,
         )
         return urls.get(normalized_pickcode)
 

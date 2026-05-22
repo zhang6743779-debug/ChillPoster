@@ -141,7 +141,7 @@ class HDHiveService:
                 with open(HDHIVE_CONFIG_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.config = HDHiveConfig(**data)
-                    logger.info(f"[HDHive] 已加载 {len(self.config.accounts)} 个账号配置")
+                    logger.trace(f"[HDHive] 已加载 {len(self.config.accounts)} 个账号配置")
             except Exception as e:
                 logger.error(f"[HDHive] 加载配置失败: {e}")
 
@@ -590,7 +590,7 @@ class HDHiveService:
         if not candidates:
             return
 
-        logger.info("[HDHive] 启动后签到账号 token 检查开始")
+        logger.trace("[HDHive] 启动后签到账号 token 检查开始")
         changed = False
 
         for account in candidates:
@@ -621,7 +621,7 @@ class HDHiveService:
 
         if changed:
             self._save_config()
-        logger.info("[HDHive] 启动后签到账号 token 检查完成")
+        logger.trace("[HDHive] 启动后签到账号 token 检查完成")
 
     def _refresh_jobs(self):
         if not self.scheduler:
@@ -650,7 +650,7 @@ class HDHiveService:
                     replace_existing=True,
                 )
                 checkin_type_name = "赌狗签到" if account.checkin_type == "gambler" else "普通签到"
-                logger.info(f"[HDHive] 已添加签到任务: {account.name or account.id} ({checkin_type_name} {cron_expr})")
+                logger.trace(f"[HDHive] 已添加签到任务: {account.name or account.id} ({checkin_type_name} {cron_expr})")
             except Exception as e:
                 logger.error(f"[HDHive] 添加签到任务失败 {account.name or account.id}: {e}")
 

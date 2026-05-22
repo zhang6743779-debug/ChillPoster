@@ -1141,7 +1141,7 @@ class TelegramNotifyService:
                 name="telegram-account-monitor",
             )
             self._monitor_thread.start()
-        logger.info("[Telegram账号] 监听线程已启动")
+        logger.trace("[Telegram账号] 监听线程已启动")
 
     def stop_monitor(self):
         """停止 Telegram 用户账号消息监听。"""
@@ -1174,7 +1174,7 @@ class TelegramNotifyService:
                 name="telegram-bot-polling",
             )
             self._poll_thread.start()
-        logger.info("[Telegram通知] Long polling 已启动")
+        logger.trace("[Telegram通知] Long polling 已启动")
 
     def stop_polling(self):
         """停止 Telegram Bot long polling。"""
@@ -1242,7 +1242,7 @@ class TelegramNotifyService:
 
     def _poll_loop(self):
         """Telegram Bot long polling 循环。"""
-        logger.info("[Telegram通知] Polling 循环已开始")
+        logger.trace("[Telegram通知] Polling 循环已开始")
         while self._polling:
             try:
                 resp = self._api_request("getUpdates", {
@@ -1371,7 +1371,11 @@ class TelegramNotifyService:
             loop.close()
 
     async def _monitor_runner(self):
-        telethon = self._require_telethon()
+        try:
+            telethon = self._require_telethon()
+        except RuntimeError as e:
+            logger.warning(f"[Telegram账号] 监听未启动: {e}")
+            return
         client = self._create_account_client()
         self._monitor_client = client
         try:
@@ -1392,7 +1396,7 @@ class TelegramNotifyService:
             while not self._monitor_stop_event.is_set() and client.is_connected():
                 await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"[Telegram账号] 监听异常: {e}", exc_info=True)
+            logger.warning(f"[Telegram账号] 监听未启动: {e}")
         finally:
             try:
                 await client.disconnect()

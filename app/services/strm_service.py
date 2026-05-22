@@ -7,7 +7,7 @@ from itertools import batched
 from queue import Queue, Empty
 from threading import Thread, Event, Lock
 from time import perf_counter
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from p115client import P115Client
 from p115client.tool.iterdir import iter_files_with_path, traverse_tree_with_path
@@ -26,6 +26,8 @@ from app.services.media_organize_tmdb import (
     _fetch_tmdb_data_sync,
     _load_config_data,
     _build_scraping_config,
+    _normalize_required_episodes,
+    _tmdb_data_has_required_episodes,
 )
 
 
@@ -230,7 +232,13 @@ def _prune_tmdb_fallback_cache(now_ts: float):
         _tmdb_fallback_cache.pop(key, None)
 
 
-def _get_cached_tmdb_fallback_value(cache_key: tuple):
+def _cached_tmdb_fallback_has_required_episodes(value: dict | None, media_type: str, required_episode_keys: list[str]) -> bool:
+    if str(media_type or "").lower() == "movie":
+        return True
+    return _tmdb_data_has_required_episodes(value, required_episode_keys)
+
+
+def _get_cached_tmdb_fallback_value(cache_key: tuple, media_type: str = "", required_episode_keys: Optional[list[str]] = None):
     now_ts = time.time()
     with _tmdb_fallback_cache_lock:
         _prune_tmdb_fallback_cache(now_ts)
@@ -239,6 +247,9 @@ def _get_cached_tmdb_fallback_value(cache_key: tuple):
             return None
         ts, value = cached
         if now_ts - ts > TMDB_FALLBACK_CACHE_TTL_SECONDS:
+            _tmdb_fallback_cache.pop(cache_key, None)
+            return None
+        if not _cached_tmdb_fallback_has_required_episodes(value, media_type, list(required_episode_keys or [])):
             _tmdb_fallback_cache.pop(cache_key, None)
             return None
         return value
@@ -259,10 +270,14 @@ def _resolve_tmdb_data_with_short_cache(parsed: dict, api_key: str, task_cache: 
     media_type = str(parsed.get("media_type", "") or "")
     season_number = parsed.get("season")
     cache_key = (tmdb_id, media_type)
+    required_episode_keys = _normalize_required_episodes(None, parsed, season_number)
     if task_cache is not None and cache_key in task_cache:
-        return task_cache[cache_key], "cache_hit"
+        cached = task_cache[cache_key]
+        if _cached_tmdb_fallback_has_required_episodes(cached, media_type, required_episode_keys):
+            return cached, "cache_hit"
+        task_cache.pop(cache_key, None)
 
-    cached = _get_cached_tmdb_fallback_value(cache_key)
+    cached = _get_cached_tmdb_fallback_value(cache_key, media_type, required_episode_keys)
     if cached is not None:
         if task_cache is not None:
             task_cache[cache_key] = cached
@@ -350,15 +365,27 @@ def _process_tmdb_batch(
     stats: dict,
     log_prefix: str,
     cancel_event: Optional[Event],
+    progress_callback: Optional[Callable[[], None]] = None,
 ) -> None:
     """处理单批 TMDb 补齐：预处理 → 并发拉取 → 分组落盘，处理完后释放 data_by_key。"""
     prepared_items: list[dict] = []
     fetch_payloads: dict[tuple, dict] = {}
     data_by_key: dict[tuple, dict | None] = {}
+    last_progress_at = 0.0
+
+    def _emit_progress(force: bool = False) -> None:
+        nonlocal last_progress_at
+        if not progress_callback:
+            return
+        now = time.time()
+        if force or now - last_progress_at >= 1.0:
+            progress_callback()
+            last_progress_at = now
 
     for plan in batch_plans:
         if cancel_event and cancel_event.is_set():
             return
+        _emit_progress()
         filename = str(plan.get("filename", "") or "")
         remote_file_path = str(plan.get("remote_file_path", "") or "")
         local_file_path = str(plan.get("local_file_path", "") or "")
@@ -396,16 +423,27 @@ def _process_tmdb_batch(
 
         media_type = str(parsed.get("media_type", "") or "")
         fetch_key = (tmdb_id, media_type)
-        cached = _get_cached_tmdb_fallback_value(fetch_key)
+        required_episode_keys = _normalize_required_episodes(None, parsed, parsed.get("season"))
+        cached = _get_cached_tmdb_fallback_value(fetch_key, media_type, required_episode_keys)
         if cached is not None:
-            data_by_key[fetch_key] = cached
+            if fetch_key not in fetch_payloads:
+                data_by_key[fetch_key] = cached
         else:
-            fetch_payloads.setdefault(fetch_key, {
+            data_by_key.pop(fetch_key, None)
+            payload = fetch_payloads.setdefault(fetch_key, {
                 "tmdb_id": tmdb_id,
                 "media_type": media_type,
                 "season_number": parsed.get("season"),
                 "parsed": parsed,
+                "required_episodes": [],
             })
+            if media_type != "movie":
+                season = parsed.get("season")
+                episode = parsed.get("episode")
+                if season is not None and episode is not None:
+                    episode_pair = (season, episode)
+                    if episode_pair not in payload["required_episodes"]:
+                        payload["required_episodes"].append(episode_pair)
 
         prepared_items.append({
             "plan": plan,
@@ -433,11 +471,13 @@ def _process_tmdb_batch(
                     api_key,
                     payload["season_number"],
                     payload["parsed"],
+                    payload.get("required_episodes") or None,
                 ): key
                 for key, payload in fetch_payloads.items()
                 if key not in data_by_key
             }
             for future in as_completed(futures):
+                _emit_progress()
                 key = futures[future]
                 try:
                     tmdb_data = future.result()
@@ -494,6 +534,7 @@ def _process_tmdb_batch(
     scrape_workers = min(TMDB_FALLBACK_SCRAPE_WORKERS, len(grouped_scrape_items))
     if scrape_workers <= 1:
         for group_key, group_items in grouped_scrape_items.items():
+            _emit_progress()
             generated_count, failed_count = _scrape_group(group_key, group_items)
             stats["tmdb_generated"] += generated_count
             stats["tmdb_failed"] += failed_count
@@ -505,6 +546,7 @@ def _process_tmdb_batch(
                     break
                 futures[executor.submit(_scrape_group, group_key, group_items)] = group_key
             for future in as_completed(futures):
+                _emit_progress()
                 try:
                     generated_count, failed_count = future.result()
                 except Exception as e:
@@ -517,12 +559,21 @@ def _process_tmdb_batch(
     data_by_key.clear()
     prepared_items.clear()
     grouped_scrape_items.clear()
+    _emit_progress(force=True)
 
 
 _BULK_MODE_THRESHOLD = 1000
 
 
-def _apply_tmdb_fallbacks(plans: list, scraping_config, api_key: str, stats: dict, log_prefix: str, cancel_event: Optional[Event] = None):
+def _apply_tmdb_fallbacks(
+    plans: list,
+    scraping_config,
+    api_key: str,
+    stats: dict,
+    log_prefix: str,
+    cancel_event: Optional[Event] = None,
+    progress_callback: Optional[Callable[[], None]] = None,
+):
     if not plans:
         return
     if not api_key:
@@ -536,6 +587,8 @@ def _apply_tmdb_fallbacks(plans: list, scraping_config, api_key: str, stats: dic
     num_batches = (total + batch_size - 1) // batch_size
     bulk = total >= _BULK_MODE_THRESHOLD
     logger.info(f"[STRM] {log_prefix} TMDb 元数据补齐开始: {total} 项，分 {num_batches} 批，每批 {batch_size}{'（批量模式）' if bulk else ''}")
+    if progress_callback:
+        progress_callback()
 
     if bulk:
         set_bulk_mode(True)
@@ -554,7 +607,10 @@ def _apply_tmdb_fallbacks(plans: list, scraping_config, api_key: str, stats: dic
                 stats,
                 log_prefix,
                 cancel_event,
+                progress_callback,
             )
+            if progress_callback:
+                progress_callback()
             logger.info(
                 f"[STRM] {log_prefix} 进度 {min(batch_start + batch_size, total)}/{total} | "
                 f"批次 {batch_idx + 1}/{num_batches} | 生成:{stats['tmdb_generated']} 跳过:{stats['tmdb_skipped']} 失败:{stats['tmdb_failed']} | "
@@ -733,6 +789,22 @@ def _download_by_url(url: str, local_path: str, cancel_event: Optional[Event] = 
         raise
 
 
+def _existing_aux_file_is_current(local_path: str, expected_size: int | str | None = 0) -> bool:
+    """Auxiliary files are filled when missing; STRM overwrite mode should not redownload them."""
+    if not os.path.exists(local_path):
+        return False
+    try:
+        size = int(expected_size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size <= 0:
+        return True
+    try:
+        return os.path.getsize(local_path) == size
+    except OSError:
+        return False
+
+
 def _download_aux_file(
     client: P115Client,
     pickcode: str,
@@ -760,18 +832,18 @@ def _download_aux_file(
                     raise ValueError("图片链接为空")
                 _check_cancel()
                 download_file(client, pickcode, local_path, resume=True, user_agent=_UA, app="android")
-                logger.info(f"[STRM] 图片附属下载完成: {filename} | pic_url:{url}")
+                logger.trace(f"[STRM] 图片附属下载完成: {filename} | pic_url:{url}")
             except CancelledError:
                 raise
             except Exception as pic_err:
-                logger.warning(f"[STRM] 图片接口下载失败，回退普通下载: {filename}: {pic_err}")
+                logger.trace(f"[STRM] 图片接口下载失败，回退普通下载: {filename}: {pic_err}")
                 _check_cancel()
                 download_file(client, pickcode, local_path, resume=True, user_agent=_UA, app="android")
-                logger.info(f"[STRM] 图片附属回退下载完成: {filename}")
+                logger.trace(f"[STRM] 图片附属回退下载完成: {filename}")
         else:
             _check_cancel()
             download_file(client, pickcode, local_path, resume=True, user_agent=_UA, app="android")
-            logger.info(f"[STRM] 非图片附属下载完成: {filename}")
+            logger.trace(f"[STRM] 非图片附属下载完成: {filename}")
 
     try:
         _check_cancel()
@@ -780,7 +852,7 @@ def _download_aux_file(
 
         if download_mode == "cdn":
             if not cookie:
-                logger.warning(f"[STRM] CDN下载跳过，缺少 cookie，回退standard: {filename}")
+                logger.trace(f"[STRM] CDN下载跳过，缺少 cookie，回退standard: {filename}")
                 _download_standard()
                 return ("ok", filename, "")
 
@@ -791,7 +863,7 @@ def _download_aux_file(
                     _check_cancel()
                     url = _fetch_download_url_cdn(pickcode, cookie)
                     _download_by_url(url, local_path, cancel_event=cancel_event)
-                    logger.info(f"[STRM] CDN附属下载完成: {filename}")
+                    logger.trace(f"[STRM] CDN附属下载完成: {filename}")
                     return ("ok", filename, "")
                 except CancelledError:
                     return ("cancelled", filename, "cancelled")
@@ -800,10 +872,10 @@ def _download_aux_file(
                     err_msg = _describe_download_error(cdn_err)
                     can_retry = attempt < total_attempts and _is_retryable_download_error(cdn_err)
                     if not can_retry:
-                        logger.warning(f"[STRM] CDN下载失败，回退standard: {filename}: {err_msg}")
+                        logger.trace(f"[STRM] CDN下载失败，回退standard: {filename}: {err_msg}")
                         break
                     delay = CDN_AUX_RETRY_DELAYS[attempt - 1]
-                    logger.warning(
+                    logger.trace(
                         f"[STRM] CDN下载失败，{delay:.1f}s 后重试({attempt}/{total_attempts}): {filename}: {err_msg}"
                     )
                     time.sleep(delay)
@@ -843,13 +915,9 @@ def _batch_download_aux(
         local_file = os.path.join(target_dir, it["filename"])
         it["_local_path"] = local_file
 
-        if overwrite_mode == "skip" and os.path.exists(local_file):
-            try:
-                if os.path.getsize(local_file) == it["size"]:
-                    logger.info(f"[STRM] 跳过附属文件(已存在且大小一致): {it['filename']}")
-                    continue
-            except OSError:
-                pass
+        if _existing_aux_file_is_current(local_file, it.get("size", 0)):
+            logger.trace(f"[STRM] 跳过附属文件(已存在): {it['filename']}")
+            continue
         to_download.append(it)
 
     if not to_download:
@@ -880,9 +948,9 @@ def _batch_download_aux(
             status, fname, msg = future.result()
             if status == "ok":
                 downloaded += 1
-                logger.info(f"[STRM] 下载附属文件成功: {fname}")
+                logger.trace(f"[STRM] 下载附属文件成功: {fname}")
             elif status == "cancelled":
-                logger.info(f"[STRM] 下载附属文件已取消: {fname}")
+                logger.trace(f"[STRM] 下载附属文件已取消: {fname}")
             else:
                 failed += 1
                 logger.warning(f"[STRM] 下载附属文件失败: {fname}: {msg}")
@@ -963,15 +1031,9 @@ def _process_single_item(
                 skip_reason = "字幕文件已存在"
             else:
                 skip_reason = "附属文件已存在"
-            # 跳过已存在且大小一致的文件
-            if os.path.exists(local_file) and overwrite_mode == "skip":
-                try:
-                    local_size = os.path.getsize(local_file)
-                    remote_size = int(item.get("size", 0))
-                    if local_size == remote_size:
-                        return ProcessResult("skip", filename, skip_reason, None)
-                except (ValueError, TypeError):
-                    pass
+            # 覆盖模式只影响 STRM；附属/字幕文件只在缺失或大小不一致时补下载。
+            if _existing_aux_file_is_current(local_file, item.get("size", 0)):
+                return ProcessResult("skip", filename, skip_reason, None)
             if dl_executor:
                 file_id = int(item.get("id", 0) or 0)
                 file_size = int(item.get("size", 0) or 0)
@@ -1666,20 +1728,15 @@ class StrmService:
         local_dir = os.path.normpath(os.path.join(local_root, suffix.replace("/", os.sep))) if suffix else local_root
         local_path = os.path.normpath(os.path.join(local_dir, filename))
 
-        overwrite_mode = str(task.get("overwrite", "skip") or "skip").lower()
-        if overwrite_mode == "skip" and os.path.exists(local_path):
-            try:
-                if int(file_size or 0) > 0 and os.path.getsize(local_path) == int(file_size or 0):
-                    return {
-                        "status": "skip",
-                        "matched": 1,
-                        "downloaded": 0,
-                        "task": task_name,
-                        "local_path": local_path,
-                        "message": "文件已存在且大小一致",
-                    }
-            except OSError:
-                pass
+        if _existing_aux_file_is_current(local_path, file_size):
+            return {
+                "status": "skip",
+                "matched": 1,
+                "downloaded": 0,
+                "task": task_name,
+                "local_path": local_path,
+                "message": "文件已存在",
+            }
 
         drive_index = int(task.get("drive_index", 0) or 0)
         aux_download_mode = "cdn"
@@ -2077,7 +2134,7 @@ class StrmService:
         image_exts = _parse_exts(DEFAULT_IMAGE_EXTS)
         data_exts = _parse_exts(DEFAULT_DATA_EXTS)
 
-        logger.info(f"[STRM] 全量同步开始: {task_name} | {remote_path} -> {local_path} | 覆盖模式: {overwrite_mode}")
+        logger.info(f"[STRM] 全量同步开始: {task_name} | {remote_path} -> {local_path} | STRM覆盖模式: {overwrite_mode}")
 
         start_time = perf_counter()
 
@@ -2280,7 +2337,7 @@ class StrmService:
                             if local_path:
                                 folder_counter["aux"].add(os.path.dirname(local_path))
                                 stats.update(_snapshot_folder_counter(folder_counter))
-                            logger.debug(f"[STRM] 下载附属文件: {res[1]}")
+                            logger.trace(f"[STRM] 下载附属文件完成: {res[1]}")
                         elif res and res[0] == "fail":
                             stats["download_failed"] += 1
                             stats["failed"] += 1
@@ -2445,8 +2502,24 @@ class StrmService:
             if cancelled:
                 dl_executor.shutdown(wait=False, cancel_futures=True)
             else:
-                _collect_finished_downloads(block=True)
-                dl_executor.shutdown(wait=True, cancel_futures=False)
+                while len(completed_dl_futures) < len(dl_futures):
+                    if ACTIVE_TASKS.get(run_id, {}).get("cancel_requested"):
+                        cancelled = True
+                        cancel_event.set()
+                        break
+                    _collect_finished_downloads(block=False)
+                    _update_progress(
+                        run_id,
+                        f"STRM下载附属文件中: {task_name}",
+                        99,
+                        "running",
+                        detail=stats.copy(),
+                    )
+                    if len(completed_dl_futures) >= len(dl_futures):
+                        break
+                    time.sleep(1.0)
+                _collect_finished_downloads(block=False)
+                dl_executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
             if dl_retry_items and not cancelled:
                 logger.info(f"[STRM] 开始失败附属重试，共 {len(dl_retry_items)} 项")
@@ -2466,7 +2539,24 @@ class StrmService:
                 logger.info(f"[STRM] 失败附属重试完成: 成功 {retry_ok} | 失败 {retry_fail}")
 
             if download_tmdb_metadata and tmdb_plans and not cancelled:
-                _apply_tmdb_fallbacks(tmdb_plans, scraping_config, tmdb_api_key, stats, "全量", cancel_event)
+                def _update_tmdb_progress():
+                    _update_progress(
+                        run_id,
+                        f"STRM补齐缺失TMDb元数据中: {task_name}",
+                        99,
+                        "running",
+                        detail=stats.copy(),
+                    )
+
+                _apply_tmdb_fallbacks(
+                    tmdb_plans,
+                    scraping_config,
+                    tmdb_api_key,
+                    stats,
+                    "全量",
+                    cancel_event,
+                    _update_tmdb_progress,
+                )
 
             elapsed = perf_counter() - start_time
             stats["elapsed_seconds"] = elapsed

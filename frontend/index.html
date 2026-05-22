@@ -153,6 +153,9 @@
                 <button class="dock-topbar-btn dock-topbar-network-btn" @click="closeSystemHealth(); openNetworkConnectivity()" title="网络连通性测试">
                     <i class="fa-solid fa-network-wired" :class="{ 'fa-beat': networkConnectivity.loading || networkConnectivity.activeTargetId }"></i>
                 </button>
+                <button class="dock-topbar-btn" @click="openIdentifyTest" title="识别测试">
+                    <i class="fa-solid fa-bullseye"></i>
+                </button>
                 <button class="dock-topbar-btn" @click="openConsoleLog" title="容器日志">
                     <i class="fa-solid fa-terminal"></i>
                 </button>
@@ -183,7 +186,7 @@
                     <div v-else>
                         <div v-for="(task, id) in tasksState.activeTasks" :key="id" class="progress-item">
                             <div class="prog-info">
-                                <span class="prog-name">{{ task.name }}</span>
+                                <span class="prog-name">{{ formatActiveTaskTitle(task) }}</span>
                                 <div class="prog-meta">
                                     <span>{{ task.percent }}%</span>
                                     <i v-if="task.status === 'running'" class="fa-solid fa-circle-stop prog-stop-btn" title="停止任务" @click.stop="stopTask(id)">
@@ -211,6 +214,151 @@
             </div>
         </div>
 
+        <div v-if="identifyTest.visible" class="modal-mask modal-mask-elevated" @click.self="closeIdentifyTest">
+            <div class="modal-container identify-test-modal">
+                <div class="modal-header">
+                    <div class="modal-title-text"><i class="fa-solid fa-bullseye"></i> 识别测试</div>
+                    <button class="icon-btn" @click="closeIdentifyTest" :disabled="identifyTest.loading"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="modal-body identify-test-body">
+                    <div class="identify-test-searchbar">
+                        <div class="identify-test-field">
+                            <label>文件夹名</label>
+                            <input type="text"
+                                   v-model.trim="identifyTest.folder_name"
+                                   @keyup.enter="runIdentifyTest"
+                                   placeholder="填父级媒体文件夹名，可留空"
+                                   :disabled="identifyTest.loading">
+                        </div>
+                        <div class="identify-test-field">
+                            <label>文件名</label>
+                            <input type="text"
+                                   v-model.trim="identifyTest.file_name"
+                                   @keyup.enter="runIdentifyTest"
+                                   placeholder="填实际媒体文件名，可留空"
+                                   :disabled="identifyTest.loading">
+                        </div>
+                        <button class="btn btn-primary btn-nowrap" @click="runIdentifyTest" :disabled="identifyTest.loading">
+                            <i class="fa-solid" :class="identifyTest.loading ? 'fa-spinner fa-spin' : 'fa-magnifying-glass'"></i>
+                            开始识别
+                        </button>
+                    </div>
+
+                    <div v-if="identifyTest.error" class="identify-test-alert">
+                        <i class="fa-solid fa-circle-exclamation"></i>
+                        <span>{{ identifyTest.error }}</span>
+                    </div>
+
+                    <template v-if="identifyTest.result?.status === 'success'">
+                        <div class="identify-test-correction"
+                             v-if="(identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) && String(identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) !== String(identifyTest.result.result.tmdb_id)">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <div>
+                                <strong>已自动纠偏失效 TMDb ID</strong>
+                                <span>输入 ID {{ identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct }} 不可用，识别引擎已通过标题、年份和别名规则命中正确 ID {{ identifyTest.result.result.tmdb_id }}</span>
+                            </div>
+                        </div>
+                        <div class="identify-test-correction identify-test-validation"
+                             v-if="identifyTest.result.result.episode_validation && !identifyTest.result.result.episode_validation.ok">
+                            <i class="fa-solid fa-triangle-exclamation"></i>
+                            <div>
+                                <strong>季集校验失败</strong>
+                                <span>{{ identifyTest.result.result.episode_validation.message || 'TMDb 中不存在这个季集，实际整理会判定失败' }}</span>
+                            </div>
+                        </div>
+
+                        <div class="identify-test-result">
+                            <div class="identify-test-poster">
+                                <img v-if="identifyTest.result.result.poster_url" :src="identifyTest.result.result.poster_url" :alt="identifyTest.result.result.title" loading="lazy">
+                                <i v-else class="fa-solid fa-image"></i>
+                            </div>
+                            <div class="identify-test-main">
+                                <div class="identify-test-title-row">
+                                    <div>
+                                        <h3>{{ identifyTest.result.result.title }}</h3>
+                                        <div class="identify-test-original" v-if="identifyTest.result.result.original_title && identifyTest.result.result.original_title !== identifyTest.result.result.title">
+                                            {{ identifyTest.result.result.original_title }}
+                                        </div>
+                                    </div>
+                                    <span class="identify-test-type">{{ identifyTest.result.result.media_type_label }}</span>
+                                </div>
+                                <div class="identify-test-meta">
+                                    <span>{{ identifyTest.result.result.year || '未知年份' }}</span>
+                                    <span>TMDb {{ identifyTest.result.result.tmdb_id }}</span>
+                                    <span v-if="identifyTest.result.result.rating">{{ Number(identifyTest.result.result.rating || 0).toFixed(1) }} 分</span>
+                                    <span v-if="identifyTest.result.result.season">S{{ String(identifyTest.result.result.season).padStart(2, '0') }}<template v-if="identifyTest.result.result.episode">E{{ String(identifyTest.result.result.episode).padStart(2, '0') }}</template></span>
+                                </div>
+                                <div class="identify-test-tags" v-if="identifyTest.result.result.genres?.length || identifyTest.result.result.countries?.length">
+                                    <span v-for="genre in identifyTest.result.result.genres" :key="'genre-' + genre">{{ genre }}</span>
+                                    <span v-for="country in identifyTest.result.result.countries" :key="'country-' + country">{{ country }}</span>
+                                </div>
+                                <p class="identify-test-overview">{{ identifyTest.result.result.overview || '暂无简介' }}</p>
+                            </div>
+                        </div>
+
+                        <div class="identify-test-grid">
+                            <div class="identify-test-kv">
+                                <span>目标分类</span>
+                                <strong>{{ identifyTest.result.result.category_path || '其他' }}</strong>
+                            </div>
+                            <div class="identify-test-kv">
+                                <span>目标目录</span>
+                                <strong>{{ identifyTest.result.result.target_folder || identifyTest.result.result.target_base || '未配置' }}</strong>
+                            </div>
+                            <div class="identify-test-kv">
+                                <span>媒体文件夹</span>
+                                <strong>{{ identifyTest.result.result.folder_name || '-' }}</strong>
+                            </div>
+                            <div class="identify-test-kv" v-if="identifyTest.result.result.season_folder">
+                                <span>季度目录</span>
+                                <strong>{{ identifyTest.result.result.season_folder }}</strong>
+                            </div>
+                            <div class="identify-test-kv" v-if="identifyTest.result.result.file_name">
+                                <span>文件命名</span>
+                                <strong>{{ identifyTest.result.result.file_name }}</strong>
+                            </div>
+                            <div class="identify-test-kv">
+                                <span>解析标题</span>
+                                <strong>{{ identifyTest.result.parsed.title || '-' }}</strong>
+                            </div>
+                            <div class="identify-test-kv">
+                                <span>{{ (identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) && String(identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) !== String(identifyTest.result.result.tmdb_id) ? 'ID 智能纠偏' : '直写 ID' }}</span>
+                                <strong v-if="(identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) && String(identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct) !== String(identifyTest.result.result.tmdb_id)">
+                                    错误 ID {{ identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct }} -> 正确 ID {{ identifyTest.result.result.tmdb_id }}
+                                </strong>
+                                <strong v-else>{{ identifyTest.result.parsed.input_tmdb_id || identifyTest.result.parsed.tmdb_id_direct || '无' }}</strong>
+                            </div>
+                            <div class="identify-test-kv">
+                                <span>识别模式</span>
+                                <strong>{{ identifyTest.result.parsed.media_type === 'movie' ? '电影' : '剧集' }}</strong>
+                            </div>
+                        </div>
+
+                        <div class="identify-test-candidates" v-if="identifyTest.result.parsed.titles_to_try?.length">
+                            <span class="identify-test-subtitle">标题候选</span>
+                            <span v-for="title in identifyTest.result.parsed.titles_to_try" :key="title">{{ title }}</span>
+                        </div>
+                    </template>
+
+                    <div v-else-if="!identifyTest.loading" class="identify-test-empty">
+                        <i class="fa-solid fa-clapperboard"></i>
+                        <span>等待输入</span>
+                    </div>
+
+                    <div v-if="identifyTest.result?.attempts?.length" class="identify-test-attempts">
+                        <span class="identify-test-subtitle">识别尝试</span>
+                        <span v-for="attempt in identifyTest.result.attempts"
+                              :key="attempt.mode"
+                              class="identify-test-attempt"
+                              :class="{ ok: attempt.ok }">
+                            {{ attempt.mode === 'movie' ? '电影' : (attempt.mode === 'tv' ? '剧集' : '自动') }}
+                            <template v-if="attempt.tmdb_id"> · TMDb {{ attempt.tmdb_id }}</template>
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="main" :class="{ 'main-full-width': isImmersiveMode }">
             <!-- 移动端 Header (桌面端由 dock-topbar 替代) -->
             <div class="header" v-if="isMobile">
@@ -229,6 +377,10 @@
 
                     <button class="icon-btn icon-btn-network" @click="closeSystemHealth(); openNetworkConnectivity()" title="网络连通性测试">
                         <i class="fa-solid fa-network-wired" :class="{ 'fa-beat': networkConnectivity.loading || networkConnectivity.activeTargetId }"></i>
+                    </button>
+
+                    <button class="icon-btn" @click="openIdentifyTest" title="识别测试">
+                        <i class="fa-solid fa-bullseye"></i>
                     </button>
 
                     <button class="icon-btn" @click="openConsoleLog" title="查看后台容器日志">
@@ -255,9 +407,9 @@
                         <div v-else>
                             <div v-for="(task, id) in tasksState.activeTasks" :key="id" class="progress-item">
                                 <div class="prog-info">
-                                    <span class="prog-name">{{ task.name }}</span>
-                                    <div class="prog-meta">
-                                        <span>{{ task.percent }}%</span>
+                                <span class="prog-name">{{ formatActiveTaskTitle(task) }}</span>
+                                <div class="prog-meta">
+                                    <span>{{ task.percent }}%</span>
                                         <i v-if="task.status === 'running'" class="fa-solid fa-circle-stop prog-stop-btn" title="停止任务" @click.stop="stopTask(id)">
                                         </i>
                                     </div>
@@ -1841,13 +1993,18 @@
                                             <span>总计 {{ organizeProgress.detail.total || 0 }}</span>
                                             <span class="transfer-status-success">成功 {{ organizeProgress.detail.success || 0 }}</span>
                                             <span class="transfer-status-error">失败 {{ organizeProgress.detail.failed || 0 }}</span>
+                                            <span v-if="organizeProgress.detail.sha1_duplicate_skipped" class="transfer-status-info">SHA1重复 {{ organizeProgress.detail.sha1_duplicate_skipped || 0 }}</span>
+                                            <span v-if="organizeProgress.detail.wash_rejected_skipped" class="transfer-status-info">洗版未通过 {{ organizeProgress.detail.wash_rejected_skipped || 0 }}</span>
+                                            <span v-if="organizeProgress.detail.same_batch_duplicate_skipped" class="transfer-status-info">同批次重复 {{ organizeProgress.detail.same_batch_duplicate_skipped || 0 }}</span>
+                                            <span v-if="organizeProgress.detail.trailer_skipped" class="transfer-status-info">预告片 {{ organizeProgress.detail.trailer_skipped || 0 }}</span>
+                                            <span v-if="organizeProgress.detail.other_skipped" class="transfer-status-info">其他跳过 {{ organizeProgress.detail.other_skipped || 0 }}</span>
                                             <span v-if="organizeProgress.detail.strm" class="transfer-status-info">STRM {{ organizeProgress.detail.strm || 0 }}</span>
                                         </div>
                                     </div>
 
                                     <div v-if="organizeResult" class="organize-result">
                                         <div class="organize-result-row">
-                                            <i class="fa-solid" :class="organizeResult.status === 'success' ? 'fa-circle-check transfer-status-success' : 'fa-circle-xmark transfer-status-error'"></i>
+                                            <i class="fa-solid" :class="organizeResult.status === 'success' ? 'fa-circle-check transfer-status-success' : (organizeResult.status === 'error' ? 'fa-circle-xmark transfer-status-error' : 'fa-circle-exclamation transfer-status-warning')"></i>
                                             <span class="organize-result-message">{{ organizeResult.message }}</span>
                                         </div>
                                     </div>
@@ -1895,7 +2052,7 @@
                                 </div>
                             </div>
 
-                            <div class="server-grid-layout server-grid-layout-wide mb-30">
+                            <div class="server-grid-layout server-grid-layout-wide strm-task-grid">
                                 <div v-for="(task, idx) in strmConfig.sync_tasks" :key="idx" class="module-card">
                                     <div class="mc-header">
                                         <div class="mc-title">
@@ -1965,7 +2122,7 @@
                                                     <input type="checkbox" v-model="task.download_tmdb_metadata">
                                                     <span class="ios-slider"></span>
                                                 </label>
-                                                <span class="strm-task-meta-label">tmdb同步下载元数据</span>
+                                                <span class="strm-task-meta-label">补齐缺失的 TMDb 元数据</span>
                                             </div>
                                         </div>
                                     </div>
@@ -4556,9 +4713,8 @@
                                      class="log-entry-row" :title="log.message" @click="copyLogLine(log)">
                                     <span class="log-badge" :class="'log-badge-' + log.badgeClass">{{ log.level }}</span>
                                     <span class="log-time">{{ log.timestamp }}</span>
+                                    <span class="log-emoji" aria-hidden="true">{{ log.emoji }}</span>
                                     <span class="log-message">
-                                        <i class="fa-solid" :class="[log.icon, 'log-icon-' + log.statusClass]"></i>
-                                        <span class="log-emoji">{{ log.emoji }}</span>
                                         {{ log.message }}
                                     </span>
                                 </div>
