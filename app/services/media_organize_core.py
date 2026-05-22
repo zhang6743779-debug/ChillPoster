@@ -85,6 +85,7 @@ _MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
+_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 50000
 
 
 _WASH_CODEC_MULTIPLIERS = {
@@ -1189,6 +1190,53 @@ async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries:
             await asyncio.sleep(1)
 
 
+async def _run_post_organize_followup(drive_index: int, source_cid: str):
+    try:
+        snapshot = await _scan_source_poll_snapshot(drive_index, source_cid)
+        source_tree_entries = list(snapshot.get("tree_entries", []) or [])
+        entry_count = int(snapshot.get("entry_count", 0) or 0)
+        remaining_video_count = sum(
+            1
+            for entry in _iter_115_media_entries_from_tree(source_tree_entries)
+            if entry.get("kind") == "video"
+        )
+        if remaining_video_count > 0:
+            logger.info(f"[MediaOrganize] 源目录仍有视频残留，继续整理: 视频 {remaining_video_count} 个，条目 {entry_count} 个")
+            run_id, status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
+            if run_id:
+                logger.info(f"[MediaOrganize] 残留视频补跑完成: run_id={run_id} 状态={status}")
+            elif status == "organize_running":
+                logger.info("[MediaOrganize] 残留视频补跑跳过，已有整理任务正在运行")
+            else:
+                logger.warning(f"[MediaOrganize] 残留视频补跑未启动: {status or '未知原因'}")
+            return
+
+        logger.info(f"[MediaOrganize] 源目录已无视频残留，开始清理非视频残留: 条目 {entry_count} 个")
+        client = _get_115_client(drive_index)
+        await _cleanup_empty_source_dirs(client, str(source_cid))
+    except Exception as e:
+        logger.warning(f"[MediaOrganize] 整理结束收尾失败: {e}", exc_info=True)
+
+
+def _schedule_post_organize_followup(drive_index: int, source_cid: str):
+    main_loop = _state._main_event_loop
+    done_event = _state._organize_done_event
+
+    async def _runner():
+        if done_event:
+            await done_event.wait()
+        await asyncio.sleep(0.5)
+        await _run_post_organize_followup(drive_index, str(source_cid))
+
+    if main_loop and not main_loop.is_closed() and main_loop.is_running():
+        asyncio.run_coroutine_threadsafe(_runner(), main_loop)
+    else:
+        threading.Thread(
+            target=lambda: asyncio.run(_run_post_organize_followup(drive_index, str(source_cid))),
+            daemon=True,
+        ).start()
+
+
 def schedule_auto_organize_after_transfer(drive_index: int = 0, source: str = "", reason: str = "") -> bool:
     """Schedule media organize on the FastAPI main loop after a successful transfer."""
     main_loop = _state._main_event_loop
@@ -1225,6 +1273,14 @@ def _schedule_or_refresh_source_poll(drive_index: int, source_dir: str, target_d
     session_key = _build_source_poll_session_key(drive_index, source_cid)
     now = _time.time()
     desired_phase = "post_run" if str(phase or "") == "post_run" else "pre_run"
+    if desired_phase == "post_run":
+        _schedule_post_organize_followup(drive_index, str(source_cid))
+        return
+    with _organize_trigger_lock:
+        organize_running = bool(_state._organize_running)
+    if organize_running:
+        logger.info(f"[115Life] 整理任务正在运行，源目录事件交给整理结束收尾复查: key={session_key}")
+        return
     with _source_poll_lock:
         session = _state._source_poll_sessions.get(session_key)
         if session is None:
@@ -1314,9 +1370,14 @@ async def _run_source_poll_loop():
                     if run_id:
                         current["active_run_id"] = run_id
                         current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
+                        with _source_poll_lock:
+                            _state._source_poll_sessions.pop(session_key, None)
+                        logger.info(f"[115Life] 源目录事件整理完成，后续交给整理结束收尾复查: key={session_key}")
+                        continue
                     elif run_status == "organize_running":
-                        current["last_event_at"] = _time.time()
-                        logger.info(f"[115Life] 源目录事件不排队补跑，等待现有整理结束后再检查: key={session_key}")
+                        with _source_poll_lock:
+                            _state._source_poll_sessions.pop(session_key, None)
+                        logger.info(f"[115Life] 整理任务正在运行，源目录事件交给整理结束收尾复查: key={session_key}")
                         continue
                     current["phase"] = "post_run"
                     current["last_scan_signature"] = ""
@@ -1522,11 +1583,6 @@ async def _run_organize_async(run_id: str, req):
                 _flush_pending_media_server_refreshes()
             await asyncio.sleep(1)
             try:
-                await _cleanup_empty_source_dirs(client, str(source_cid))
-            except Exception as e:
-                logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
-
-            try:
                 await _flush_pending_failed_moves()
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 统一移动失败文件失败: {e}")
@@ -1536,17 +1592,7 @@ async def _run_organize_async(run_id: str, req):
             except Exception as e:
                 logger.warning(f"[Wash] 统一移动洗版未通过文件失败: {e}")
 
-            await _wait_source_tree_stable(drive_index, str(source_cid), label)
-
-            source_dir = str(config_data.get("source_name", "") or "")
-            target_dir = str(config_data.get("target_name", "") or "")
-            _schedule_or_refresh_source_poll(
-                drive_index=drive_index,
-                source_dir=source_dir,
-                target_dir=target_dir,
-                source_cid=str(source_cid),
-                phase="post_run",
-            )
+            _schedule_post_organize_followup(drive_index, str(source_cid))
 
             try:
                 from app.services.emby_library_cache import schedule_discover_index_refresh
@@ -2852,11 +2898,7 @@ async def _run_organize_async(run_id: str, req):
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
-            try:
-                await _cleanup_empty_source_dirs(client, str(source_cid))
-            except Exception as e:
-                logger.warning(f"[MediaOrganize] 清理空文件夹失败: {e}")
-            await _wait_source_tree_stable(drive_index, str(source_cid), "无视频清理后")
+            _schedule_post_organize_followup(drive_index, str(source_cid))
             _clear_streaming_progress_throttle(run_id)
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
             return
@@ -4867,6 +4909,20 @@ def _build_source_cleanup_delete_queue(client, source_cid: int) -> list[tuple[st
     return to_delete
 
 
+def _collapse_source_cleanup_delete_queue(items: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
+    """只保留最外层待删目录；目录已覆盖的子项不再提交删除。"""
+    collapsed: list[tuple[str, str, bool]] = []
+    covered_dirs: list[str] = []
+    for item_id, path, is_dir in sorted(items or [], key=lambda value: value[1].count("/")):
+        normalized_path = _normalize_source_cleanup_relpath(path)
+        if any(normalized_path == parent or normalized_path.startswith(parent + "/") for parent in covered_dirs):
+            continue
+        collapsed.append((item_id, normalized_path, is_dir))
+        if is_dir and normalized_path:
+            covered_dirs.append(normalized_path)
+    return collapsed
+
+
 async def _cleanup_empty_source_dirs(client, source_cid: str):
     """清理源目录下不包含视频的子目录，并按旧语义处理根目录下的非视频文件。"""
     try:
@@ -4876,7 +4932,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                to_delete = _build_source_cleanup_delete_queue(client, int(source_cid))
+                to_delete = await asyncio.to_thread(_build_source_cleanup_delete_queue, client, int(source_cid))
                 if attempt > 1:
                     logger.info(f"[MediaOrganize] 清理扫描重试成功: source_cid={source_cid} attempt={attempt}")
                 break
@@ -4897,17 +4953,17 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
         if to_delete is None:
             return
 
+        to_delete = _collapse_source_cleanup_delete_queue(to_delete)
         files_count = sum(1 for _, _, is_dir in to_delete if not is_dir)
         dirs_count = sum(1 for _, _, is_dir in to_delete if is_dir)
         logger.info(f"[MediaOrganize] 清理扫描完成: 待删文件 {files_count} 个，目录 {dirs_count} 个")
         if not to_delete:
             return
 
-        # 按路径深度排序（深的先删，同深度文件先于目录）
-        to_delete.sort(key=lambda x: (x[1].count("/"), not x[2]), reverse=True)
-
         deleted_files = 0
         deleted_dirs = 0
+        failed_files = 0
+        failed_dirs = 0
         def _is_delete_pending_error(err) -> bool:
             err_str = str(err)
             return "操作尚未执行完成" in err_str or "990009" in err_str
@@ -4919,7 +4975,8 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                 if delay > 0:
                     await asyncio.sleep(delay)
                 try:
-                    resp = _run_115_write_request_sync(
+                    resp = await asyncio.to_thread(
+                        _run_115_write_request_sync,
                         client,
                         f"清理源目录{log_label}",
                         lambda write_client: write_client.fs_delete(ids, async_=False),
@@ -4937,42 +4994,33 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                     logger.info(f"[MediaOrganize] 删除任务仍在执行，等待后重试: {log_label} attempt={attempt}")
             return False, last_error
 
-        async def _flush_batch(items: list[tuple[str, str, bool]]):
-            nonlocal deleted_files, deleted_dirs
+        def _chunk_items(items: list[tuple[str, str, bool]], chunk_size: int):
+            for idx in range(0, len(items), chunk_size):
+                yield items[idx:idx + chunk_size]
+
+        async def _flush_batches(items: list[tuple[str, str, bool]]):
+            nonlocal deleted_files, deleted_dirs, failed_files, failed_dirs
             if not items:
                 return
 
-            batch_ids = [int(did) for did, _, _ in items]
-            ok, error = await _delete_ids_with_retry(batch_ids, f"batch size={len(items)}")
-            if ok:
-                deleted_dirs += sum(1 for _, _, is_dir in items if is_dir)
-                deleted_files += sum(1 for _, _, is_dir in items if not is_dir)
-                logger.info(f"[MediaOrganize] 批量删除成功: {len(items)} 项")
-            else:
-                logger.warning(f"[MediaOrganize] 批量删除失败，回退逐条处理: {error}")
-                for did, path, is_dir in items:
-                    label = "目录" if is_dir else "文件"
-                    ok, inner_error = await _delete_ids_with_retry([int(did)], f"{label}:{path}")
-                    if ok:
-                        if is_dir:
-                            deleted_dirs += 1
-                        else:
-                            deleted_files += 1
-                        logger.debug(f"[MediaOrganize] 删除{label}: {path}")
-                        continue
+            batches = list(_chunk_items(items, _SOURCE_CLEANUP_DELETE_BATCH_LIMIT))
+            for batch_index, batch in enumerate(batches, start=1):
+                batch_ids = [int(did) for did, _, _ in batch]
+                batch_files = sum(1 for _, _, is_dir in batch if not is_dir)
+                batch_dirs = sum(1 for _, _, is_dir in batch if is_dir)
+                log_label = f"批次 {batch_index}/{len(batches)}，{len(batch)} 项"
+                ok, error = await _delete_ids_with_retry(batch_ids, log_label)
+                if ok:
+                    deleted_dirs += batch_dirs
+                    deleted_files += batch_files
+                    logger.info(f"[MediaOrganize] 批量删除成功: {log_label}")
+                else:
+                    failed_dirs += batch_dirs
+                    failed_files += batch_files
+                    logger.warning(f"[MediaOrganize] 批量删除失败: {log_label} | {error}")
+                await asyncio.sleep(1)
 
-                    err_str = str(inner_error)
-                    if "目录不存在" in err_str or "文件不存在" in err_str:
-                        if is_dir:
-                            deleted_dirs += 1
-                        else:
-                            deleted_files += 1
-                        logger.debug(f"[MediaOrganize] 删除{label}: {path}")
-                    else:
-                        logger.warning(f"[MediaOrganize] 删除{label}失败 {path}: {inner_error}")
-            await asyncio.sleep(1)
-
-        await _flush_batch(to_delete)
+        await _flush_batches(to_delete)
 
         parts = []
         if deleted_files:
@@ -4981,5 +5029,12 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
             parts.append(f"{deleted_dirs} 个目录")
         if parts:
             logger.info(f"[MediaOrganize] 清理完成，共删除 {'、'.join(parts)}")
+        if failed_files or failed_dirs:
+            failed_parts = []
+            if failed_files:
+                failed_parts.append(f"{failed_files} 个文件")
+            if failed_dirs:
+                failed_parts.append(f"{failed_dirs} 个目录")
+            logger.warning(f"[MediaOrganize] 清理未完成，仍有 {'、'.join(failed_parts)} 删除失败")
     except Exception as e:
         logger.error(f"[MediaOrganize] 清理空文件夹失败: {e}", exc_info=True)
