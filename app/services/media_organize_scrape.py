@@ -66,8 +66,6 @@ def _begin_metadata_progress_log(title_for_log: str):
     with _METADATA_PROGRESS_LOG_LOCK:
         count = int(_METADATA_PROGRESS_LOG_COUNTS.get(title, 0) or 0) + 1
         _METADATA_PROGRESS_LOG_COUNTS[title] = count
-        if count == 1:
-            logger.info(f"[MediaOrganize] 正在进行元数据已写入本地媒体库: {title}")
 
 
 def _end_metadata_progress_log(title_for_log: str):
@@ -78,9 +76,31 @@ def _end_metadata_progress_log(title_for_log: str):
         current = int(_METADATA_PROGRESS_LOG_COUNTS.get(title, 0) or 0)
         if current <= 1:
             _METADATA_PROGRESS_LOG_COUNTS.pop(title, None)
-            logger.info(f"[MediaOrganize] 已完成元数据已写入本地媒体库: {title}")
         else:
             _METADATA_PROGRESS_LOG_COUNTS[title] = current - 1
+
+
+def _metadata_done_label(tmdb_data: Optional[dict] = None, folder_name: str = "", fallback_path: str = "") -> str:
+    label = str(folder_name or "").strip()
+    if not label and fallback_path:
+        path = Path(str(fallback_path))
+        label = path.parent.name or path.stem
+    if label:
+        return label
+
+    data = tmdb_data or {}
+    title = str(data.get("title") or data.get("name") or "").strip()
+    year = str(data.get("release_date") or data.get("first_air_date") or "")[:4]
+    tmdb_id = str(data.get("id") or "").strip()
+    if title and year and tmdb_id:
+        return f"{title} ({year}) {{tmdb-{tmdb_id}}}"
+    if title and year:
+        return f"{title} ({year})"
+    return title or "未知标题"
+
+
+def _log_metadata_download_done(label: str):
+    logger.info(f"[MediaOrganize] {label} 元数据下载完成")
 
 
 def _noop_transfer(src: str, dst: str):
@@ -136,24 +156,25 @@ def _get_image_session():
 
 def _download_image(url: str, path: str):
     from core.configs import global_config
+    global_config.load()
     started_at = perf_counter()
     proxies = None
     if global_config.proxy_url:
         proxies = {"http": global_config.proxy_url, "https": global_config.proxy_url}
     last_error = None
-    logger.debug(f"[MediaOrganize] 图片下载开始: {path}")
+    logger.trace(f"[MediaOrganize] 图片下载开始: {path}")
     for attempt in range(_TMDB_IMAGE_DOWNLOAD_RETRIES + 1):
         try:
             with _TMDB_IMAGE_DOWNLOAD_SEMAPHORE:
                 resp = _get_image_session().get(url, timeout=_TMDB_IMAGE_DOWNLOAD_TIMEOUT, proxies=proxies)
             resp.raise_for_status()
             _atomic_write_bytes(path, resp.content)
-            logger.debug(f"[MediaOrganize] 图片下载完成: {path} | 大小:{len(resp.content)} | 尝试:{attempt + 1} | 耗时:{perf_counter() - started_at:.2f}s")
+            logger.trace(f"[MediaOrganize] 图片下载完成: {path} | 大小:{len(resp.content)} | 尝试:{attempt + 1} | 耗时:{perf_counter() - started_at:.2f}s")
             return
         except Exception as e:
             last_error = e
             if attempt < _TMDB_IMAGE_DOWNLOAD_RETRIES:
-                logger.debug(f"[MediaOrganize] 图片下载重试: {path} | 第{attempt + 1}次失败:{e}")
+                logger.trace(f"[MediaOrganize] 图片下载重试: {path} | 第{attempt + 1}次失败:{e}")
                 continue
             break
     logger.warning(f"[MediaOrganize] 图片下载失败 {url}: {last_error} | 路径:{path} | 耗时:{perf_counter() - started_at:.2f}s")
@@ -260,6 +281,8 @@ def _process_metadata_task(config_data: dict, meta_ctx: dict) -> list:
             category_path=meta_ctx.get("category_path", ""),
             nfo_stem=meta_ctx.get("nfo_stem", ""),
         )
+        if generated:
+            _log_metadata_download_done(_metadata_done_label(tmdb_data, meta_ctx.get("folder_name", "")))
         return generated
 
     if media_type == "tv":
@@ -296,6 +319,9 @@ def _process_metadata_task(config_data: dict, meta_ctx: dict) -> list:
                 nfo_stem=meta_ctx.get("nfo_stem", ""),
                 category_path=category_path,
             )
+
+        if generated:
+            _log_metadata_download_done(_metadata_done_label(tmdb_data, folder_name))
 
     return generated
 
@@ -539,6 +565,7 @@ def _scrape_event_metadata(
             return False
 
         from core.configs import global_config
+        global_config.load()
         api_key = global_config.tmdb_key
         if not api_key:
             return False
@@ -561,7 +588,7 @@ def _scrape_event_metadata(
         if not target_folder:
             return False
 
-        _scrape_to_strm_local(
+        generated = _scrape_to_strm_local(
             tmdb_data=tmdb_data,
             media_type="movie" if parsed["media_type"] == "movie" else "episode",
             target_name=target_name,
@@ -573,6 +600,8 @@ def _scrape_event_metadata(
             nfo_stem=os.path.splitext(file_name)[0],
             category_path=category_path,
         )
+        if generated:
+            _log_metadata_download_done(_metadata_done_label(tmdb_data, target_folder))
         return True
     except Exception as e:
         logger.error(f"[115Life] 事件元数据刮削失败 {file_name}: {e}")
@@ -716,7 +745,7 @@ def scrape_tmdb_metadata_for_strm_local_file(local_file_path: str, tmdb_data: di
     if not local_file_path:
         return []
 
-    logger.debug(
+    logger.trace(
         f"[MediaOrganize] STRM本地元数据刮削开始: {local_file_path} | 类型:{media_type} | "
         f"季:{season_number} 集:{episode_number}"
     )
@@ -741,10 +770,12 @@ def scrape_tmdb_metadata_for_strm_local_file(local_file_path: str, tmdb_data: di
             video_stem=local_file.stem,
         )
         generated = result.metadata_files if result.success else []
-        logger.debug(
+        logger.trace(
             f"[MediaOrganize] STRM电影元数据刮削完成: {local_file_path} | 生成:{len(generated)} | "
             f"耗时:{perf_counter() - movie_started:.2f}s | 总耗时:{perf_counter() - started_at:.2f}s"
         )
+        if generated:
+            _log_metadata_download_done(_metadata_done_label(tmdb_data, fallback_path=local_file_path))
         return generated
 
     series_dir, season_dir = _derive_strm_tv_dirs(local_file_path)
@@ -759,7 +790,7 @@ def scrape_tmdb_metadata_for_strm_local_file(local_file_path: str, tmdb_data: di
     )
     if root_result.success:
         generated.extend(root_result.metadata_files)
-    logger.debug(
+    logger.trace(
         f"[MediaOrganize] STRM剧集根元数据刮削完成: {series_dir} | 生成:{len(root_result.metadata_files) if root_result.success else 0} | "
         f"耗时:{perf_counter() - root_started:.2f}s"
     )
@@ -778,7 +809,7 @@ def scrape_tmdb_metadata_for_strm_local_file(local_file_path: str, tmdb_data: di
         )
         if season_result.success:
             generated.extend(season_result.metadata_files)
-        logger.debug(
+        logger.trace(
             f"[MediaOrganize] STRM季元数据刮削完成: {season_dir} | 生成:{len(season_result.metadata_files) if season_result.success else 0} | "
             f"耗时:{perf_counter() - season_started:.2f}s"
         )
@@ -798,13 +829,15 @@ def scrape_tmdb_metadata_for_strm_local_file(local_file_path: str, tmdb_data: di
         )
         if episode_result.success:
             generated.extend(episode_result.metadata_files)
-        logger.debug(
+        logger.trace(
             f"[MediaOrganize] STRM单集元数据刮削完成: {local_file_path} | 生成:{len(episode_result.metadata_files) if episode_result.success else 0} | "
             f"耗时:{perf_counter() - episode_started:.2f}s"
         )
 
-    logger.debug(
+    logger.trace(
         f"[MediaOrganize] STRM本地元数据刮削完成: {local_file_path} | 生成:{len(generated)} | "
         f"总耗时:{perf_counter() - started_at:.2f}s"
     )
+    if generated:
+        _log_metadata_download_done(_metadata_done_label(tmdb_data, fallback_path=local_file_path))
     return generated

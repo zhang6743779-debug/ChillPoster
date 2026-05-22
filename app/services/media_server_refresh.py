@@ -213,7 +213,7 @@ class MediaServerRefresh:
         if not items:
             return
 
-        logger.info(f"[MediaServerRefresh] 立即刷新媒体库: {len(items)} 个路径")
+        logger.trace(f"[MediaServerRefresh] 立即刷新媒体库: {len(items)} 个路径")
         self._refresh_items(items)
 
     def stop_service(self):

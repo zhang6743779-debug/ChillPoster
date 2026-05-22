@@ -1398,7 +1398,7 @@ async def _run_organize_async(run_id: str, req):
             if not payloads_to_flush:
                 return 0
         log_prefix = "分组完成后立即触发媒体库刷新" if immediate else "元数据任务完成后触发媒体库刷新"
-        logger.info(f"[MediaOrganize] {log_prefix}: {len(payloads_to_flush)} 个路径")
+        logger.trace(f"[MediaOrganize] {log_prefix}: {len(payloads_to_flush)} 个路径")
         if immediate:
             threading.Thread(
                 target=media_server_refresh.refresh_immediately,
@@ -1511,6 +1511,7 @@ async def _run_organize_async(run_id: str, req):
             logger.warning(f"[MediaOrganize] 未命中媒体库缓存，当前整理将跳过缓存排重: task={library_task_key}")
 
         from core.configs import global_config
+        global_config.load()
         api_key = global_config.tmdb_key
         if not api_key:
             _clear_streaming_progress_throttle(run_id)
@@ -1657,7 +1658,6 @@ async def _run_organize_async(run_id: str, req):
             ffprobe_batch_segment_samples: dict = {}
             ffprobe_name_conflict_samples: dict = {}
             ffprobe_name_conflict_accepted: dict[tuple, set[str]] = {}
-            ffprobe_stats = {"sample": 0, "anomaly": 0, "cache": 0, "reuse": 0, "batch_cache": 0, "mismatch": 0, "full_probe": 0, "segment": 0, "name_conflict": 0}
 
             def _record_ffprobe_name_conflict(ffprobe_batch_key: tuple, sampled_profile: dict, current_size: int, file_name: str, reason: str, base_profile: dict | None = None, base_sizes: list[int] | None = None) -> None:
                 conflict_sample_key = (ffprobe_batch_key, reason)
@@ -1674,7 +1674,6 @@ async def _run_organize_async(run_id: str, req):
                 conflict_state, conflict_reset = _record_ffprobe_segment_sample(conflict_state, sampled_profile, current_size)
                 ffprobe_name_conflict_samples[conflict_sample_key] = conflict_state
                 if conflict_reset:
-                    ffprobe_stats["mismatch"] += 1
                     logger.debug(f"[MediaOrganize] FFPROBE命名冲突样本重置: {file_name} | batch={ffprobe_batch_key} | 原因={reason}")
                 conflict_profile = conflict_state.get("profile") or {}
                 conflict_sample_count = int(conflict_profile.get("sample_count", 0) or 0)
@@ -1685,7 +1684,6 @@ async def _run_organize_async(run_id: str, req):
                     accepted_reasons.add(reason)
                     _set_cached_ffprobe_batch_profile(ffprobe_batch_key, conflict_profile, ignored_name_conflicts=sorted(accepted_reasons))
                     ffprobe_name_conflict_samples.pop(conflict_sample_key, None)
-                    ffprobe_stats["name_conflict"] += 1
                     logger.debug(f"[MediaOrganize] FFPROBE命名冲突确认: {file_name} | batch={ffprobe_batch_key} | 样本数={conflict_sample_count} | 原因={reason}")
                 else:
                     logger.debug(f"[MediaOrganize] FFPROBE命名冲突采样: {file_name} | batch={ffprobe_batch_key} | 样本数={conflict_sample_count}/{_FFPROBE_BATCH_SAMPLE_LIMIT} | 原因={reason}")
@@ -1695,7 +1693,6 @@ async def _run_organize_async(run_id: str, req):
                 segment_state, segment_reset = _record_ffprobe_segment_sample(segment_state, sampled_profile, current_size)
                 ffprobe_batch_segment_samples[ffprobe_batch_key] = segment_state
                 if segment_reset:
-                    ffprobe_stats["mismatch"] += 1
                     logger.debug(f"[MediaOrganize] FFPROBE分段样本重置: {file_name} | batch={ffprobe_batch_key}")
                 segment_profile = segment_state.get("profile") or {}
                 segment_sample_count = int(segment_profile.get("sample_count", 0) or 0)
@@ -1704,7 +1701,6 @@ async def _run_organize_async(run_id: str, req):
                     ffprobe_batch_sizes[ffprobe_batch_key] = list(segment_state.get("sizes") or [])
                     _set_cached_ffprobe_batch_profile(ffprobe_batch_key, segment_profile)
                     ffprobe_batch_segment_samples.pop(ffprobe_batch_key, None)
-                    ffprobe_stats["segment"] += 1
                     logger.debug(f"[MediaOrganize] FFPROBE分段样本切换: {file_name} | batch={ffprobe_batch_key} | 样本数={segment_sample_count}")
                 else:
                     source_label = "缓存" if from_cache else "探测"
@@ -1812,7 +1808,6 @@ async def _run_organize_async(run_id: str, req):
                         probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
                         if probe_fields:
                             variables = _merge_probe_fields_into_variables(variables, probe_fields)
-                        ffprobe_stats["full_probe"] += 1
                     elif use_smart_ffprobe_mode:
                         ffprobe_batch_key = _build_ffprobe_batch_key(tmdb_id, parsed, file_item, ext)
                         current_size = int(file_item.get("size", 0) or 0)
@@ -1826,23 +1821,19 @@ async def _run_organize_async(run_id: str, req):
                                 cached_ignored_name_conflicts = set(disk_batch_profile.get("_ignored_name_conflicts") or [])
                                 if cached_ignored_name_conflicts:
                                     ffprobe_name_conflict_accepted[ffprobe_batch_key] = cached_ignored_name_conflicts
-                                ffprobe_stats["batch_cache"] += 1
                         ignored_name_conflicts = ffprobe_name_conflict_accepted.get(ffprobe_batch_key, set())
                         is_segment_sampling = ffprobe_batch_key in ffprobe_batch_segment_samples
                         cached_probe = _get_cached_ffprobe_fields(file_item)
                         if cached_probe:
                             variables = _merge_probe_fields_into_variables(variables, cached_probe)
-                            ffprobe_stats["cache"] += 1
                             sampled_profile = _make_ffprobe_sample_profile(cached_probe, ext)
                             if is_segment_sampling:
                                 _record_ffprobe_segment(ffprobe_batch_key, sampled_profile, current_size, file_name, "segment_sampling", from_cache=True)
                             elif batch_profile:
                                 is_anomaly, anomaly_reason = _is_ffprobe_anomaly(file_item, parsed, batch_profile, batch_sizes, ignored_name_conflicts=ignored_name_conflicts)
                                 if _is_ffprobe_size_anomaly_reason(anomaly_reason):
-                                    ffprobe_stats["anomaly"] += 1
                                     _record_ffprobe_segment(ffprobe_batch_key, sampled_profile, current_size, file_name, anomaly_reason, from_cache=True)
                                 elif _is_ffprobe_name_conflict_reason(anomaly_reason):
-                                    ffprobe_stats["anomaly"] += 1
                                     _record_ffprobe_name_conflict(ffprobe_batch_key, sampled_profile, current_size, file_name, anomaly_reason, batch_profile, batch_sizes)
                                 elif not is_anomaly:
                                     _append_ffprobe_batch_size(batch_sizes, current_size)
@@ -1852,7 +1843,6 @@ async def _run_organize_async(run_id: str, req):
                             if batch_profile and not should_probe:
                                 variables = _merge_probe_fields_into_variables(variables, batch_profile)
                                 _append_ffprobe_batch_size(batch_sizes, current_size)
-                                ffprobe_stats["reuse"] += 1
                             else:
                                 pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
                                 direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
@@ -1861,13 +1851,11 @@ async def _run_organize_async(run_id: str, req):
                                     variables = _merge_probe_fields_into_variables(variables, probe_fields)
                                     sampled_profile = _make_ffprobe_sample_profile(probe_fields, ext)
                                     if is_segment_sampling:
-                                        ffprobe_stats["sample"] += 1
                                         _record_ffprobe_segment(ffprobe_batch_key, sampled_profile, current_size, file_name, "segment_sampling")
                                     elif batch_profile is None:
                                         ffprobe_batch_profiles[ffprobe_batch_key] = sampled_profile
                                         _append_ffprobe_batch_size(batch_sizes, current_size)
                                         _set_cached_ffprobe_batch_profile(ffprobe_batch_key, sampled_profile)
-                                        ffprobe_stats["sample"] += 1
                                         logger.debug(f"[MediaOrganize] FFPROBE样本探测: {file_name} | batch={ffprobe_batch_key}")
                                     else:
                                         sample_count = int((batch_profile or {}).get("sample_count", 0) or 0)
@@ -1880,25 +1868,18 @@ async def _run_organize_async(run_id: str, req):
                                                 ffprobe_batch_profiles[ffprobe_batch_key] = merged_profile
                                                 _append_ffprobe_batch_size(batch_sizes, current_size)
                                                 _set_cached_ffprobe_batch_profile(ffprobe_batch_key, merged_profile)
-                                                ffprobe_stats["sample"] += 1
                                                 logger.debug(f"[MediaOrganize] FFPROBE补充样本: {file_name} | batch={ffprobe_batch_key} | 样本数={sample_count + 1}")
                                             else:
-                                                ffprobe_stats["mismatch"] += 1
-                                                ffprobe_stats["anomaly"] += 1
                                                 logger.debug(f"[MediaOrganize] FFPROBE样本不一致: {file_name} | batch={ffprobe_batch_key}")
                                         elif _is_ffprobe_size_anomaly_reason(anomaly_reason):
-                                            ffprobe_stats["anomaly"] += 1
                                             _record_ffprobe_segment(ffprobe_batch_key, sampled_profile, current_size, file_name, anomaly_reason)
                                         elif _is_ffprobe_name_conflict_reason(anomaly_reason):
-                                            ffprobe_stats["anomaly"] += 1
                                             _record_ffprobe_name_conflict(ffprobe_batch_key, sampled_profile, current_size, file_name, anomaly_reason, batch_profile, batch_sizes)
                                         else:
-                                            ffprobe_stats["anomaly"] += 1
                                             logger.debug(f"[MediaOrganize] FFPROBE异常探测: {file_name} | 原因={anomaly_reason}")
                                 elif batch_profile and not is_anomaly and not is_segment_sampling:
                                     variables = _merge_probe_fields_into_variables(variables, batch_profile)
                                     _append_ffprobe_batch_size(batch_sizes, current_size)
-                                    ffprobe_stats["reuse"] += 1
 
                     # 二级分类：计算有效目标目录
                     category_cache_key = (str(tmdb_id), media_type)
@@ -2320,10 +2301,6 @@ async def _run_organize_async(run_id: str, req):
                         elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
                         library_location=_library_location,
                     ))
-
-            logger.debug(
-                f"[MediaOrganize] FFPROBE统计: 全量探测={ffprobe_stats['full_probe']} 样本={ffprobe_stats['sample']} 异常={ffprobe_stats['anomaly']} 文件缓存命中={ffprobe_stats['cache']} 批次缓存命中={ffprobe_stats['batch_cache']} 批次复用={ffprobe_stats['reuse']} 样本不一致={ffprobe_stats['mismatch']} 分段切换={ffprobe_stats['segment']} 命名冲突确认={ffprobe_stats['name_conflict']}"
-            )
 
             # 本组整理完：失败文件先暂存，整理收尾清理空目录后再统一移动。
             if group_failed and has_failed_dir and failed_dir_cid:
@@ -3857,7 +3834,7 @@ def create_life_event_callback(
             new_remote_path = str(file_path or "") or cached_rename_path
             new_name = str(file_name or os.path.basename(new_remote_path) or cached_rename_item.get("name", "") or "")
 
-            logger.debug(f"[115Life] rename事件通过file_id命中媒体库缓存: file_id={file_id}, file={file_name}")
+            logger.trace(f"[115Life] rename事件通过file_id命中媒体库缓存: file_id={file_id}, file={file_name}")
 
             try:
                 from app.services.strm_service import strm_service
@@ -3908,7 +3885,7 @@ def create_life_event_callback(
             if not cached_delete_item:
                 return
 
-            logger.debug(f"[115Life] 删除事件通过file_id命中媒体库缓存: file_id={file_id}, file={file_name}")
+            logger.trace(f"[115Life] 删除事件通过file_id命中媒体库缓存: file_id={file_id}, file={file_name}")
             cached_delete_path = str(cached_delete_item.get("path", "") or "")
             cached_is_dir = bool(cached_delete_item.get("is_dir"))
 

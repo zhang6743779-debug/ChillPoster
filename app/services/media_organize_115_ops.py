@@ -146,9 +146,9 @@ def _mkdir_115_dir(client, parent_cid: str, name: str, task_key: str = "", dir_p
         cid, pickcode, cache_match = _find_cached_dir(task_key, parent_id, name, normalized_dir_path)
         if cid:
             if cache_match == "path":
-                logger.debug(f"[CategoryDir] 创建前命中缓存(path): path={normalized_dir_path}, cid={cid}")
+                logger.trace(f"[CategoryDir] 创建前命中缓存(path): path={normalized_dir_path}, cid={cid}")
             else:
-                logger.debug(f"[CategoryDir] 创建前命中缓存(parent+name): parent={parent_cid}, name={name}, cid={cid}")
+                logger.trace(f"[CategoryDir] 创建前命中缓存(parent+name): parent={parent_cid}, name={name}, cid={cid}")
             return str(cid), str(pickcode or "")
 
         resp = _run_115_write_request_sync(
@@ -210,7 +210,7 @@ def _ensure_115_dir_chain_cached(client, base_cid: str, category_path: str,
     if dir_chain_cache is not None:
         cached_cid = str(dir_chain_cache.get(cache_key, "") or "")
         if cached_cid:
-            logger.debug(f"[CategoryDir] 目录链命中任务缓存: {normalized_category_path} (cid={cached_cid})")
+            logger.trace(f"[CategoryDir] 目录链命中任务缓存: {normalized_category_path} (cid={cached_cid})")
             return cached_cid
 
     current_parent_cid = str(base_cid)

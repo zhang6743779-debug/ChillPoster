@@ -292,7 +292,7 @@ class Drive115Service:
         if cache_key in self._url_cache and not (enable_rapid and is_busy):
             if cache_key not in self._url_cache_hit_log_dedupe:
                 self._url_cache_hit_log_dedupe[cache_key] = True
-                logger.debug(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
+                logger.trace(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
             return self._url_cache[cache_key]
 
         if enable_rapid:
@@ -302,7 +302,7 @@ class Drive115Service:
                 rapid_cache_ua = str(rapid_cache_entry.get("ua") or "")
                 rapid_cache_url = str(rapid_cache_entry.get("url") or "")
                 if rapid_cache_url and rapid_cache_ua == cache_ua:
-                    logger.debug(f"[Rapid-{drive_name}] 命中秒传缓存: {display_name}")
+                    logger.trace(f"[Rapid-{drive_name}] 命中秒传缓存: {display_name}")
                     return rapid_cache_url
             elif rapid_cache_entry is not None:
                 self._url_cache.pop(rapid_cache_key, None)

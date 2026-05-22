@@ -165,9 +165,11 @@ _BUILTIN_TMDB_KEY = "db55323b8d3e4154498498a75642b381"
 
 def _get_proxy_url() -> str:
     """获取用户配置的代理地址"""
+    global_config.load()
     return global_config.proxy_url or ""
 
 def _get_tmdb_key() -> str:
+    global_config.load()
     return global_config.tmdb_key or _BUILTIN_TMDB_KEY
 
 _douban_api_instance = None

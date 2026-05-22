@@ -118,6 +118,55 @@ def get_tmdb_api_base_url() -> str:
 DEFAULT_LANGUAGE = "zh-CN"
 DEFAULT_REGION = "CN"
 DEFAULT_IMAGE_LANGUAGE = "zh,en,null,ja,ko"
+CHINESE_TITLE_FALLBACK_LANGUAGES = ("zh-HK", "zh-TW", "zh-SG")
+
+
+def _apply_chinese_title_language_fallback(
+    details: Optional[Dict[str, Any]],
+    endpoint: str,
+    api_key: str,
+    title_field: str,
+    language: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Mirror TMDb web fallback language behavior for Chinese titles."""
+    if not details:
+        return details
+
+    current_language = language or DEFAULT_LANGUAGE
+    if not str(current_language or "").lower().startswith("zh"):
+        return details
+
+    current_title = str(details.get(title_field) or "")
+    if contains_chinese(current_title):
+        details["_title_language_fallback_checked"] = True
+        details["_title_language"] = current_language
+        return details
+
+    fallback_languages = [
+        lang
+        for lang in CHINESE_TITLE_FALLBACK_LANGUAGES
+        if lang.lower() != str(current_language or "").lower()
+    ]
+    for fallback_language in fallback_languages:
+        fallback_details = _tmdb_request(
+            endpoint,
+            api_key,
+            {"language": fallback_language},
+            use_default_language=False,
+        )
+        fallback_title = str((fallback_details or {}).get(title_field) or "").strip()
+        if contains_chinese(fallback_title):
+            details[title_field] = fallback_title
+            details["_title_language_fallback_checked"] = True
+            details["_title_language"] = fallback_language
+            logger.trace(
+                f"  通过 TMDb 备选语言 {fallback_language} 补充中文标题: {fallback_title}"
+            )
+            return details
+
+    details["_title_language_fallback_checked"] = True
+    details["_title_language"] = current_language
+    return details
 
 
 def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] = None, use_default_language: bool = True) -> Optional[Dict[str, Any]]:
@@ -261,6 +310,7 @@ def get_movie_details(movie_id: int, api_key: str, append_to_response: Optional[
     }
     logger.trace(f"TMDb: 获取电影详情 (ID: {movie_id})")
     details = _tmdb_request(endpoint, api_key, params)
+    details = _apply_chinese_title_language_fallback(details, endpoint, api_key, "title", language)
 
     if details and details.get("original_language") != "en" and DEFAULT_LANGUAGE.startswith("zh"):
         if "translations" in (append_to_response or "") and details.get("translations", {}).get("translations"):
@@ -354,6 +404,7 @@ def get_tv_details(tv_id: int, api_key: str, append_to_response: Optional[str] =
     }
     logger.trace(f"TMDb: 获取电视剧详情 (ID: {tv_id})")
     details = _tmdb_request(endpoint, api_key, params)
+    details = _apply_chinese_title_language_fallback(details, endpoint, api_key, "name", language)
 
     if details and details.get("original_language") != "en" and DEFAULT_LANGUAGE.startswith("zh"):
         if "translations" in (append_to_response or "") and details.get("translations", {}).get("translations"):
@@ -1091,26 +1142,13 @@ def search_tv_tmdb(api_key: str, params: Dict[str, Any]) -> Optional[Dict[str, A
 def set_proxy(proxy_url: str):
     """
     [兼容性接口] main.py 和 dependencies.py 会调用此方法。
-    将代理配置写入 settings.json 文件。
-    如果是直连，传入空字符串即可清除代理。
+    应用运行时代理配置，不改写 settings.json，避免启动期读空配置时覆盖用户设置。
     """
-    config_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "settings.json")
-
     try:
-        # 读取现有配置
-        settings = {}
-        if os.path.exists(config_file):
-            with open(config_file, 'r', encoding='utf-8') as f:
-                settings = json.load(f)
-
-        # 更新代理配置
-        settings['proxy_url'] = proxy_url
-
-        # 写回文件
-        os.makedirs(os.path.dirname(config_file), exist_ok=True)
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, indent=4, ensure_ascii=False)
-
+        cache = getattr(config_manager, "_settings_cache", None)
+        if isinstance(cache, dict):
+            cache["proxy_url"] = proxy_url or ""
+            config_manager._settings_cache_time = time.time()
         logger.info(f"[TMDb] 代理配置已更新: {proxy_url if proxy_url else '关闭'}")
     except Exception as e:
         logger.error(f"TMDb 代理配置更新失败: {e}")

@@ -143,14 +143,14 @@ class ScrapingConfig:
         policy = self.get_policy(media_type, metadata_type)
 
         if policy == ScrapingPolicy.SKIP:
-            logger.info(f"{media_type} {metadata_type} 刮削策略: skip")
+            logger.trace(f"{media_type} {metadata_type} 刮削策略: skip")
             return False
 
         if not file_exists:
             return True
 
         if policy == ScrapingPolicy.OVERWRITE:
-            logger.info(f"{media_type} {metadata_type} 文件存在，覆盖模式")
+            logger.trace(f"{media_type} {metadata_type} 文件存在，覆盖模式")
             return True
 
         # MISSING_ONLY 且文件已存在
@@ -752,7 +752,7 @@ class MediaOrganizer:
             if media_type == MediaType.SEASON and season_number is not None and image_name.lower().startswith("season"):
                 image_season_str = "00" if "specials" in image_name.lower() else image_name[6:8]
                 if image_season_str != str(season_number).rjust(2, "0"):
-                    logger.info(f"当前刮削季为: {season_number}，跳过非本季图片: {image_name}")
+                    logger.trace(f"当前刮削季为: {season_number}，跳过非本季图片: {image_name}")
                     continue
 
             # 4. 策略判断
@@ -783,9 +783,9 @@ class MediaOrganizer:
         def _download(task: Tuple[str, str]) -> str:
             image_url, img_path = task
             download_started = perf_counter()
-            logger.debug(f"[Organizer] 图片刮削下载开始: {img_path}")
+            logger.trace(f"[Organizer] 图片刮削下载开始: {img_path}")
             self.download_image(image_url, img_path)
-            logger.debug(f"[Organizer] 图片刮削下载结束: {img_path} | 耗时:{perf_counter() - download_started:.2f}s")
+            logger.trace(f"[Organizer] 图片刮削下载结束: {img_path} | 耗时:{perf_counter() - download_started:.2f}s")
             return img_path
 
         if download_tasks:

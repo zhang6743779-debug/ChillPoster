@@ -172,6 +172,7 @@ def execute_task_logic(preset_filename, targets, mode="random", task_name="Unkno
                 if is_webhook_task:
                     from app.routers.discover import put_task_cover_preview
                     from core.configs import global_config
+                    global_config.load()
                     base = global_config.app_public_base_url
                     poster_url = ""
                     if base:

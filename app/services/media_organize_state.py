@@ -98,7 +98,7 @@ def _is_self_organized_event(file_id: str, current_path: str) -> bool:
         current_path == recorded_path or current_path.startswith(recorded_path + "/")
     ))
     if matched:
-        logger.debug(f"[115Life] 自组织过滤命中: file_id={file_id}, current_path={current_path}")
+        logger.trace(f"[115Life] 自组织过滤命中: file_id={file_id}, current_path={current_path}")
     return matched
 
 

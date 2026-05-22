@@ -177,6 +177,11 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
             return '失败';
         };
 
+        const shouldAutoClearTerminalTask = (task = {}, runId = '') => {
+            if (task.status !== 'interrupted') return true;
+            return normalizeTaskCategory(task, runId) !== 'media_organize';
+        };
+
 
         const startPolling = () => {
             if (tasksState.isPolling) return;
@@ -197,7 +202,7 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
                             if (isTerminalTaskStatus(task.status)) {
                                 addTaskHistory(id, task);
                                 processedTaskIds.add(id);
-                                if (task.status !== 'interrupted') {
+                                if (shouldAutoClearTerminalTask(task, id)) {
                                     setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
                                 }
                             }
@@ -231,7 +236,7 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
 
                                 processedTaskIds.add(id);
 
-                                if (task.status !== 'interrupted') {
+                                if (shouldAutoClearTerminalTask(task, id)) {
                                     setTimeout(() => axios.post('/api/clear_task_progress', { run_id: id }), 3000);
                                 }
                             }

@@ -169,6 +169,12 @@ def restore_defaults():
         if restore_count > 0:
             logger.info(f"[启动] 已恢复 {restore_count} 个文件: {dst_rel}")
 
+    try:
+        from core.configs import global_config
+        global_config.load()
+    except Exception as e:
+        logger.warning(f"[启动] 重新加载全局配置失败: {e}")
+
 
 # ==========================================
 # 1. 定义 UI 管理端 App (监听 5256)
@@ -213,6 +219,7 @@ async def lifespan_ui(app: FastAPI):
         # 尝试设置代理 (如果有)
         from core import tmdb
         from core.configs import global_config
+        global_config.load()
         if global_config.proxy_url:
             tmdb.set_proxy(global_config.proxy_url)
             logger.info(f"[启动] 已应用代理: {global_config.proxy_url}")

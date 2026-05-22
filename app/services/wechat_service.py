@@ -52,6 +52,13 @@ DEFAULT_NOTIFY_TYPES = {
 }
 
 
+def _compact_log_text(value: str, limit: int = 80) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
 class WechatNotifyService:
     """企业微信通知服务 - 支持图文消息"""
 
@@ -307,7 +314,10 @@ class WechatNotifyService:
         }
 
         if self._send_request(url, payload):
-            logger.debug("[微信通知] 图文发送成功")
+            logger.debug(
+                f"[微信通知] 图文发送成功: 接收={to_user or '@all'} | 标题={_compact_log_text(title, 60)} | "
+                f"描述长度={len(str(description or ''))} | 图片={'有' if image_url else '无'} | 链接={'有' if link_url else '无'}"
+            )
             return True
         return False
 

@@ -273,6 +273,20 @@ def _tmdb_data_has_required_episodes(data: Optional[dict], required_episode_keys
     return all(key in episode_keys for key in required_episode_keys)
 
 
+def _contains_chinese_text(text: str) -> bool:
+    return bool(re.search(r"[一-鿿]", str(text or "")))
+
+
+def _tmdb_cached_detail_needs_title_fallback_refresh(media_type: str, data: Optional[dict]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    source = data.get("series_details") if media_type != "movie" and isinstance(data.get("series_details"), dict) else data
+    if source.get("_title_language_fallback_checked"):
+        return False
+    title_field = "title" if media_type == "movie" else "name"
+    return not _contains_chinese_text(source.get(title_field, ""))
+
+
 def _tmdb_detail_status(media_type: str, data: Optional[dict]) -> str:
     if not isinstance(data, dict):
         return ""
@@ -307,10 +321,13 @@ def _get_cached_tmdb_detail(tmdb_id: int, media_type: str, required_episode_keys
         if float(row["expires_at"] or 0) <= now_ts:
             return None
         data = json.loads(row["payload_json"])
+        if _tmdb_cached_detail_needs_title_fallback_refresh(media_type, data):
+            logger.debug(f"[TMDbCache] 详情缓存未做中文备选语言检查，强制刷新: {media_type} TMDb:{tmdb_id}")
+            return None
         if media_type != "movie" and not _tmdb_data_has_required_episodes(data, list(required_episode_keys or [])):
             logger.debug(f"[TMDbCache] 剧集详情缓存缺少目标集，强制刷新: TMDb:{tmdb_id} required={required_episode_keys}")
             return None
-        logger.debug(f"[TMDbCache] 详情缓存命中: {media_type} TMDb:{tmdb_id}")
+        logger.trace(f"[TMDbCache] 详情缓存命中: {media_type} TMDb:{tmdb_id}")
         return data if isinstance(data, dict) else None
     except Exception as e:
         logger.debug(f"[TMDbCache] 读取详情缓存失败: {media_type} TMDb:{tmdb_id} err={e}")
@@ -1531,12 +1548,12 @@ def _get_cached_tmdb_search_result(parsed: dict) -> tuple[bool, Optional[dict]]:
         if float(row["expires_at"] or 0) <= now_ts:
             return False, None
         if not int(row["hit"] or 0):
-            logger.debug(f"[TMDbCache] 搜索失败缓存命中: {parsed.get('filename', '')}")
+            logger.trace(f"[TMDbCache] 搜索失败缓存命中: {parsed.get('filename', '')}")
             return True, None
         data = json.loads(row["payload_json"] or "{}")
         if not isinstance(data, dict) or not data.get("tmdb_id"):
             return False, None
-        logger.debug(f"[TMDbCache] 搜索缓存命中: {parsed.get('filename', '')} -> TMDb:{data.get('tmdb_id')}")
+        logger.trace(f"[TMDbCache] 搜索缓存命中: {parsed.get('filename', '')} -> TMDb:{data.get('tmdb_id')}")
         return True, data
     except Exception as e:
         logger.debug(f"[TMDbCache] 读取搜索缓存失败: {parsed.get('filename', '') if parsed else ''} err={e}")

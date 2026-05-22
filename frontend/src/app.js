@@ -451,6 +451,7 @@ createApp({
             debug_mode: false,
             app_public_base_url: ''
         });
+        const globalConfigLoaded = ref(false);
         const sensitiveVisibility = reactive({
             driveRecycleCode: false,
             embyApiKey: false,
@@ -462,6 +463,25 @@ createApp({
             rapidCookie: {},
             rapidRecycleCode: {}
         });
+
+        const fetchGlobalSettings = async () => {
+            try {
+                const res = await axios.get('/api/load');
+                const data = res.data || {};
+                globalConfig.proxy_url = data.proxy_url || '';
+                globalConfig.tmdb_key = data.tmdb_key || '';
+                globalConfig.douban_cookie = data.douban_cookie || '';
+                globalConfig.app_public_base_url = data.app_public_base_url || '';
+                if (data.log_level) {
+                    globalConfig.log_level = String(data.log_level).toUpperCase();
+                }
+                globalConfig.debug_mode = globalConfig.log_level === 'DEBUG';
+                globalConfigLoaded.value = true;
+                return true;
+            } catch {
+                return false;
+            }
+        };
 
         const {
             config302,
@@ -1037,6 +1057,7 @@ createApp({
             loadProjectVersion();
             fetchUpgradeStatus();
             fetchCurrentUserInfo();
+            await fetchGlobalSettings();
             fetchFonts(); fetchLayouts(); fetchLayoutAndPresets(); fetchSuites(); fetchTranslations(); fetchTasks(); fetchDashboardStats();
             fetchWebhookConfig();
             await fetch302Config();
@@ -1067,20 +1088,6 @@ createApp({
                 if (tab.value === 'media_subscribe' && !mainGridItems.value.length) loadMainGrid(true);
             });
             if (tab.value === 'missing_episode_stats') loadMissingEpisodeStatsShell();
-            try {
-                const res = await axios.get('/api/load');
-                if (res.data) {
-                    if (res.data.proxy_url) globalConfig.proxy_url = res.data.proxy_url;
-                    if (res.data.tmdb_key) globalConfig.tmdb_key = res.data.tmdb_key;
-                    if (res.data.douban_cookie) globalConfig.douban_cookie = res.data.douban_cookie;
-                    if (res.data.app_public_base_url) globalConfig.app_public_base_url = res.data.app_public_base_url;
-                    if (res.data.log_level) {
-                        globalConfig.log_level = String(res.data.log_level).toUpperCase();
-                    }
-                    globalConfig.debug_mode = globalConfig.log_level === 'DEBUG';
-                }
-            } catch {}
-
             if (servers.value.length > 0) {
                 await initDashboard();
                 await fetchDashboardOverview();
@@ -1313,6 +1320,13 @@ createApp({
         // [修复点 3] 新增保存全局配置的功能
         const saveGlobalSettings = async (showSuccessToast = true) => {
             try {
+                if (!globalConfigLoaded.value) {
+                    const loaded = await fetchGlobalSettings();
+                    if (!loaded) {
+                        showToast('全局配置未加载，保存已取消', 'error');
+                        return false;
+                    }
+                }
                 const payload = {
                     proxy_url: globalConfig.proxy_url,
                     tmdb_key: globalConfig.tmdb_key,
