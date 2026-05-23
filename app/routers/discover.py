@@ -2441,6 +2441,33 @@ def _build_missing_episode_progress_payload(entries: list[dict], meta: dict, run
     }
 
 
+def _build_missing_episode_refreshing_payload(
+    stale_payload: dict | None,
+    entries: list[dict],
+    meta: dict,
+    cache_key: str,
+    message: str,
+    progress: dict | None = None,
+) -> dict | None:
+    if not isinstance(stale_payload, dict):
+        return None
+    payload = dict(stale_payload)
+    payload["ready"] = True
+    payload["running"] = True
+    payload["message"] = message
+    payload["progress"] = progress or {"current": 0, "total": len(entries or [])}
+    payload_meta = dict(payload.get("meta") or {})
+    payload_meta.update({
+        "missing_stats_stale": True,
+        "missing_stats_refreshing": True,
+        "missing_stats_target_cache_key": cache_key,
+        "missing_stats_target_entry_count": len(entries or []),
+        "missing_stats_target_index_updated_at": (meta or {}).get("updated_at", 0),
+    })
+    payload["meta"] = payload_meta
+    return payload
+
+
 def _store_missing_episode_progress(payload: dict, cache_key: str) -> None:
     with _missing_episode_stats_lock:
         _missing_episode_stats_state["cache_key"] = cache_key
@@ -2448,13 +2475,28 @@ def _store_missing_episode_progress(payload: dict, cache_key: str) -> None:
         _missing_episode_stats_state["progress"] = payload.get("progress") or {"current": 0, "total": 0}
 
 
-def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict, cache_key: str, full_calibration: bool = False) -> None:
+def _run_missing_episode_stats_job(
+    entries: list[dict],
+    api_key: str,
+    meta: dict,
+    cache_key: str,
+    full_calibration: bool = False,
+    stale_payload: dict | None = None,
+) -> None:
     results: list[dict] = []
     total = len(entries)
-    payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
+    refresh_message = "索引已更新，正在后台刷新缺集统计..."
+    payload = _build_missing_episode_refreshing_payload(
+        stale_payload,
+        entries,
+        meta,
+        cache_key,
+        refresh_message,
+    ) or _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
     _store_missing_episode_progress(payload, cache_key)
     try:
         if full_calibration:
+            stale_payload = None
             calibration_payload = _build_missing_episode_progress_payload(
                 entries,
                 meta,
@@ -2487,16 +2529,26 @@ def _run_missing_episode_stats_job(entries: list[dict], api_key: str, meta: dict
                 for item in sorted_results:
                     _accumulate_missing_episode_summary(summary, item)
                 summary["tvCount"] = total
-                progress_payload = {
-                    "ready": True,
-                    "running": True,
-                    "meta": meta,
-                    "summary": summary,
-                    "items": sorted_results,
-                    "libraries": _merge_missing_episode_libraries(entries, sorted_results),
-                    "progress": {"current": len(results), "total": total},
-                    "message": "正在统计剧集缺集...",
-                }
+                progress = {"current": len(results), "total": total}
+                progress_payload = _build_missing_episode_refreshing_payload(
+                    stale_payload,
+                    entries,
+                    meta,
+                    cache_key,
+                    refresh_message,
+                    progress,
+                )
+                if not progress_payload:
+                    progress_payload = {
+                        "ready": True,
+                        "running": True,
+                        "meta": meta,
+                        "summary": summary,
+                        "items": sorted_results,
+                        "libraries": _merge_missing_episode_libraries(entries, sorted_results),
+                        "progress": progress,
+                        "message": "正在统计剧集缺集...",
+                    }
                 _store_missing_episode_progress(progress_payload, cache_key)
 
         final_results = _sort_missing_episode_results(results)
@@ -2749,6 +2801,36 @@ def library_missing_episode_stats(
                     "error": "",
                 })
             return cached
+        stale_cached = _load_missing_episode_stats_cache()
+        stale_key = (stale_cached.get("meta") or {}).get("missing_stats_cache_key") if stale_cached else ""
+        if stale_cached and stale_key != cache_key:
+            initial_payload = _build_missing_episode_refreshing_payload(
+                stale_cached,
+                entries,
+                meta,
+                cache_key,
+                "索引已更新，正在后台刷新缺集统计...",
+            )
+            if initial_payload:
+                with _missing_episode_stats_lock:
+                    _missing_episode_stats_state.update({
+                        "cache_key": cache_key,
+                        "running": True,
+                        "payload": initial_payload,
+                        "progress": initial_payload["progress"],
+                        "error": "",
+                    })
+                worker = threading.Thread(
+                    target=_run_missing_episode_stats_job,
+                    args=(entries, api_key, meta, cache_key, False, stale_cached),
+                    daemon=True,
+                )
+                worker.start()
+                logger.info(
+                    f"[Discover] 缺集统计缓存未命中当前索引，已返回最近缓存并后台刷新: "
+                    f"old={stale_key or 'latest'} new={cache_key}"
+                )
+                return _build_missing_episode_summary_payload(initial_payload) if wants_summary else initial_payload
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("cache_key") == cache_key and _missing_episode_stats_state.get("payload"):
             payload = _missing_episode_stats_state["payload"]

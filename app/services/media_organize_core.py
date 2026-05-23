@@ -5306,7 +5306,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
     """清理源目录下不包含视频的子目录，并按旧语义处理根目录下的非视频文件。"""
     try:
         to_delete = None
-        scan_retry_delays = (0.0, 1.0, 3.0)
+        scan_retry_delays = (0.0, 5.0, 10.0, 20.0)
         for attempt, delay in enumerate(scan_retry_delays, start=1):
             if delay > 0:
                 await asyncio.sleep(delay)
