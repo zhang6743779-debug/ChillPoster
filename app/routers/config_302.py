@@ -369,13 +369,59 @@ def _ensure_standard_topology_dirs(drive_index: int, local_media_root: str, remo
     }
 
 
+def _resolve_existing_standard_topology_dirs(drive_index: int, local_media_root: str, remote_root_name: str = "影视库") -> dict | None:
+    from pathlib import Path
+
+    normalized_local_root = str(local_media_root or "").strip() or _default_standard_local_root()
+    remote_root_name = str(remote_root_name or "影视库").strip() or "影视库"
+
+    client = _get_115_client(drive_index)
+    remote_root_cid = _find_child_dir_in_115(client, 0, remote_root_name)
+    if not remote_root_cid:
+        return None
+
+    required_dirs = {
+        "media": "媒体目录",
+        "failed": "失败目录",
+        "transfer": "转存目录",
+        "dedup": "重复目录",
+        "wash": "洗版目录",
+    }
+    resolved: dict[str, dict[str, str]] = {}
+    for key, dirname in required_dirs.items():
+        cid = _find_child_dir_in_115(client, int(remote_root_cid), dirname)
+        if not cid:
+            return None
+        resolved[key] = {"name": f"/{remote_root_name}/{dirname}", "cid": str(cid)}
+    instant_cid = _find_child_dir_in_115(client, int(remote_root_cid), "秒传目录")
+    resolved["instant"] = {
+        "name": f"/{remote_root_name}/秒传目录",
+        "cid": str(instant_cid or ""),
+    }
+
+    local_root_dir = Path(normalized_local_root)
+    if local_root_dir.name != remote_root_name:
+        local_root_dir = local_root_dir / remote_root_name
+
+    return {
+        "remote": {
+            "root": {"name": f"/{remote_root_name}", "cid": str(remote_root_cid)},
+            **resolved,
+        },
+        "local": {
+            "root": str(local_root_dir),
+            "media": str(local_root_dir / "媒体库"),
+            "real_library": str(local_root_dir / "真实库"),
+        },
+    }
+
+
 def _default_standard_local_root() -> str:
     return os.environ.get("CHILLPOSTER_LOCAL_MEDIA_ROOT") or os.path.join(os.path.expanduser("~"), "Desktop")
 
 
-def _persist_standard_topology_dirs(result: dict):
-    data = get_config_302_sync()
-    data["standard_topology"] = {
+def _standard_topology_from_result(result: dict) -> dict:
+    return {
         "mode": "standard_topology",
         "remote_root": result["remote"]["root"]["name"],
         "remote_root_cid": result["remote"]["root"]["cid"],
@@ -396,6 +442,100 @@ def _persist_standard_topology_dirs(result: dict):
         "local_real_library_dir": result["local"]["real_library"],
         "real_library_dir_name": "真实库",
     }
+
+
+def _standard_topology_to_result(topology: dict) -> dict:
+    return {
+        "remote": {
+            "root": {"name": str(topology.get("remote_root") or ""), "cid": str(topology.get("remote_root_cid") or "")},
+            "media": {"name": str(topology.get("media_dir") or ""), "cid": str(topology.get("media_dir_cid") or "")},
+            "instant": {"name": str(topology.get("instant_dir") or ""), "cid": str(topology.get("instant_dir_cid") or "")},
+            "failed": {"name": str(topology.get("failed_dir") or ""), "cid": str(topology.get("failed_dir_cid") or "")},
+            "transfer": {"name": str(topology.get("transfer_dir") or ""), "cid": str(topology.get("transfer_dir_cid") or "")},
+            "dedup": {"name": str(topology.get("dedup_dir") or ""), "cid": str(topology.get("dedup_dir_cid") or "")},
+            "wash": {"name": str(topology.get("wash_dir") or ""), "cid": str(topology.get("wash_dir_cid") or "")},
+        },
+        "local": {
+            "root": str(topology.get("local_media_root") or ""),
+            "media": str(topology.get("local_media_dir") or ""),
+            "real_library": str(topology.get("local_real_library_dir") or ""),
+        },
+    }
+
+
+def _is_complete_standard_topology(topology: Any) -> bool:
+    if not isinstance(topology, dict):
+        return False
+    required = (
+        "remote_root", "remote_root_cid",
+        "media_dir", "media_dir_cid",
+        "transfer_dir", "transfer_dir_cid",
+        "failed_dir", "failed_dir_cid",
+        "dedup_dir", "dedup_dir_cid",
+        "wash_dir", "wash_dir_cid",
+    )
+    return all(str(topology.get(key) or "").strip() for key in required)
+
+
+def _normalize_remote_path_for_compare(path: str) -> str:
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if not text.startswith("/"):
+        text = "/" + text
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text.rstrip("/") or "/"
+
+
+def _media_organize_needs_standard_binding(media_data: dict, topology: dict, *, topology_created: bool = False) -> bool:
+    if not isinstance(media_data, dict) or not media_data:
+        return True
+
+    source_name = _normalize_remote_path_for_compare(media_data.get("source_name", ""))
+    target_name = _normalize_remote_path_for_compare(media_data.get("target_name", ""))
+    transfer_dir = _normalize_remote_path_for_compare(topology.get("transfer_dir", ""))
+    media_dir = _normalize_remote_path_for_compare(topology.get("media_dir", ""))
+    source_cid = str(media_data.get("source_cid") or "").strip()
+    target_cid = str(media_data.get("target_cid") or "").strip()
+
+    if not source_cid or source_cid == "0" or not target_cid or target_cid == "0":
+        return True
+    if source_name == transfer_dir and target_name == media_dir:
+        return False
+    if source_name and target_name and (source_name == target_name or source_name.startswith(target_name + "/")):
+        return True
+    if media_dir and source_name and (source_name == media_dir or source_name.startswith(media_dir + "/")):
+        return True
+    if source_name.startswith("/emby/"):
+        return True
+    if "/媒体目录/" in source_name or source_name.endswith("/媒体目录"):
+        return True
+    return False
+
+
+def is_media_organize_source_suspicious(media_data: dict) -> bool:
+    if not isinstance(media_data, dict):
+        return False
+    source_name = _normalize_remote_path_for_compare(media_data.get("source_name", ""))
+    target_name = _normalize_remote_path_for_compare(media_data.get("target_name", ""))
+    if not source_name:
+        return False
+    if source_name.startswith("/emby/"):
+        return True
+    if target_name and (source_name == target_name or source_name.startswith(target_name + "/")):
+        return True
+    if "/媒体目录/" in source_name or source_name.endswith("/媒体目录"):
+        return True
+    cfg302 = get_config_302_sync()
+    topology = cfg302.get("standard_topology") if isinstance(cfg302, dict) else None
+    media_dir = _normalize_remote_path_for_compare((topology or {}).get("media_dir", ""))
+    return bool(media_dir and (source_name == media_dir or source_name.startswith(media_dir + "/")))
+
+
+def _persist_standard_topology_dirs(result: dict):
+    data = get_config_302_sync()
+    data["standard_topology"] = _standard_topology_from_result(result)
     _save_config_302_sync(data)
 
 
@@ -427,6 +567,88 @@ def _apply_standard_media_organize_binding(topology_result: dict, drive_index: i
     os.makedirs(os.path.dirname(MEDIA_ORGANIZE_CONFIG_FILE), exist_ok=True)
     with open(MEDIA_ORGANIZE_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(media_data, f, ensure_ascii=False, indent=4)
+    return media_data
+
+
+def ensure_standard_topology_binding(reason: str = "", *, sync_media_organize: bool = True, create_missing: bool = False) -> dict | None:
+    """Bind to an existing complete one-stop topology; create only for explicit setup flows."""
+    data = get_config_302_sync()
+    drives = data.get("drives") if isinstance(data.get("drives"), list) else []
+    drive = drives[0] if drives else {}
+    if not bool(drive.get("enable_standard_topology")):
+        return None
+
+    topology = data.get("standard_topology") if isinstance(data, dict) else None
+    topology_created = False
+    if not _is_complete_standard_topology(topology):
+        local_media_root = str(drive.get("local_media_root") or "").strip() or _default_standard_local_root()
+        remote_root_name = str(drive.get("remote_root_name") or "影视库").strip() or "影视库"
+        result = (
+            _ensure_standard_topology_dirs(
+                drive_index=0,
+                local_media_root=local_media_root,
+                remote_root_name=remote_root_name,
+            )
+            if create_missing
+            else _resolve_existing_standard_topology_dirs(
+                drive_index=0,
+                local_media_root=local_media_root,
+                remote_root_name=remote_root_name,
+            )
+        )
+        if not result:
+            logger.warning(
+                f"[302] 未找到完整一条龙目录，跳过媒体整理自动绑定: "
+                f"reason={reason or 'auto'} root=/{remote_root_name}"
+            )
+            return None
+        topology = _standard_topology_from_result(result)
+        data["standard_topology"] = topology
+        drive["local_media_root"] = result["local"]["root"]
+        drive["remote_root_name"] = remote_root_name
+        if str((result["remote"].get("instant") or {}).get("cid") or "").strip():
+            drive["upload_dir"] = result["remote"]["instant"]["name"]
+        drive["transfer_dir"] = result["remote"]["transfer"]["name"]
+        drive["transfer_drive_index"] = 0
+        data["drives"] = [drive]
+        _save_config_302_sync(data)
+        topology_created = True
+        logger.info(f"[302] 已识别一条龙标准目录拓扑: reason={reason or 'auto'} create_missing={create_missing}")
+    else:
+        result = _standard_topology_to_result(topology)
+
+    if sync_media_organize:
+        from app.services.media_organize_state import CONFIG_FILE as MEDIA_ORGANIZE_CONFIG_FILE
+        media_data = _load_json_file(MEDIA_ORGANIZE_CONFIG_FILE)
+        if _media_organize_needs_standard_binding(media_data, topology, topology_created=topology_created):
+            source_before = str(media_data.get("source_name") or "") if isinstance(media_data, dict) else ""
+            media_data = _apply_standard_media_organize_binding(result, 0)
+            logger.warning(
+                f"[302] 已修正媒体整理目录为一条龙标准目录: "
+                f"reason={reason or 'auto'} source_before={source_before or '-'} "
+                f"source_now={media_data.get('source_name')}"
+            )
+    return topology
+
+
+def apply_standard_topology_binding_from_result(topology_result: dict, drive_index: int, reason: str = "") -> dict:
+    data = get_config_302_sync()
+    drives = data.get("drives") if isinstance(data.get("drives"), list) else []
+    drive = drives[0] if drives else _normalize_single_drive_config({})
+    topology = _standard_topology_from_result(topology_result)
+    data["standard_topology"] = topology
+    drive["local_media_root"] = topology_result["local"]["root"]
+    drive["remote_root_name"] = str(topology_result["remote"]["root"]["name"] or "/影视库").strip("/").split("/", 1)[0] or "影视库"
+    drive["upload_dir"] = topology_result["remote"]["instant"]["name"]
+    drive["transfer_dir"] = topology_result["remote"]["transfer"]["name"]
+    drive["transfer_drive_index"] = drive_index
+    data["drives"] = [drive]
+    _save_config_302_sync(data)
+    media_data = _apply_standard_media_organize_binding(topology_result, drive_index)
+    logger.info(
+        f"[302] 已应用一条龙目录绑定: reason={reason or 'setup'} "
+        f"source={media_data.get('source_name')} target={media_data.get('target_name')}"
+    )
     return media_data
 
 
@@ -638,12 +860,10 @@ async def save_config_302(config: Config302Payload):
                 new_drive['upload_dir'] = topology_result['remote']['instant']['name']
                 new_drive['transfer_dir'] = topology_result['remote']['transfer']['name']
                 new_drive['transfer_drive_index'] = 0
-                _persist_standard_topology_dirs(topology_result)
-                persisted_data = get_config_302_sync()
-                if isinstance(persisted_data.get('standard_topology'), dict):
-                    save_data['standard_topology'] = persisted_data['standard_topology']
+                save_data["drives"] = [new_drive]
+                save_data["standard_topology"] = _standard_topology_from_result(topology_result)
                 _save_config_302_sync(save_data)
-                media_organize_data = _apply_standard_media_organize_binding(topology_result, 0)
+                media_organize_data = apply_standard_topology_binding_from_result(topology_result, 0, reason="config_302_save")
                 _apply_standard_strm_binding(topology_result, 0, config_302_data=save_data)
                 _apply_standard_rss_binding(topology_result)
 

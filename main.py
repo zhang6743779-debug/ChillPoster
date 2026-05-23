@@ -266,6 +266,11 @@ async def lifespan_ui(app: FastAPI):
     # [新增] 启动 115 生活事件监控
     try:
         from core.monitor115.monitor import create_monitor
+        try:
+            from app.routers.config_302 import ensure_standard_topology_binding
+            ensure_standard_topology_binding("startup_life_monitor")
+        except Exception as e:
+            logger.warning(f"[启动] 一条龙目录绑定检查失败: {e}")
         # 从媒体整理配置中读取网盘转存源目录和目标目录
         organize_cfg_path = os.path.join(os.getcwd(), "config", "media_organize.json")
         if os.path.exists(organize_cfg_path):
@@ -275,30 +280,42 @@ async def lifespan_ui(app: FastAPI):
             target_dir = organize_cfg.get("target_name", "")
             life_monitor_on = organize_cfg.get("life_monitor_enabled", False)
             if source_dir and target_dir and life_monitor_on:
-                # 使用工厂函数创建回调（带防抖和自动整理）
-                from app.routers.media_organize import create_life_event_callback
-                drive_idx = organize_cfg.get("drive_index", 0)
-                life_event_callback = create_life_event_callback(
-                    source_dir,
-                    drive_idx,
-                    target_dir,
-                    str(organize_cfg.get("source_cid", "")),
-                    str(organize_cfg.get("target_cid", "")),
-                )
-
-                client, _ = await drive115_service.get_client(0)
-                if client:
-                    monitor = create_monitor(
-                        client=client,
-                        source_dir=source_dir,
-                        target_dir=target_dir,
-                        callback=life_event_callback,
-                        start_mode="latest",
+                skip_life_monitor = False
+                try:
+                    from app.routers.config_302 import is_media_organize_source_suspicious
+                    if is_media_organize_source_suspicious(organize_cfg):
+                        logger.warning(
+                            f"[启动] 媒体整理源目录疑似媒体库目录，已跳过 Life 监控: "
+                            f"整理目录={source_dir}, 媒体库目录={target_dir}"
+                        )
+                        skip_life_monitor = True
+                except Exception as e:
+                    logger.warning(f"[启动] 媒体整理源目录安全检查失败: {e}")
+                if not skip_life_monitor:
+                    # 使用工厂函数创建回调（带防抖和自动整理）
+                    from app.routers.media_organize import create_life_event_callback
+                    drive_idx = organize_cfg.get("drive_index", 0)
+                    life_event_callback = create_life_event_callback(
+                        source_dir,
+                        drive_idx,
+                        target_dir,
+                        str(organize_cfg.get("source_cid", "")),
+                        str(organize_cfg.get("target_cid", "")),
                     )
-                    monitor.start()
-                    logger.trace("[启动] 115 Life 事件监控已启动")
-                else:
-                    logger.warning("[启动] 115 客户端未就绪，跳过 Life 事件监控")
+
+                    client, _ = await drive115_service.get_client(0)
+                    if client:
+                        monitor = create_monitor(
+                            client=client,
+                            source_dir=source_dir,
+                            target_dir=target_dir,
+                            callback=life_event_callback,
+                            start_mode="latest",
+                        )
+                        monitor.start()
+                        logger.trace("[启动] 115 Life 事件监控已启动")
+                    else:
+                        logger.warning("[启动] 115 客户端未就绪，跳过 Life 事件监控")
     except Exception as e:
         logger.warning(f"[启动] 115 Life 事件监控启动失败: {e}")
 

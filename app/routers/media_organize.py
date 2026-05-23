@@ -27,6 +27,7 @@ from app.services.media_organize_tmdb import (
     _load_config_data, _fetch_tmdb_data, _build_scraping_config,
     _parse_filename, _search_tmdb_for_title, _extract_tmdb_id_from_text,
     _validate_tmdb_tv_episode,
+    _has_explicit_season_or_episode_marker,
 )
 from app.services.media_organize_template import _build_template_variables, _render_template
 from app.services.media_organize_scrape import _noop_transfer, _write_nfo, _download_image
@@ -245,6 +246,14 @@ def _identify_candidate_hints(media_type: str, input_kind: str) -> list[Optional
     if input_kind == "folder":
         return ["tv", "movie", None]
     return [None, "tv", "movie"]
+
+
+def _identify_input_has_episode_marker(input_meta: dict) -> bool:
+    return _has_explicit_season_or_episode_marker(
+        str(input_meta.get("filename") or ""),
+        str(input_meta.get("file_path") or ""),
+        str(input_meta.get("folder_name") or ""),
+    )
 
 
 def _actual_tmdb_id(tmdb_data: dict, media_type: str) -> Optional[int]:
@@ -477,11 +486,28 @@ async def save_config(config: MediaOrganizeConfig):
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(merged_data, f, ensure_ascii=False, indent=4)
+
+        try:
+            from app.routers.config_302 import ensure_standard_topology_binding
+            ensure_standard_topology_binding("media_organize_save")
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                reloaded_data = json.load(f)
+            if isinstance(reloaded_data, dict):
+                normalized_config = MediaOrganizeConfig(**reloaded_data)
+                merged_data = reloaded_data
+        except Exception as e:
+            logger.warning(f"[MediaOrganize] 一条龙目录绑定检查失败: {e}")
+
         logger.info(f"[MediaOrganize] 配置已保存")
 
         new_enabled = normalized_config.life_monitor_enabled
-        if new_enabled != old_enabled:
-            await _toggle_life_monitor(new_enabled, normalized_config)
+        monitor_fields = ("source_name", "target_name", "source_cid", "target_cid")
+        monitor_dirs_changed = any(
+            str(old_data.get(field, "") or "") != str(merged_data.get(field, "") or "")
+            for field in monitor_fields
+        )
+        if new_enabled != old_enabled or (new_enabled and monitor_dirs_changed):
+            await _toggle_life_monitor(new_enabled, normalized_config, force_restart=monitor_dirs_changed)
 
         return {"status": "success", "message": "配置已保存"}
     except Exception as e:
@@ -507,6 +533,16 @@ async def _toggle_life_monitor(enabled: bool, config: MediaOrganizeConfig, force
             if not source_dir or not target_dir:
                 logger.warning("[MediaOrganize] 源目录或目标目录未配置，无法启动监控")
                 return
+            try:
+                from app.routers.config_302 import is_media_organize_source_suspicious
+                if is_media_organize_source_suspicious(config.dict()):
+                    logger.warning(
+                        f"[MediaOrganize] 源目录疑似媒体库目录，已跳过 Life 监控: "
+                        f"整理目录={source_dir}, 媒体库目录={target_dir}"
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 源目录安全检查失败: {e}")
 
             client, _ = await drive115_service.get_client(0)
             if not client:
@@ -638,8 +674,11 @@ async def identify_test(payload: IdentifyTestPayload):
 
     config_data = await _load_config_data()
     input_meta = _normalize_identify_input(raw_input, folder_name, file_name)
+    explicit_episode_marker = _identify_input_has_episode_marker(input_meta)
     hints = []
     for hint in _identify_candidate_hints(media_type, input_meta["kind"]):
+        if explicit_episode_marker and media_type == "auto" and hint == "movie":
+            continue
         if hint not in hints:
             hints.append(hint)
 
@@ -872,7 +911,26 @@ def _finish_organize_run():
 @router.post("/organize")
 async def organize_media(req: OrganizeRequest):
     """启动后台整理任务，立即返回 run_id"""
+    try:
+        from app.routers.config_302 import ensure_standard_topology_binding
+        ensure_standard_topology_binding("media_organize_run")
+    except Exception as e:
+        logger.warning(f"[MediaOrganize] 一条龙目录绑定检查失败: {e}")
+
     config_data = await _load_config_data()
+    try:
+        from app.routers.config_302 import is_media_organize_source_suspicious
+        if is_media_organize_source_suspicious(config_data):
+            source_name = str(config_data.get("source_name") or "")
+            target_name = str(config_data.get("target_name") or "")
+            logger.warning(
+                f"[MediaOrganize] 拒绝启动整理：源目录疑似媒体库目录，请重新保存一条龙或媒体整理配置。"
+                f"源目录={source_name or '-'} 目标目录={target_name or '-'}"
+            )
+            return {"status": "error", "message": "整理源目录疑似媒体库目录，请重新保存 302 一条龙或媒体整理配置后再试"}
+    except Exception as e:
+        logger.warning(f"[MediaOrganize] 源目录安全检查失败: {e}")
+
     source_cid = config_data.get("source_cid", "0")
     target_cid = config_data.get("target_cid", "0")
     if target_cid in ("0", 0):

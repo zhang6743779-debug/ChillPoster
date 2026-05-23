@@ -1665,6 +1665,14 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
 
         norm_search = _normalize_title_for_match(search_title)
 
+        if media_type == "tv" and year and season is not None and len(year_results or []) == 1:
+            result = (year_results or [])[0]
+            tmdb_id = result.get('id')
+            if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                res_title = result.get('name') or result.get('original_name') or ''
+                logger.debug(f"{log_prefix} 剧集年份唯一候选匹配: '{filename}' -> {res_title} S{season} ({year}) (ID: {tmdb_id})")
+                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
+
         exact_matches = []
         contains_matches = []
         for result in results:
@@ -1676,6 +1684,23 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
                 exact_matches.append(result)
             elif norm_search and (norm_search in norm_title or norm_search in norm_orig):
                 contains_matches.append(result)
+
+        if media_type == "tv" and year and season is not None:
+            season_year_matches = []
+            season_year_seen = set()
+            for result in results:
+                tmdb_id = result.get('id')
+                if not tmdb_id or tmdb_id in season_year_seen:
+                    continue
+                if _tv_season_year_matches(media_type, season, year, tmdb_id, api_key):
+                    season_year_matches.append(result)
+                    season_year_seen.add(tmdb_id)
+            if len(season_year_matches) == 1:
+                result = season_year_matches[0]
+                tmdb_id = result.get('id')
+                res_title = result.get('name') or result.get('original_name') or ''
+                logger.debug(f"{log_prefix} 剧集季年份唯一候选匹配: '{filename}' -> {res_title} S{season} ({year}) (ID: {tmdb_id})")
+                return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
         if year:
             for result in exact_matches:
@@ -1946,7 +1971,7 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 def _tmdb_search_cache_key(parsed: dict) -> str:
     payload = {
-        "v": 2,
+        "v": 4,
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],
