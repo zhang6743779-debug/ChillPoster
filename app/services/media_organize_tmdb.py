@@ -772,6 +772,70 @@ async def _fetch_tmdb_data(
         return None
 
 
+def _normalize_direct_tmdb_media_type(value: str) -> str:
+    value = str(value or "").strip().lower()
+    if value in {"tv", "series"}:
+        return "tv"
+    if value == "movie":
+        return "movie"
+    return ""
+
+
+def _resolve_direct_tmdb_id_media_type_sync(tmdb_id: int, api_key: str, preferred_media_type: str = "") -> Optional[str]:
+    """
+    Probe the lightweight TMDb detail endpoints to determine whether a direct
+    {tmdb-...} ID belongs to a movie or a TV show before title correction runs.
+    """
+    if not tmdb_id or not api_key:
+        return None
+
+    preferred = _normalize_direct_tmdb_media_type(preferred_media_type)
+    candidates = []
+    if preferred:
+        candidates.append(preferred)
+    candidates.extend(mt for mt in ("movie", "tv") if mt not in candidates)
+
+    try:
+        from core import tmdb
+    except Exception as e:
+        logger.debug(f"[MediaIdentify] 无法加载 TMDb 模块，跳过直写ID类型探测: {e}")
+        return None
+
+    for media_type in candidates:
+        endpoint = f"/{'movie' if media_type == 'movie' else 'tv'}/{int(tmdb_id)}"
+        try:
+            data = tmdb._tmdb_request(  # noqa: SLF001 - lightweight probe avoids full detail fetch/correction.
+                endpoint,
+                api_key,
+                {"language": getattr(tmdb, "DEFAULT_LANGUAGE", "zh-CN")},
+                use_default_language=False,
+            )
+        except Exception as e:
+            logger.debug(f"[MediaIdentify] 直写TMDb ID类型探测失败: TMDb:{tmdb_id} 类型:{media_type} 错误:{e}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        try:
+            actual_id = int(data.get("id") or 0)
+        except (TypeError, ValueError):
+            actual_id = 0
+        if actual_id == int(tmdb_id):
+            return media_type
+
+    return None
+
+
+async def _resolve_direct_tmdb_id_media_type(tmdb_id: int, api_key: str, preferred_media_type: str = "") -> Optional[str]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        _resolve_direct_tmdb_id_media_type_sync,
+        tmdb_id,
+        api_key,
+        preferred_media_type,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Title normalization & variant generation
 # ---------------------------------------------------------------------------

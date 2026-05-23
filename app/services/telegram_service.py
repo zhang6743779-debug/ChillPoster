@@ -68,6 +68,7 @@ class TelegramNotifyService:
                 "playback": True,
                 "media_added": True,
                 "organize_complete": True,
+                "wash_result": True,
                 "resource_transfer": True,
                 "checkin": True,
                 "task_complete": True
@@ -127,6 +128,7 @@ class TelegramNotifyService:
 
         notify_types = data.setdefault("notify_types", {})
         notify_types.setdefault("organize_complete", True)
+        notify_types.setdefault("wash_result", True)
         notify_types.setdefault("resource_transfer", True)
         data["templates"] = merge_templates(data.get("templates"))
         return data
@@ -1069,7 +1071,7 @@ class TelegramNotifyService:
                              task_category: str = "", total_count: int = 0,
                              success_count: int = 0, already_count: int = 0,
                              trigger: str = "", summary: str = "",
-                             accounts_text: str = "") -> bool:
+                             accounts_text: str = "", organize_size: str = "") -> bool:
         """发送任务完成通知"""
         if not self.is_notify_type_enabled("task_complete"):
             return False
@@ -1114,6 +1116,7 @@ class TelegramNotifyService:
             "trigger": trigger or "",
             "summary": summary or "",
             "accounts_text": accounts_text or "",
+            "organize_size": organize_size or "",
             "now": now,
         }
 

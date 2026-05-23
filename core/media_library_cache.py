@@ -623,6 +623,22 @@ class MediaLibraryTaskIndex:
             ).fetchone()
             return row is not None
 
+    def first_item_for_sha1(self, sha1: str) -> dict | None:
+        normalized = str(sha1 or "").upper().strip()
+        if not normalized:
+            return None
+        with _db() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM media_items
+                WHERE task_key = ? AND sha1_norm = ? AND is_dir = 0
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (self.task_key, normalized),
+            ).fetchone()
+            return _row_to_item(row) if row else None
+
     def item_count(self) -> int:
         with _db() as conn:
             return _task_item_count(conn, self.task_key)

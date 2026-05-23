@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 13
+TEMPLATE_VERSION = 17
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -35,6 +35,16 @@ DEFAULT_TEMPLATES = {
                 "\n🕐完成时间：{{ now }}"
                 "{% if overview %}\n\n📝简介：{{ overview }}{% endif %}"
     },
+    "wash_result": {
+        "title": "洗版{{ status_text }} {{ status_emoji }} 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}",
+        "text": "🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}"
+                "{% if library_location %}\n📁库位：{{ library_location }}{% endif %}"
+                "\n📌结果：{{ decision_text }}"
+                "\n📝原因：{{ reason_text }}"
+                "{% if old_summary %}\n\n📦已入库旧资源：{{ old_summary }}{% endif %}"
+                "{% if new_summary %}\n✨本次整理资源：{{ new_summary }}{% endif %}"
+                "\n\n🕐完成时间：{{ now }}"
+    },
     "playback": {
         "title": "🎬 正在播放《{{ title }}》{% if year %}({{ year }}){% endif %}",
         "text": "⭐️评分：{{ rating or '暂无' }}\n🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}"
@@ -50,6 +60,7 @@ DEFAULT_TEMPLATES = {
                 "\n🧩 类型：媒体整理任务"
                 "{% if elapsed %}\n⏱️ 总耗时：{{ elapsed }}{% endif %}"
                 "{% if total_count %}\n📦 扫描视频：{{ total_count }}{% endif %}"
+                "{% if organize_size %}\n⚖️ 整理体积：{{ organize_size }}{% endif %}"
                 "{% if success_count %}\n✅ 整理成功：{{ success_count }}{% endif %}"
                 "{% if failed %}\n❌ 整理失败：{{ failed }}{% endif %}"
                 "{% if skipped %}\n⏭️ 跳过处理：{{ skipped }}{% endif %}"

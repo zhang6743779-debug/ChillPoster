@@ -22,6 +22,7 @@ import { useConfig302 } from './pages/config302/useConfig302';
 import { useStrmConfig } from './pages/strm/useStrmConfig';
 import { useDrive115Maintenance } from './pages/drive115/useDrive115Maintenance';
 import { useMediaOrganize } from './pages/mediaOrganize/useMediaOrganize';
+import { useOrganizeHistory } from './pages/organizeHistory/useOrganizeHistory';
 import { useDiscover } from './pages/discover/useDiscover';
 import { useDashboardDeviceMetrics } from './pages/dashboard/useDashboardDeviceMetrics';
 import { useDashboardOverview } from './pages/dashboard/useDashboardOverview';
@@ -947,6 +948,7 @@ createApp({
                     loadMainGrid(true);
                 }
             }
+            if (val === 'organize_history') fetchOrganizeHistory();
             if (val === 'missing_episode_stats') loadMissingEpisodeStatsShell();
             if (val === 'config_moviepilot') fetchMpConfig();
         });
@@ -1017,7 +1019,7 @@ createApp({
                 'upgrade': '系统升级',
                 'docker_manager': 'Docker 管理',
                 'media_subscribe': '发现推荐', 'missing_episode_stats': '缺集统计', 'resource_transfer': '资源转存',
-                'media_organize': '一条龙菜单', 'media_organize_rules': '二级分类规则',
+                'media_organize': '一条龙菜单', 'organize_history': '整理记录', 'media_organize_rules': '二级分类规则',
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
                 'forward_hdhive': 'Forward模块',
@@ -1097,6 +1099,7 @@ createApp({
             fetchFonts(); fetchLayouts(); fetchLayoutAndPresets(); fetchSuites(); fetchTranslations(); fetchTasks(); fetchDashboardStats();
             fetchWebhookConfig();
             if (tab.value === 'real_library') fetchRealLibraryData();
+            if (tab.value === 'organize_history') fetchOrganizeHistory();
             await fetch302Config();
             fetchStrmConfig();
             fetchMediaOrganizeConfig();
@@ -1804,6 +1807,15 @@ createApp({
             resetMainGrid,
         } = useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDockDrawers, mobileMenuVisible, mpConfig, config302, servers, ensureDashboardServerId, showToast });
 
+        const {
+            organizeHistory,
+            fetchOrganizeHistory,
+            selectOrganizeHistoryCategory,
+            applyOrganizeHistorySearch,
+            clearOrganizeHistorySearch,
+            changeOrganizeHistoryPage,
+        } = useOrganizeHistory({ showToast });
+
         return {
             tab, pageTitle, servers, fontList, presetList, layoutGroups, config,
             manualServerIdx, currentManualServer, currentLibId, previewImage, loading, applying, selectedPresetIdx, currentPresetFile,
@@ -1967,6 +1979,14 @@ createApp({
             loadDiscoverSources,
             mainGridItems, mainGridPage, mainGridTotalPages, mainGridLoading, mainGridNoMore,
             mainGridSentinel, mainGridScrollRoot, loadMainGrid, resetMainGrid,
+
+            // [新增] 整理记录
+            organizeHistory,
+            fetchOrganizeHistory,
+            selectOrganizeHistoryCategory,
+            applyOrganizeHistorySearch,
+            clearOrganizeHistorySearch,
+            changeOrganizeHistoryPage,
 
             // [新增] 资源转存
             transferInput, transferLoading, transferResult, transferHistory, transferHistoryStats, transferPage, transferPageSize, transferPageCount, transferHistoryRange, paginatedTransferHistory, transferConfig, transferConfigForm, transferDirLabel, transferDirBrowser, getTransferSourceClass, getTransferSourceText, getTransferSourceDetail, getTransferStatusClass, setTransferPage, browseTransferDir, selectTransferDir, transferDirUp, applyTransferDir, saveTransferConfig, clearTransferHistory,

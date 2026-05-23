@@ -43,7 +43,7 @@ from app.services.media_organize_115_ops import (
 from app.services.media_organize_tmdb import (
     _parse_filename, _search_tmdb_for_title, _fetch_tmdb_data,
     _load_config_data, _build_scraping_config, _validate_tmdb_tv_episode,
-    _tmdb_series_is_ended,
+    _tmdb_series_is_ended, _resolve_direct_tmdb_id_media_type,
 )
 from app.services.media_organize_template import (
     _build_template_variables, _render_template,
@@ -55,6 +55,7 @@ from app.services.media_organize_scrape import (
     _map_remote_to_strm_local_path,
 )
 from app.services.media_server_refresh import media_server_refresh
+from app.services.organize_history_service import append_organize_history
 from app.dependencies import ACTIVE_TASKS, set_task_detail, update_task_progress
 from core.logger import logger
 from core.media_library_cache import build_task_key, get_task_index, get_task_item_by_id, remove_items_by_path_prefix, remove_task_item_by_id, update_items_path_prefix, update_task_item_fields, upsert_task_item, upsert_dir_item, merge_task_items
@@ -507,6 +508,8 @@ def _normalize_wash_resolution(value: str) -> str:
         return "1080p"
     if "720" in text:
         return "720p"
+    if "480" in text:
+        return "480p"
     return ""
 
 
@@ -810,6 +813,34 @@ def _size_gb(size_value) -> float:
         return float(size_value or 0) / (1024 ** 3)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _size_bytes(size_value) -> int:
+    try:
+        return max(0, int(size_value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_organize_task_size(size_value) -> str:
+    size = _size_bytes(size_value)
+    if size <= 0:
+        return ""
+
+    def _compact(value: float, precision: int = 1) -> str:
+        if precision <= 0:
+            return f"{value:.0f}"
+        return f"{value:.{precision}f}".rstrip("0").rstrip(".")
+
+    if size >= 1024 ** 4:
+        return f"{_compact(size / 1024 ** 4)}TB"
+    if size >= 1024 ** 3:
+        return f"{_compact(size / 1024 ** 3)}GB"
+    if size >= 1024 ** 2:
+        return f"{_compact(size / 1024 ** 2, 0)}MB"
+    if size >= 1024:
+        return f"{_compact(size / 1024, 0)}KB"
+    return f"{size}B"
 
 
 async def _evaluate_library_replacement(config_data: dict, drive_index: int,
@@ -1446,6 +1477,7 @@ async def _run_organize_async(run_id: str, req):
     """
     total_files = 0
     scanned_video_count = 0
+    organize_size_bytes = 0
     scan_complete = False
     results = []
     skipped_results = []
@@ -1671,9 +1703,22 @@ async def _run_organize_async(run_id: str, req):
             logger.info(f"[MediaOrganize] 开始识别: {first_vf.get('name', '')}")
 
             if first_parsed["tmdb_id_direct"]:
+                direct_media_type = first_parsed["media_type"]
+                if first_parsed.get("season") is None and first_parsed.get("episode") is None:
+                    resolved_media_type = await _resolve_direct_tmdb_id_media_type(
+                        first_parsed["tmdb_id_direct"],
+                        api_key,
+                        direct_media_type,
+                    )
+                    if resolved_media_type and resolved_media_type != direct_media_type:
+                        logger.info(
+                            f"[MediaOrganize] 直写TMDb编号类型校准: "
+                            f"TMDb:{first_parsed['tmdb_id_direct']} {direct_media_type} -> {resolved_media_type}"
+                        )
+                        direct_media_type = resolved_media_type
                 direct_result = {
                     "tmdb_id": first_parsed["tmdb_id_direct"],
-                    "media_type": first_parsed["media_type"],
+                    "media_type": direct_media_type,
                     "title": first_parsed["title"],
                 }
                 return key, direct_result
@@ -1688,7 +1733,7 @@ async def _run_organize_async(run_id: str, req):
                 return None
             _, first_parsed, _ = group[0]
             tmdb_id = search_result["tmdb_id"]
-            media_type = first_parsed["media_type"]
+            media_type = search_result.get("media_type") or first_parsed["media_type"]
             season_num = search_result.get("season", first_parsed["season"])
             required_episodes = []
             if media_type == "tv":
@@ -1896,7 +1941,7 @@ async def _run_organize_async(run_id: str, req):
                         continue
 
                     tmdb_id = search_result["tmdb_id"]
-                    media_type = parsed["media_type"]
+                    media_type = search_result.get("media_type") or parsed["media_type"]
                     season_num = search_result.get("season", parsed["season"])
                     episode_num = search_result.get("episode", parsed["episode"])
 
@@ -2141,6 +2186,20 @@ async def _run_organize_async(run_id: str, req):
                             "status": "skipped",
                             "message": f"洗版未通过，保留旧文件（{_human_wash_reason(wash_reason)}）",
                         })
+                        _send_wash_notify(_build_wash_notify_payload(
+                            tmdb_data=tmdb_data,
+                            variables=variables,
+                            media_type=media_type,
+                            tmdb_id=str(tmdb_id),
+                            file_item=file_item,
+                            wash_result=wash_result,
+                            target_base=target_base,
+                            season_num=season_num,
+                            episode_num=episode_num,
+                            status="failed",
+                            reason_text=_human_wash_reason(wash_reason),
+                            decision_text="洗版未通过，已保留旧资源",
+                        ))
                         if wash_dir_cid:
                             pending_wash_reject_moves.append(file_item)
                             logger.debug(f"[Wash] 已暂存洗版未通过文件，整理结束后批量移走: {file_name}")
@@ -2158,6 +2217,7 @@ async def _run_organize_async(run_id: str, req):
                         _raise_if_organize_cancelled(run_id)
                         continue
                     wash_replace_candidate_path = ""
+                    wash_success_notify_payload = {}
                     if wash_decision == "replace_existing":
                         candidate = wash_result.get("candidate") or {}
                         removed, remove_reason = await loop.run_in_executor(
@@ -2171,6 +2231,20 @@ async def _run_organize_async(run_id: str, req):
                                 "status": "error",
                                 "message": f"洗版删除旧文件失败: {remove_reason}",
                             })
+                            _send_wash_notify(_build_wash_notify_payload(
+                                tmdb_data=tmdb_data,
+                                variables=variables,
+                                media_type=media_type,
+                                tmdb_id=str(tmdb_id),
+                                file_item=file_item,
+                                wash_result=wash_result,
+                                target_base=target_base,
+                                season_num=season_num,
+                                episode_num=episode_num,
+                                status="failed",
+                                reason_text=str(remove_reason or "旧文件处理失败"),
+                                decision_text="旧文件处理失败，未完成替换",
+                            ))
                             group_failed.append(file_item)
                             _processed = len(results)
                             _update_streaming_progress(
@@ -2212,6 +2286,20 @@ async def _run_organize_async(run_id: str, req):
                             float(wash_result.get("new_equivalent_size") or 0.0),
                             float(wash_result.get("old_equivalent_size") or 0.0),
                         )
+                        wash_success_notify_payload = _build_wash_notify_payload(
+                            tmdb_data=tmdb_data,
+                            variables=variables,
+                            media_type=media_type,
+                            tmdb_id=str(tmdb_id),
+                            file_item=file_item,
+                            wash_result=wash_result,
+                            target_base=target_base,
+                            season_num=season_num,
+                            episode_num=episode_num,
+                            status="success",
+                            reason_text=_human_wash_reason(wash_result.get("reason", "replace_existing")),
+                            decision_text="洗版通过，已替换旧资源",
+                        )
 
                     if media_type == 'movie':
                         notify_elapsed_started_at = _time.time()
@@ -2233,6 +2321,7 @@ async def _run_organize_async(run_id: str, req):
                                 elapsed_seconds=notify_elapsed_seconds + tmdb_elapsed_seconds,
                                 library_location=target_base,
                             ))
+                            _send_wash_notify(wash_success_notify_payload)
                             _finalize_organize_result(
                                 result=result,
                                 media_type=media_type,
@@ -2318,6 +2407,7 @@ async def _run_organize_async(run_id: str, req):
                         plan["effective_target_cid"] = str(effective_target_cid)
                         plan["strm_force_overwrite"] = bool(wash_replace_candidate_path)
                         plan["strm_replace_remote_paths"] = [wash_replace_candidate_path] if wash_replace_candidate_path else []
+                        plan["wash_notify_payload"] = wash_success_notify_payload
 
                         keep_incoming, existing_plan, dedupe_reason = await _dedupe_pending_tv_plan_item(
                             config_data,
@@ -2458,6 +2548,7 @@ async def _run_organize_async(run_id: str, req):
                             strm_force_overwrite=bool(plan_item.get("strm_force_overwrite")),
                             strm_replace_remote_paths=list(plan_item.get("strm_replace_remote_paths") or []),
                         )
+                        _send_wash_notify(plan_item.get("wash_notify_payload") or {})
                     else:
                         group_failed.append(plan_item.get("vf") or {})
 
@@ -2740,10 +2831,27 @@ async def _run_organize_async(run_id: str, req):
         normal_video_items = []
         for vf in video_items:
             scanned_video_count += 1
+            organize_size_bytes += _size_bytes(vf.get("size", 0))
             file_name = vf.get("name", "")
             file_sha1 = vf.get("sha1", "").upper()
             if file_sha1 and library_index.has_sha1(file_sha1):
+                duplicate_target = library_index.first_item_for_sha1(file_sha1) or {}
                 logger.info(f"[MediaOrganize] SHA1已存在，跳过整理: {file_name}")
+                try:
+                    append_organize_history({
+                        "category": "sha1_duplicate",
+                        "status": "skipped",
+                        "title": "SHA1重复",
+                        "source_file": file_name,
+                        "source_path": vf.get("path", ""),
+                        "target_file": duplicate_target.get("name", ""),
+                        "target_path": duplicate_target.get("path", ""),
+                        "size": _format_notify_size(vf.get("size", 0)),
+                        "reason": "目标目录已存在相同文件",
+                        "summary": "SHA1重复，已跳过整理",
+                    })
+                except Exception as e:
+                    logger.debug(f"[MediaOrganize] SHA1历史写入失败: {e}")
                 results.append({
                     "file": file_name,
                     "status": "skipped",
@@ -2796,7 +2904,7 @@ async def _run_organize_async(run_id: str, req):
             await _flush_pending_duplicate_moves()
             _raise_if_organize_cancelled(run_id)
 
-        seen_source_sha1s: set[str] = set()
+        seen_source_sha1_items: dict[str, dict] = {}
         for vf in normal_video_items:
             file_name = vf.get("name", "")
             ext = os.path.splitext(file_name)[1] or ".mkv"
@@ -2821,6 +2929,11 @@ async def _run_organize_async(run_id: str, req):
             parsed = _parse_filename(file_name, media_type_hint=req.media_type or None, file_path=file_path)
             if not parsed:
                 logger.info(f"[MediaOrganize] 解析失败 -> {file_name}")
+                _append_organize_failure_history(
+                    file_item=vf,
+                    reason="无法识别媒体信息",
+                    source_path=file_path,
+                )
                 results.append({"file": file_name, "status": "error", "message": "无法识别媒体信息"})
                 if has_failed_dir and failed_dir_cid:
                     pending_failed_moves.append(vf)
@@ -2842,8 +2955,24 @@ async def _run_organize_async(run_id: str, req):
             )
             file_sha1 = str(vf.get("sha1", "") or "").upper().strip()
             if file_sha1:
-                if file_sha1 in seen_source_sha1s:
+                if file_sha1 in seen_source_sha1_items:
+                    duplicate_target = seen_source_sha1_items.get(file_sha1) or {}
                     logger.info(f"[MediaOrganize] 源目录SHA1重复，跳过整理: {file_name}")
+                    try:
+                        append_organize_history({
+                            "category": "sha1_duplicate",
+                            "status": "skipped",
+                            "title": "SHA1重复",
+                            "source_file": file_name,
+                            "source_path": vf.get("path", ""),
+                            "target_file": duplicate_target.get("name", ""),
+                            "target_path": duplicate_target.get("path", ""),
+                            "size": _format_notify_size(vf.get("size", 0)),
+                            "reason": "源目录已存在相同文件",
+                            "summary": "SHA1重复，已跳过整理",
+                        })
+                    except Exception as e:
+                        logger.debug(f"[MediaOrganize] SHA1历史写入失败: {e}")
                     results.append({
                         "file": file_name,
                         "status": "skipped",
@@ -2878,7 +3007,7 @@ async def _run_organize_async(run_id: str, req):
                     )
                     _raise_if_organize_cancelled(run_id)
                     continue
-                seen_source_sha1s.add(file_sha1)
+                seen_source_sha1_items[file_sha1] = vf
             key = parsed["group_key"]
             grouped_items_by_key.setdefault(key, []).append((vf, parsed, ext))
             _update_streaming_progress(
@@ -2972,12 +3101,13 @@ async def _run_organize_async(run_id: str, req):
         movie_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "movie")
         tv_success_count = sum(1 for r in results if r.get("status") == "success" and r.get("media_type") == "tv")
         elapsed = _time.time() - _org_start
+        organize_size_text = _format_organize_task_size(organize_size_bytes)
         logger.info(
             f"[MediaOrganize] 整理完成: 成功 {success_count}/{total_files} | 失败 {failed_count} | "
             f"跳过 {skipped_count} (SHA1重复 {sha1_duplicate_skipped_count}, "
             f"洗版未通过 {wash_rejected_skipped_count}, 同批次洗版重复 {same_batch_duplicate_skipped_count}, "
             f"预告片 {trailer_skipped_count}, 其他 {other_skipped_count}) | "
-            f"新生成STRM {strm_generated_count} | 耗时 {elapsed:.1f}s"
+            f"整理体积 {organize_size_text or '-'} | 新生成STRM {strm_generated_count} | 耗时 {elapsed:.1f}s"
         )
         notify_detail = ""
         if failed_count:
@@ -2994,6 +3124,7 @@ async def _run_organize_async(run_id: str, req):
             trailer_skipped_count=trailer_skipped_count,
             other_skipped_count=other_skipped_count,
             strm_generated_count=strm_generated_count,
+            organize_size_bytes=organize_size_bytes,
             elapsed_seconds=elapsed,
             detail=notify_detail,
         )
@@ -3017,6 +3148,8 @@ async def _run_organize_async(run_id: str, req):
             "trailer_skipped": trailer_skipped_count,
             "other_skipped": other_skipped_count,
             "strm": strm_generated_count,
+            "organize_size_bytes": organize_size_bytes,
+            "organize_size": organize_size_text,
             "movies": movie_success_count,
             "tv_episodes": tv_success_count,
             "elapsed_seconds": elapsed,
@@ -3056,6 +3189,8 @@ async def _run_organize_async(run_id: str, req):
         set_task_detail(run_id, {
             "total": scanned_video_count, "success": success_count, "failed": _failed, "strm": strm_generated_count,
             **skipped_summary, "movies": movie_success_count, "tv_episodes": tv_success_count,
+            "organize_size_bytes": organize_size_bytes,
+            "organize_size": _format_organize_task_size(organize_size_bytes),
             "elapsed_seconds": elapsed, "stopped": True,
         }, force=True)
         logger.info(f"[MediaOrganize] 整理已取消: 成功 {success_count}/{scanned_video_count}")
@@ -3066,6 +3201,7 @@ async def _run_organize_async(run_id: str, req):
             failed_count=_failed,
             skipped_count=skipped_count,
             strm_generated_count=strm_generated_count,
+            organize_size_bytes=organize_size_bytes,
             elapsed_seconds=elapsed,
             detail=f"已处理 {_processed}/{scanned_video_count}",
         )
@@ -3100,6 +3236,7 @@ async def _run_organize_async(run_id: str, req):
             failed_count=_failed or 1,
             skipped_count=skipped_count,
             strm_generated_count=strm_generated_count,
+            organize_size_bytes=organize_size_bytes,
             elapsed_seconds=elapsed,
             detail=f"失败原因：{e}",
         )
@@ -3188,6 +3325,143 @@ def _build_organize_notify_payload(*, tmdb_data: dict, variables: dict, media_ty
     }
 
 
+def _format_notify_size(size_value) -> str:
+    try:
+        size = int(size_value or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size >= 1024 ** 3:
+        return f"{size / 1024 ** 3:.2f}G"
+    if size >= 1024 ** 2:
+        return f"{size / 1024 ** 2:.0f}M"
+    if size >= 1024:
+        return f"{size / 1024:.0f}K"
+    return f"{size}B" if size else ""
+
+
+def _format_notify_resource(file_item: dict, wash_info: dict | None = None,
+                            metadata: dict | None = None, episode_text: str = "") -> dict:
+    metadata = metadata or {}
+    wash_info = wash_info or {}
+    quality_parts = [
+        metadata.get("source") or metadata.get("web_source") or "",
+        metadata.get("resource_effect") or "",
+        metadata.get("video_effect") or "",
+        metadata.get("resource_pix") or wash_info.get("resource_pix") or "",
+    ]
+    video_parts = [
+        metadata.get("video_encode") or wash_info.get("video_encode") or "",
+        metadata.get("color_depth") or "",
+        metadata.get("fps") or "",
+    ]
+    return {
+        "episode": episode_text,
+        "quality": " ".join(str(p) for p in quality_parts if p) or "未知",
+        "video": " ".join(str(p) for p in video_parts if p) or "未知",
+        "audio": str(metadata.get("audio_encode") or "未知"),
+        "size": _format_notify_size((file_item or {}).get("size", 0)) or "未知",
+    }
+
+
+def _resource_summary(resource: dict) -> str:
+    parts = []
+    for label, key in (("画质", "quality"), ("视频", "video"), ("音频", "audio"), ("大小", "size")):
+        value = str((resource or {}).get(key) or "").strip()
+        if value and value != "未知":
+            parts.append(f"{label}：{value}")
+    return "；".join(parts)
+
+
+def _compact_notify_text(value: str, limit: int = 54) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    keep = max(8, limit - 3)
+    return f"{text[:keep].rstrip()}..."
+
+
+def _short_library_location(value: str) -> str:
+    text = str(value or "").strip("/")
+    if not text:
+        return ""
+    parts = [p for p in text.split("/") if p]
+    if len(parts) <= 4:
+        return "/" + "/".join(parts)
+    return "/.../" + "/".join(parts[-4:])
+
+
+def _build_wash_notify_payload(*, tmdb_data: dict, variables: dict, media_type: str, tmdb_id: str,
+                               file_item: dict, wash_result: dict, target_base: str = "",
+                               season_num: Optional[int] = None, episode_num: Optional[int] = None,
+                               status: str = "success", reason_text: str = "",
+                               decision_text: str = "") -> dict:
+    source = tmdb_data.get("series_details") if "series_details" in (tmdb_data or {}) else (tmdb_data or {})
+    title = variables.get("title") or source.get("name" if media_type == "tv" else "title", "")
+    year = variables.get("year") or ""
+    season_episode = ""
+    episode_text = ""
+    if media_type == "tv" and season_num is not None and episode_num is not None:
+        season_episode = f"S{int(season_num):02d}E{int(episode_num):02d}"
+        episode_text = season_episode
+
+    candidate = wash_result.get("candidate") or {}
+    old_parsed = _parse_filename(
+        str(candidate.get("name", "") or ""),
+        media_type_hint=media_type,
+        file_path=str(candidate.get("path", "") or ""),
+        quiet=True,
+    ) or {}
+    old_meta = dict(old_parsed.get("meta_info") or {})
+    new_meta = dict(variables or {})
+    old_resource = _format_notify_resource(
+        candidate,
+        wash_result.get("old_info") or {},
+        old_meta,
+        episode_text=episode_text,
+    )
+    new_resource = _format_notify_resource(
+        file_item,
+        wash_result.get("new_info") or {},
+        new_meta,
+        episode_text=episode_text,
+    )
+    success = status == "success"
+    if not reason_text:
+        reason_text = _human_wash_reason(wash_result.get("reason", "replace_existing" if success else "keep_existing"))
+    if not decision_text:
+        decision_text = "洗版通过，已替换旧资源" if success else "洗版未通过，已保留旧资源"
+    vote = source.get("vote_average", 0)
+    return {
+        "media_name": title,
+        "media_type": media_type,
+        "year": year,
+        "season_episode": season_episode,
+        "rating": f"{vote:.1f}分" if vote else "",
+        "genres": " · ".join(g.get("name", "") for g in source.get("genres", [])[:3]),
+        "overview": (source.get("overview", "") or "")[:150],
+        "tmdb_id": tmdb_id,
+        "library_location": target_base,
+        "status": status,
+        "status_text": "成功" if success else "失败",
+        "status_emoji": "✅" if success else "⚠️",
+        "decision_text": decision_text,
+        "reason_text": reason_text,
+        "old_resource": old_resource,
+        "new_resource": new_resource,
+        "old_summary": _resource_summary(old_resource),
+        "new_summary": _resource_summary(new_resource),
+        "old_file_name": str(candidate.get("name", "") or ""),
+        "new_file_name": str((file_item or {}).get("name", "") or ""),
+        "old_file_path": str(candidate.get("path", "") or ""),
+        "new_file_path": str((file_item or {}).get("path", "") or ""),
+        "old_file_short": _compact_notify_text(str(candidate.get("name", "") or ""), 58),
+        "new_file_short": _compact_notify_text(str((file_item or {}).get("name", "") or ""), 58),
+        "library_location_short": _short_library_location(target_base),
+        "original_name": source.get("original_name" if media_type == "tv" else "original_title", ""),
+        "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def _send_organize_notify(payload: dict):
     if not payload:
         return
@@ -3195,6 +3469,61 @@ def _send_organize_notify(payload: dict):
     from app.services.telegram_service import telegram_notify_service
     wechat_notify_service.notify_organize_complete(**payload)
     telegram_notify_service.notify_organize_complete(**payload)
+
+
+def _send_wash_notify(payload: dict):
+    if not payload:
+        return
+    try:
+        source_path = payload.get("new_file_path", "")
+        target_path = payload.get("old_file_path", "") or payload.get("library_location", "")
+        append_organize_history({
+            "category": "wash_success" if payload.get("status") == "success" else "wash_failed",
+            "status": payload.get("status_text", ""),
+            "title": payload.get("media_name", ""),
+            "year": payload.get("year", ""),
+            "season_episode": payload.get("season_episode", ""),
+            "media_type": payload.get("media_type", ""),
+            "tmdb_id": payload.get("tmdb_id", ""),
+            "library_location": payload.get("library_location", ""),
+            "source_file": payload.get("new_file_name", ""),
+            "target_file": payload.get("old_file_name", ""),
+            "source_path": source_path,
+            "target_path": target_path,
+            "quality": payload.get("new_summary", ""),
+            "size": (payload.get("new_resource") or {}).get("size", ""),
+            "reason": payload.get("reason_text", ""),
+            "decision": payload.get("decision_text", ""),
+            "summary": payload.get("decision_text", ""),
+        })
+    except Exception as e:
+        logger.debug(f"[Wash] 洗版历史写入失败: {e}")
+    try:
+        from app.services.wechat_service import wechat_notify_service
+        wechat_notify_service.notify_wash_result(**payload)
+    except Exception as e:
+        logger.warning(f"[Wash] 洗版通知发送失败: {e}")
+
+
+def _append_organize_failure_history(
+    *, file_item: dict, reason: str, source_path: str = "", target_path: str = "", media_type: str = ""
+) -> None:
+    file_name = str((file_item or {}).get("name", "") or "")
+    try:
+        append_organize_history({
+            "category": "organize_failed",
+            "status": "error",
+            "title": file_name or "整理失败",
+            "media_type": media_type,
+            "source_file": file_name,
+            "source_path": source_path or str((file_item or {}).get("path", "") or ""),
+            "target_path": target_path,
+            "size": _format_notify_size((file_item or {}).get("size", 0)),
+            "reason": reason or "未知原因",
+            "summary": reason or "整理失败",
+        })
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] 整理失败历史写入失败: {e}")
 
 
 def _send_organize_task_notify(
@@ -3210,6 +3539,7 @@ def _send_organize_task_notify(
     trailer_skipped_count: int = 0,
     other_skipped_count: int = 0,
     strm_generated_count: int = 0,
+    organize_size_bytes: int = 0,
     elapsed_seconds: float | None = None,
     detail: str = "",
 ):
@@ -3239,6 +3569,7 @@ def _send_organize_task_notify(
             "task_category": "media_organize",
             "elapsed": elapsed,
             "total_count": total_files,
+            "organize_size": _format_organize_task_size(organize_size_bytes),
             "success_count": success_count,
             "failed": failed_count,
             "skipped": skipped_count,
@@ -3294,6 +3625,54 @@ def _finalize_organize_result(
     season_dir_name = result.get("season_dir", "")
     renamed_file = result.get("renamed_file", "") or vf.get("name", "")
     target_file_path = _join_remote_path(target_base, target_folder_name, season_dir_name, renamed_file)
+    source_file_path = str(vf.get("path", "") or "")
+    season_episode = ""
+    if media_type == "tv":
+        season = parsed.get("season")
+        episode = parsed.get("episode")
+        if season is not None and episode is not None:
+            season_episode = f"S{int(season):02d}E{int(episode):02d}"
+    quality_text = " ".join(
+        str(part)
+        for part in (
+            variables.get("source", ""),
+            variables.get("resource_effect", ""),
+            variables.get("video_effect", ""),
+            variables.get("resource_pix", ""),
+        )
+        if part
+    )
+    video_text = " ".join(
+        str(part)
+        for part in (
+            variables.get("video_encode", ""),
+            variables.get("color_depth", ""),
+            variables.get("fps", ""),
+        )
+        if part
+    )
+    try:
+        append_organize_history({
+            "category": "organize_success",
+            "status": "success",
+            "title": variables.get("title") or parsed.get("title") or target_folder_name or renamed_file,
+            "year": variables.get("year", ""),
+            "season_episode": season_episode,
+            "media_type": media_type,
+            "tmdb_id": variables.get("tmdb_id", ""),
+            "source_file": vf.get("name", ""),
+            "target_file": renamed_file,
+            "source_path": source_file_path,
+            "target_path": target_file_path,
+            "library_location": target_base,
+            "quality": quality_text,
+            "video": video_text,
+            "audio": variables.get("audio_encode", ""),
+            "size": _format_notify_size(vf.get("size", 0)),
+            "summary": result.get("message", ""),
+        })
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] 整理历史写入失败: {e}")
     file_season_cid = meta_ctx.get("season_cid", "")
     file_folder_cid = meta_ctx.get("target_cid", "")
     file_parent_id = int(file_season_cid) if file_season_cid and str(file_season_cid).isdigit() else (

@@ -35,6 +35,16 @@ NOTIFICATION_TYPES = {
         "description": "新媒体添加到媒体库时发送通知",
         "icon": "📚"
     },
+    "organize_complete": {
+        "name": "整理通知",
+        "description": "媒体整理完成时发送通知",
+        "icon": "💿"
+    },
+    "wash_result": {
+        "name": "洗版通知",
+        "description": "整理过程中触发洗版成功或失败时发送通知",
+        "icon": "💎"
+    },
     "resource_transfer": {
         "name": "转存通知",
         "description": "115网盘转存完成时发送通知",

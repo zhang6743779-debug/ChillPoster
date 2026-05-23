@@ -51,7 +51,7 @@
           "value": "zh,cn"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "CN,HK,TW,MO"
         }
@@ -81,7 +81,7 @@
           "value": "zh,cn"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "CN,HK,TW,MO"
         },
@@ -106,7 +106,7 @@
           "value": "en,es,fr,pt,de,it,nl,ru,pl,sv,da,no,fi,cs,hu,ro,sk,hr,sl,bg,el,lt,lv,et,is,mt,eu,ca,gl,cy,tr,zu,ga,fo,yi"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "US,GB,FR,DE,IT,ES,PT,NL,SE,PL,RU,CA,AU,NZ,NO,DK,FI,GR,TR,IE,IS,CH,BE,LU,MT,ZA,MX"
         },
@@ -131,7 +131,7 @@
           "value": "ja,ko"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "JP,KR"
         },
@@ -166,7 +166,7 @@
           "value": "16"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "AND",
           "value": "HK,TW,MO"
         }
@@ -186,7 +186,7 @@
           "value": "zh,cn"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "CN,HK,TW,MO"
         }
@@ -206,7 +206,7 @@
           "value": "ja"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "JP"
         }
@@ -226,7 +226,7 @@
           "value": "ko"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "KR"
         }
@@ -246,7 +246,7 @@
           "value": "en,es,fr,pt,de,it,nl,ru,pl,sv,da,no,fi,cs,hu,ro,sk,hr,sl,bg,el,lt,lv,et,is,mt,eu,ca,gl,cy,tr,zu,ga,fo,yi"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "US,GB,FR,DE,IT,ES,PT,NL,SE,PL,RU,CA,AU,NZ,NO,DK,FI,GR,TR,IE,IS,CH,BE,LU,MT,ZA,MX"
         }
@@ -281,7 +281,7 @@
           "value": "zh,cn"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "AND",
           "value": "HK,TW,MO"
         }
@@ -296,7 +296,7 @@
           "value": "zh,cn,bo,za"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "AND",
           "value": "CN,HK,TW,MO"
         }
@@ -311,7 +311,7 @@
           "value": "ja"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "JP"
         }
@@ -326,7 +326,7 @@
           "value": "ko"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "KR"
         }
@@ -341,7 +341,7 @@
           "value": "en,es,fr,pt,de,it,nl,ru,pl,sv,da,no,fi,cs,hu,ro,sk,hr,sl,bg,el,lt,lv,et,is,mt,eu,ca,gl,cy,tr,zu,ga,fo,yi"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "AND",
           "value": "US,GB,FR,DE,IT,ES,PT,NL,SE,PL,RU,CA,AU,NZ,NO,DK,FI,GR,TR,IE,IS,CH,BE,LU,MT,ZA,MX"
         }
@@ -356,7 +356,7 @@
           "value": "id,th,ms,hi,tl,vi,gu,kn,kok,mr,pa,sa,ta,te,ur,si,ne,lo,mm,my,kh,bd"
         },
         {
-          "field": "production_countries",
+          "field": "origin_country",
           "logic": "OR",
           "value": "TH,VN,MY,PH,IN,LA,MM,SG,ID,KP,BD,KH,LK,NP"
         }

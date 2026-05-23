@@ -9,6 +9,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
             playback: { name: '播放通知', description: '有人通过302播放媒体时发送通知', icon: '🎬' },
             media_added: { name: '入库通知', description: '新媒体添加到媒体库时发送通知', icon: '📚' },
             organize_complete: { name: '整理通知', description: '媒体整理完成时发送通知', icon: '💿' },
+            wash_result: { name: '洗版通知', description: '整理过程中触发洗版成功或失败时发送通知', icon: '💎' },
             resource_transfer: { name: '转存通知', description: '115网盘转存完成时发送通知', icon: '📥' },
             checkin: { name: '签到通知', description: '影巢签到完成时发送通知', icon: '✅' },
             task_complete: { name: '任务通知', description: '海报生成等任务完成时发送通知', icon: '🎨' }
@@ -17,6 +18,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         const templateLabels = {
             media_added: '入库通知模板',
             organize_complete: '整理通知模板',
+            wash_result: '洗版通知模板',
             playback: '播放通知模板'
         };
 
@@ -24,7 +26,8 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
         const templateVars = {
             media_added: ['title', 'year', 'media_type', 'library_name', 'rating', 'genres', 'overview', 'tagline', 'poster_url', 'now'],
             playback: ['title', 'year', 'original_name', 'media_type', 'rating', 'genres', 'overview', 'tagline', 'emby_name', 'user_name', 'client_info', 'now', 'poster_url'],
-            organize_complete: ['title', 'year', 'media_type', 'season_episode', 'rating', 'genres', 'overview', 'tmdb_id', 'quality', 'video', 'audio', 'library_location', 'episode_count', 'episode_ranges', 'file_size', 'release_group', 'elapsed']
+            organize_complete: ['title', 'year', 'media_type', 'season_episode', 'rating', 'genres', 'overview', 'tmdb_id', 'quality', 'video', 'audio', 'library_location', 'episode_count', 'episode_ranges', 'file_size', 'release_group', 'elapsed'],
+            wash_result: ['title', 'year', 'media_type', 'season_episode', 'genres', 'tmdb_id', 'library_location', 'library_location_short', 'status_text', 'status_emoji', 'decision_text', 'reason_text', 'old_summary', 'new_summary', 'old_file_name', 'new_file_name', 'old_file_short', 'new_file_short', 'now']
         };
 
         // 默认模板
@@ -40,6 +43,10 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
             organize_complete: {
                 title: '💿 整理完成 ✅ 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}',
                 text: '⭐️评分：{{ rating or \'暂无\' }}\n🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}{% if quality %}\n💎画质：{{ quality }}{% endif %}{% if video %}\n🎞️视频：{{ video }}{% endif %}{% if audio %}\n🎵音频：{{ audio }}{% endif %}{% if library_location %}\n📁库位：{{ library_location }}{% endif %}{% if episode_count %}\n📖数量：{{ episode_count }} 集{% endif %}{% if episode_ranges %}\n📚集数：{{ episode_ranges }}{% endif %}{% if file_size %}\n⚖️大小：{{ file_size }}{% endif %}{% if tmdb_id %}\n🎬tmdbid：{{ tmdb_id }}{% endif %}{% if release_group %}\n👨\u200d🎨制作组：{{ release_group }}{% endif %}{% if elapsed %}\n⏱️整理耗时：{{ elapsed }}{% endif %}{% if overview %}\n\n📝简介：{{ overview }}{% endif %}'
+            },
+            wash_result: {
+                title: '💎 洗版{{ status_text }} {{ status_emoji }} 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}',
+                text: '🎬类型：{{ media_type }}{% if genres %} · {{ genres }}{% endif %}{% if library_location %}\n📁库位：{{ library_location }}{% endif %}\n📌结果：{{ decision_text }}\n📝原因：{{ reason_text }}{% if old_summary %}\n\n📦已入库旧资源：{{ old_summary }}{% endif %}{% if new_summary %}\n✨本次整理资源：{{ new_summary }}{% endif %}\n\n🕐完成时间：{{ now }}'
             }
         };
 
@@ -47,6 +54,7 @@ export function useNotificationSettings({ showToast, saveGlobalSettings }) {
             playback: true,
             media_added: true,
             organize_complete: true,
+            wash_result: true,
             resource_transfer: true,
             checkin: true,
             task_complete: true

@@ -25,6 +25,16 @@ NOTIFICATION_TYPES = {
         "description": "新媒体添加到媒体库时发送通知",
         "icon": "📚"
     },
+    "organize_complete": {
+        "name": "整理通知",
+        "description": "媒体整理完成时发送通知",
+        "icon": "💿"
+    },
+    "wash_result": {
+        "name": "洗版通知",
+        "description": "整理过程中触发洗版成功或失败时发送通知",
+        "icon": "💎"
+    },
     "resource_transfer": {
         "name": "转存通知",
         "description": "115网盘转存完成时发送通知",
@@ -46,6 +56,7 @@ DEFAULT_NOTIFY_TYPES = {
     "playback": True,
     "media_added": True,
     "organize_complete": True,
+    "wash_result": True,
     "resource_transfer": True,
     "checkin": True,
     "task_complete": True,
@@ -318,6 +329,69 @@ class WechatNotifyService:
                 f"[微信通知] 图文发送成功: 接收={to_user or '@all'} | 标题={_compact_log_text(title, 60)} | "
                 f"描述长度={len(str(description or ''))} | 图片={'有' if image_url else '无'} | 链接={'有' if link_url else '无'}"
             )
+            return True
+        return False
+
+    def upload_temp_image(self, image_path: str) -> Optional[str]:
+        """上传企业微信临时图片素材，返回 media_id。"""
+        if not self.config.get("enabled"):
+            logger.warning("[微信通知] 通知未启用")
+            return None
+        if not image_path or not os.path.exists(image_path):
+            logger.warning("[微信通知] 图片素材不存在")
+            return None
+
+        access_token = self._get_access_token()
+        if not access_token:
+            return None
+
+        base_url = self._get_api_base_url()
+        url = f"{base_url}/cgi-bin/media/upload?access_token={access_token}&type=image"
+        try:
+            with open(image_path, "rb") as fh:
+                files = {"media": (os.path.basename(image_path), fh, "image/jpeg")}
+                resp = requests.post(url, files=files, timeout=20)
+            data = resp.json()
+            if data.get("errcode") == 0 and data.get("media_id"):
+                logger.debug("[微信通知] 临时图片素材上传成功")
+                return str(data.get("media_id"))
+            if data.get("errcode") == 42001:
+                access_token = self._get_access_token(force=True)
+                if access_token:
+                    url = f"{base_url}/cgi-bin/media/upload?access_token={access_token}&type=image"
+                    with open(image_path, "rb") as fh:
+                        files = {"media": (os.path.basename(image_path), fh, "image/jpeg")}
+                        resp = requests.post(url, files=files, timeout=20)
+                    data = resp.json()
+                    if data.get("errcode") == 0 and data.get("media_id"):
+                        logger.debug("[微信通知] 临时图片素材刷新 token 后上传成功")
+                        return str(data.get("media_id"))
+            logger.error(f"[微信通知] 临时图片素材上传失败: {data}")
+        except Exception as e:
+            logger.error(f"[微信通知] 临时图片素材上传异常: {e}")
+        return None
+
+    def send_image_file(self, image_path: str, to_user: str = "@all") -> bool:
+        """发送本地图片文件。"""
+        media_id = self.upload_temp_image(image_path)
+        if not media_id:
+            return False
+
+        access_token = self._get_access_token()
+        if not access_token:
+            return False
+
+        base_url = self._get_api_base_url()
+        url = f"{base_url}/cgi-bin/message/send?access_token={access_token}"
+        payload = {
+            "touser": to_user,
+            "msgtype": "image",
+            "agentid": self.config.get("agent_id", ""),
+            "image": {"media_id": media_id},
+            "safe": 0,
+        }
+        if self._send_request(url, payload):
+            logger.debug("[微信通知] 图片消息发送成功")
             return True
         return False
 
@@ -640,6 +714,67 @@ class WechatNotifyService:
 
         return self.send_news_message(title=title, description=description, image_url=image_url)
 
+    def notify_wash_result(self, media_name: str, media_type: str = "tv",
+                           year: str = "", season_episode: str = "",
+                           rating: str = "", genres: str = "", overview: str = "",
+                           tmdb_id: str = "", library_location: str = "",
+                           status: str = "success", status_text: str = "",
+                           status_emoji: str = "", decision_text: str = "",
+                           reason_text: str = "", old_resource: dict | None = None,
+                           new_resource: dict | None = None, old_summary: str = "",
+                           new_summary: str = "", old_file_name: str = "",
+                           new_file_name: str = "", original_name: str = "",
+                           **kwargs) -> bool:
+        """发送洗版结果通知。优先发送渲染图片，失败时回退普通图文消息。"""
+        if not self.is_notify_type_enabled("wash_result"):
+            return False
+
+        templates = self.config.get("templates", {}).get("wash_result", {})
+        title_tpl = templates.get("title", "洗版{{ status_text }} {{ status_emoji }} 《{{ title }}》{% if year %}({{ year }}){% endif %}{% if season_episode %} {{ season_episode }}{% endif %}")
+        text_tpl = templates.get("text", "")
+        now = kwargs.get("now") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        media_type_label = "电影" if media_type == "movie" else "剧集"
+        status_text = status_text or ("成功" if status == "success" else "失败")
+        status_emoji = status_emoji or ("✅" if status == "success" else "⚠️")
+        context = {
+            "title": media_name,
+            "year": str(year) if year else "",
+            "media_type": media_type_label,
+            "season_episode": season_episode or "",
+            "rating": rating or "",
+            "genres": genres or "",
+            "overview": overview or "",
+            "tmdb_id": tmdb_id or "",
+            "library_location": library_location or "",
+            "library_location_short": kwargs.get("library_location_short") or "",
+            "status": status or "",
+            "status_text": status_text,
+            "status_emoji": status_emoji,
+            "decision_text": decision_text or "",
+            "reason_text": reason_text or "",
+            "old_summary": old_summary or "",
+            "new_summary": new_summary or "",
+            "old_file_name": old_file_name or "",
+            "new_file_name": new_file_name or "",
+            "old_file_short": kwargs.get("old_file_short") or "",
+            "new_file_short": kwargs.get("new_file_short") or "",
+            "now": now,
+        }
+        title = render_template(title_tpl, context)
+        description = render_template(text_tpl, context)
+
+        search_name = original_name or media_name.split(" S")[0]
+        poster_url = self._get_notification_image_url(
+            search_name=search_name,
+            media_type=media_type,
+            year=year,
+            tmdb_id=tmdb_id,
+        )
+
+        # 企业微信图片消息在聊天内会被压成小缩略图，点开又按原图展示；
+        # 洗版通知默认走图文卡片，让资源对比信息直接显示在消息内容里。
+        return self.send_news_message(title=title, description=description, image_url=poster_url)
+
     def notify_checkin(self, account_name: str, points: int, total_points: int,
                        status: str = "success", message: str = "",
                        checkin_count: int = 0, checkin_points: int = 0) -> bool:
@@ -705,7 +840,7 @@ class WechatNotifyService:
                              task_category: str = "", total_count: int = 0,
                              success_count: int = 0, already_count: int = 0,
                              trigger: str = "", summary: str = "",
-                             accounts_text: str = "") -> bool:
+                             accounts_text: str = "", organize_size: str = "") -> bool:
         """发送任务完成通知（图文卡片样式）"""
         if not self.is_notify_type_enabled("task_complete"):
             return False
@@ -750,6 +885,7 @@ class WechatNotifyService:
             "trigger": trigger or "",
             "summary": summary or "",
             "accounts_text": accounts_text or "",
+            "organize_size": organize_size or "",
             "poster_url": poster_url or "",
             "now": now,
         }

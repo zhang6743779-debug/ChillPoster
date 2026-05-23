@@ -130,6 +130,7 @@ class WechatNotifyConfigModel(BaseModel):
         "playback": True,
         "media_added": True,
         "organize_complete": True,
+        "wash_result": True,
         "resource_transfer": True,
         "checkin": True,
         "task_complete": True
@@ -153,6 +154,7 @@ class TelegramNotifyConfigModel(BaseModel):
         "playback": True,
         "media_added": True,
         "organize_complete": True,
+        "wash_result": True,
         "resource_transfer": True,
         "checkin": True,
         "task_complete": True

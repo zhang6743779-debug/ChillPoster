@@ -60,6 +60,7 @@ from app.routers import drive115_upload
 from app.routers import system_health
 from app.routers import forward_hdhive
 from app.routers import real_library
+from app.routers import organize_history
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -187,6 +188,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 STATIC_DIR = FRONTEND_DIST_DIR if os.path.exists(FRONTEND_DIST_DIR) else os.path.join(BASE_DIR, "static")
 VERSION_FILE = os.path.join(BASE_DIR, "VERSION")
+
+
+class NoCacheHtmlStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if path.endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
 
 def get_project_version() -> str:
@@ -383,8 +394,9 @@ app.include_router(drive115_upload.router)
 app.include_router(system_health.router)
 app.include_router(forward_hdhive.router)
 app.include_router(real_library.router)
+app.include_router(organize_history.router)
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", NoCacheHtmlStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")
 app.mount("/templates", StaticFiles(directory="templates"), name="templates")
 app.mount("/backups", StaticFiles(directory="backups"), name="backups")

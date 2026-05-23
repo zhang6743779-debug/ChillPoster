@@ -90,6 +90,9 @@
                     <div class="nav-item" :class="{active: tab === 'media_organize'}" @click="tab = 'media_organize'">
                         <i class="fa-solid fa-box-archive"></i> 一条龙菜单
                     </div>
+                    <div class="nav-item nav-item-sub" :class="{active: tab === 'organize_history'}" @click="tab = 'organize_history'">
+                        <i class="fa-solid fa-clock-rotate-left"></i> 整理记录
+                    </div>
                     <div class="nav-item nav-item-sub" :class="{active: tab === 'media_organize_rules'}" @click="tab = 'media_organize_rules'">
                         <i class="fa-solid fa-sitemap"></i> 二级分类
                     </div>
@@ -2037,6 +2040,148 @@
                                     </div>
                                 </div>
                             </section>
+                        </div>
+                    </div>
+
+                    <div v-else-if="tab === 'organize_history'" key="organize_history" class="scroll-view organize-history-page">
+                        <div class="content-shell organize-history-shell">
+                            <section class="organize-history-header">
+                                <div>
+                                    <div class="server-toolbar-title organize-history-title">
+                                        <i class="fa-solid fa-clock-rotate-left"></i>
+                                        <span>整理记录</span>
+                                    </div>
+                                    <div class="organize-history-meta">
+                                        <span>最近 {{ organizeHistory.total }} 条</span>
+                                        <span v-if="organizeHistory.updatedAt">更新 {{ organizeHistory.updatedAt }}</span>
+                                    </div>
+                                </div>
+                                <div class="organize-history-actions">
+                                    <div class="organize-history-search">
+                                        <i class="fa-solid fa-magnifying-glass"></i>
+                                        <input
+                                            v-model="organizeHistory.pendingKeyword"
+                                            type="text"
+                                            placeholder="搜索标题、TMDb、原因或文件名"
+                                            @keyup.enter="applyOrganizeHistorySearch"
+                                        >
+                                        <button v-if="organizeHistory.keyword" class="organize-history-clear" @click="clearOrganizeHistorySearch" title="清空搜索">
+                                            <i class="fa-solid fa-xmark"></i>
+                                        </button>
+                                    </div>
+                                    <button class="btn btn-secondary btn-sm" @click="applyOrganizeHistorySearch">
+                                        <i class="fa-solid fa-magnifying-glass"></i> 搜索
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" @click="fetchOrganizeHistory" :disabled="organizeHistory.loading">
+                                        <i class="fa-solid fa-rotate" :class="{ 'fa-spin': organizeHistory.loading }"></i> 刷新
+                                    </button>
+                                </div>
+                            </section>
+
+                            <div class="organize-history-layout">
+                                <aside class="organize-history-categories">
+                                    <button
+                                        v-for="item in organizeHistory.categories"
+                                        :key="item.key"
+                                        class="organize-history-category"
+                                        :class="['is-' + item.tone, { active: organizeHistory.activeCategory === item.key }]"
+                                        @click="selectOrganizeHistoryCategory(item.key)"
+                                    >
+                                        <i class="fa-solid" :class="item.icon"></i>
+                                        <span>{{ item.label }}</span>
+                                        <strong>{{ item.count }}</strong>
+                                    </button>
+                                </aside>
+
+                                <section class="organize-history-panel">
+                                    <div v-if="organizeHistory.loading" class="organize-history-state">
+                                        <i class="fa-solid fa-spinner fa-spin"></i>
+                                        <span>正在读取整理记录</span>
+                                    </div>
+                                    <div v-else-if="organizeHistory.records.length === 0" class="organize-history-state">
+                                        <i class="fa-regular fa-folder-open"></i>
+                                        <span>暂无匹配记录</span>
+                                    </div>
+                                    <div v-else class="organize-history-table-wrap">
+                                        <table
+                                            class="organize-history-table"
+                                            :class="{ 'hide-title-col': ['sha1_duplicate', 'skipped'].includes(organizeHistory.activeCategory) }"
+                                        >
+                                            <colgroup>
+                                                <col class="history-col-icon-col">
+                                                <col v-if="!['sha1_duplicate', 'skipped'].includes(organizeHistory.activeCategory)" class="history-col-title-col">
+                                                <col class="history-col-path-col">
+                                                <col class="history-col-size-col">
+                                                <col class="history-col-time-col">
+                                                <col class="history-col-status-col">
+                                            </colgroup>
+                                            <thead>
+                                                <tr>
+                                                    <th class="history-col-icon"></th>
+                                                    <th v-if="!['sha1_duplicate', 'skipped'].includes(organizeHistory.activeCategory)">标题</th>
+                                                    <th>路径</th>
+                                                    <th>大小</th>
+                                                    <th>时间</th>
+                                                    <th>状态</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr
+                                                    v-for="record in organizeHistory.records"
+                                                    :key="record.id"
+                                                    :class="'is-' + record.tone"
+                                                >
+                                                    <td class="history-col-icon">
+                                                        <i class="fa-solid" :class="record.icon"></i>
+                                                    </td>
+                                                    <td v-if="!['sha1_duplicate', 'skipped'].includes(organizeHistory.activeCategory)" class="history-col-title">
+                                                        <strong>{{ record.title }}</strong>
+                                                        <span v-if="record.season_episode">{{ record.season_episode }}</span>
+                                                        <small v-if="record.media_type">{{ record.media_type === 'tv' ? '电视剧' : record.media_type === 'movie' ? '电影' : record.media_type }}</small>
+                                                    </td>
+                                                    <td class="history-col-path">
+                                                        <div v-if="record.source_path" class="history-path-line" :title="record.source_path">
+                                                            <span>源路径：</span>{{ record.source_path }}
+                                                        </div>
+                                                        <div v-if="record.target_path" class="history-path-line" :title="record.target_path">
+                                                            <span>目标路径：</span>{{ record.target_path }}
+                                                        </div>
+                                                        <div v-if="record.reason && ['organize_failed', 'wash_failed'].includes(record.category)" class="history-path-line history-reason-line" :title="record.reason">
+                                                            <span>原因：</span>{{ record.reason }}
+                                                        </div>
+                                                        <div v-if="!record.source_path && !record.target_path" class="history-path-line" :title="record.message || record.subtitle">
+                                                            {{ record.message || record.subtitle || record.raw }}
+                                                        </div>
+                                                    </td>
+                                                    <td class="history-col-size">{{ record.size || '-' }}</td>
+                                                    <td class="history-col-time">{{ record.time }}</td>
+                                                    <td class="history-col-status">
+                                                        <span>{{ record.status_label || record.category_label }}</span>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                        <div class="organize-history-pager">
+                                            <span>{{ ((organizeHistory.page - 1) * organizeHistory.pageSize) + 1 }} - {{ Math.min(organizeHistory.page * organizeHistory.pageSize, organizeHistory.total) }} / {{ organizeHistory.total }}</span>
+                                            <div class="organize-history-pager-actions">
+                                                <button class="btn btn-secondary btn-icon" :disabled="organizeHistory.page <= 1" @click="changeOrganizeHistoryPage(1)" title="第一页">
+                                                    <i class="fa-solid fa-angles-left"></i>
+                                                </button>
+                                                <button class="btn btn-secondary btn-icon" :disabled="organizeHistory.page <= 1" @click="changeOrganizeHistoryPage(organizeHistory.page - 1)" title="上一页">
+                                                    <i class="fa-solid fa-chevron-left"></i>
+                                                </button>
+                                                <strong>{{ organizeHistory.page }} / {{ organizeHistory.pageCount }}</strong>
+                                                <button class="btn btn-secondary btn-icon" :disabled="organizeHistory.page >= organizeHistory.pageCount" @click="changeOrganizeHistoryPage(organizeHistory.page + 1)" title="下一页">
+                                                    <i class="fa-solid fa-chevron-right"></i>
+                                                </button>
+                                                <button class="btn btn-secondary btn-icon" :disabled="organizeHistory.page >= organizeHistory.pageCount" @click="changeOrganizeHistoryPage(organizeHistory.pageCount)" title="最后一页">
+                                                    <i class="fa-solid fa-angles-right"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </section>
+                            </div>
                         </div>
                     </div>
 
@@ -5834,6 +5979,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'organize_history'}" @click="selectMobileTab('organize_history')"><i class="fa-solid fa-clock-rotate-left"></i><span>记录</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>

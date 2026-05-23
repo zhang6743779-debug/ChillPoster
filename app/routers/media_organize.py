@@ -28,6 +28,7 @@ from app.services.media_organize_tmdb import (
     _parse_filename, _search_tmdb_for_title, _extract_tmdb_id_from_text,
     _validate_tmdb_tv_episode,
     _has_explicit_season_or_episode_marker,
+    _resolve_direct_tmdb_id_media_type,
 )
 from app.services.media_organize_template import _build_template_variables, _render_template
 from app.services.media_organize_scrape import _noop_transfer, _write_nfo, _download_image
@@ -244,7 +245,7 @@ def _identify_candidate_hints(media_type: str, input_kind: str) -> list[Optional
     if normalized in {"movie", "tv"}:
         return [normalized]
     if input_kind == "folder":
-        return ["tv", "movie", None]
+        return ["movie", "tv", None]
     return [None, "tv", "movie"]
 
 
@@ -675,8 +676,18 @@ async def identify_test(payload: IdentifyTestPayload):
     config_data = await _load_config_data()
     input_meta = _normalize_identify_input(raw_input, folder_name, file_name)
     explicit_episode_marker = _identify_input_has_episode_marker(input_meta)
+    candidate_hints = _identify_candidate_hints(media_type, input_meta["kind"])
+    input_tmdb_id = input_meta.get("input_tmdb_id")
+    if media_type == "auto" and input_tmdb_id and not explicit_episode_marker:
+        resolved_media_type = await _resolve_direct_tmdb_id_media_type(input_tmdb_id, api_key)
+        if resolved_media_type:
+            candidate_hints = [resolved_media_type] + [
+                hint for hint in candidate_hints
+                if hint != resolved_media_type
+            ]
+
     hints = []
-    for hint in _identify_candidate_hints(media_type, input_meta["kind"]):
+    for hint in candidate_hints:
         if explicit_episode_marker and media_type == "auto" and hint == "movie":
             continue
         if hint not in hints:

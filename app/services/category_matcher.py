@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 import os
+import shutil
+from datetime import datetime
 from core.logger import logger
 
 RULES_FILE = "config/media_organize_category_rules.json"
@@ -51,11 +53,56 @@ def _load_default_rules() -> dict:
 DEFAULT_RULES: dict = _load_default_rules()
 
 
+def _migrate_production_countries_to_origin_country(value) -> tuple[object, int]:
+    """Migrate legacy category conditions without changing user rule shape."""
+    changed = 0
+    if isinstance(value, dict):
+        migrated = {}
+        for key, item in value.items():
+            if key == "field" and item == "production_countries":
+                migrated[key] = "origin_country"
+                changed += 1
+                continue
+            migrated_item, item_changed = _migrate_production_countries_to_origin_country(item)
+            migrated[key] = migrated_item
+            changed += item_changed
+        return migrated, changed
+    if isinstance(value, list):
+        migrated_list = []
+        for item in value:
+            migrated_item, item_changed = _migrate_production_countries_to_origin_country(item)
+            migrated_list.append(migrated_item)
+            changed += item_changed
+        return migrated_list, changed
+    return value, 0
+
+
+def _backup_and_save_migrated_rules(path: str, rules: dict, changed_count: int) -> None:
+    if changed_count <= 0:
+        return
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = f"{path}.bak-production-countries-{timestamp}"
+        shutil.copy2(path, backup_path)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rules, f, ensure_ascii=False, indent=2)
+        logger.info(
+            f"[CategoryMatcher] 已迁移分类规则字段 production_countries -> origin_country: "
+            f"{changed_count} 处，备份: {backup_path}"
+        )
+    except Exception as e:
+        logger.warning(f"[CategoryMatcher] 分类规则字段迁移失败，继续使用内存迁移结果: {e}")
+
+
 def load_rules() -> dict:
     if os.path.exists(RULES_FILE):
         try:
             with open(RULES_FILE, "r", encoding="utf-8") as f:
-                return _apply_default_sub_classify(json.load(f))
+                loaded = json.load(f)
+            migrated, changed_count = _migrate_production_countries_to_origin_country(loaded)
+            if changed_count:
+                _backup_and_save_migrated_rules(RULES_FILE, migrated, changed_count)
+            return _apply_default_sub_classify(migrated)
         except Exception as e:
             logger.warning(f"[CategoryMatcher] 读取规则文件失败，使用默认: {e}")
     return _apply_default_sub_classify(DEFAULT_RULES)

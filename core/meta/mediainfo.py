@@ -248,7 +248,7 @@ def _apply_title_fallback(info: dict, title: str) -> dict:
         return info
 
     if not info.get("resource_pix"):
-        m = re.search(r"\b(2160p|1080p|720p|4k)\b", title, re.IGNORECASE)
+        m = re.search(r"\b(2160p|1080p|720p|480p|4k)\b", title, re.IGNORECASE)
         if m:
             v = m.group(1).lower()
             info["resource_pix"] = "2160p" if v == "4k" else v
@@ -387,12 +387,16 @@ def _extract_probe_media_fields(probe: dict) -> tuple[dict, Optional[float]]:
             info["resource_pix"] = "1080p"
         elif width >= 1200:
             info["resource_pix"] = "720p"
+        elif width >= 700:
+            info["resource_pix"] = "480p"
         elif height >= 2160:
             info["resource_pix"] = "2160p"
         elif height >= 1080:
             info["resource_pix"] = "1080p"
         elif height >= 720:
             info["resource_pix"] = "720p"
+        elif height >= 480:
+            info["resource_pix"] = "480p"
 
         codec = (vs.get("codec_name") or "").lower()
         if codec in ("hevc", "h265", "x265"):

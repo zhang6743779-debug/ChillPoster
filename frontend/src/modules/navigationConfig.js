@@ -6,6 +6,7 @@ export const dockItems = [
 export const storageItems = [
     { id: 'resource_transfer', icon: 'fa-cloud-arrow-down', label: '资源转存', group: '网盘一条龙' },
     { id: 'media_organize', icon: 'fa-box-archive', label: '一条龙菜单', group: '网盘一条龙' },
+    { id: 'organize_history', icon: 'fa-clock-rotate-left', label: '整理记录', group: '网盘一条龙' },
     { id: 'rename_template', icon: 'fa-pen-fancy', label: '重命名模板', group: '网盘一条龙' },
     { id: 'media_organize_rules', icon: 'fa-sitemap', label: '二级分类', group: '网盘一条龙' },
 ];
@@ -72,6 +73,7 @@ export const allValidTabs = new Set([
     'missing_episode_stats',
     'resource_transfer',
     'media_organize',
+    'organize_history',
     'rename_template',
     'media_organize_rules',
     'server',
