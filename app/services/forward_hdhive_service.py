@@ -250,13 +250,26 @@ class ForwardHDHiveService:
         async with self._aiying_rate_lock:
             while True:
                 now = time.monotonic()
+                rate_limit = max(1, int(self.config.get("aiying_rate_limit_per_minute") or 6))
                 self._aiying_rate_times = [t for t in self._aiying_rate_times if now - t < 60]
-                if len(self._aiying_rate_times) < 6:
+                if len(self._aiying_rate_times) < rate_limit:
                     self._aiying_rate_times.append(now)
                     return
                 wait_seconds = max(0.1, 60 - (now - self._aiying_rate_times[0]))
-                logger.info(f"[Forward爱影] 触发 6/min 限频，等待 {wait_seconds:.1f}s")
+                logger.info(f"[Forward爱影] 触发 {rate_limit}/min 限频，等待 {wait_seconds:.1f}s")
                 await asyncio.sleep(wait_seconds)
+
+    def _aiying_daily_limited(self) -> bool:
+        daily_limit = int(self.config.get("aiying_daily_limit") or 0)
+        if daily_limit <= 0:
+            return False
+        today = time.strftime("%Y-%m-%d")
+        if str(self.config.get("aiying_daily_date") or "") != today:
+            return False
+        try:
+            return int(self.config.get("aiying_today_used") or 0) >= daily_limit
+        except Exception:
+            return False
 
     def _aiying_call_increment(self, current_times: int) -> int:
         try:
@@ -317,6 +330,8 @@ class ForwardHDHiveService:
         cached = self._aiying_cache.get(key)
         if use_cache and cached and cached[0] > now:
             return cached[1]
+        if self._aiying_daily_limited():
+            raise HTTPException(status_code=429, detail="爱影查询已达到今日 API 调用上限")
 
         payload = {
             "tg_id": str(self.config.get("aiying_tg_id") or "").strip(),

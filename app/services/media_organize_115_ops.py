@@ -54,6 +54,22 @@ def _get_115_fs(client):
     return P115FileSystem(client)
 
 
+def _prime_115_pickcode_stable_point(client, cid: str) -> None:
+    if getattr(client, "__dict__", {}).get("pickcode_stable_point"):
+        return
+    try:
+        from p115pickcode import get_stable_point
+        resp = client.fs_category_get(str(cid))
+        if not resp or not resp.get("state"):
+            return
+        pickcode = str(resp.get("pick_code") or resp.get("pickcode") or "")
+        if pickcode:
+            client.__dict__["pickcode_stable_point"] = get_stable_point(pickcode)
+            logger.debug(f"[MediaOrganize] 已用目录 pickcode 初始化稳定点: cid={cid}")
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] 初始化 pickcode 稳定点失败: cid={cid}, error={e}")
+
+
 def _get_115_file_name(client, file_cid: str) -> str:
     """通过文件 cid 获取文件名"""
     try:
@@ -1363,6 +1379,7 @@ def _list_115_tree_entries(client, cid: str) -> list[dict]:
         if elapsed_since_last_scan < _TREE_SCAN_MIN_INTERVAL_SECONDS:
             time.sleep(_TREE_SCAN_MIN_INTERVAL_SECONDS - elapsed_since_last_scan)
         scan_started_at = time.monotonic()
+        _prime_115_pickcode_stable_point(client, str(cid))
         with _read_lock:
             items = list(traverse_tree_with_path(
                 client,

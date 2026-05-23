@@ -5,10 +5,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
 from p115client import P115Client
-from p115client.const import SSOENT_TO_APP
 
 # [新增] 引入日志模块，用于打印配置状态
 from core.logger import logger
+from app.services.drive115_auth_probe import format_115_login_app_label, probe_115_cookie
 from app.services.media_organize_115_ops import _get_115_client, run_115_write_request_sync
 
 # ❌ [重要] 绝对不要在这里导入 task_service，否则会报错 ImportError (循环引用)
@@ -127,34 +127,7 @@ STATUS_MESSAGES = {
 
 
 def _format_115_login_app_label(app: str) -> str:
-    app = (app or "").strip()
-    if not app:
-        return ""
-    mapping = {
-        "web": "115生活(网页版)",
-        "desktop": "115浏览器",
-        "android": "115生活(Android端)",
-        "ios": "115生活(iOS端)",
-        "ipad": "115生活(iPad端)",
-        "115android": "115网盘(Android端)",
-        "115ios": "115网盘(iOS端)",
-        "115ipad": "115网盘(iPad端)",
-        "tv": "115生活(Android电视端)",
-        "apple_tv": "115生活(Apple TV端)",
-        "qandroid": "115管理(Android端)",
-        "qios": "115管理(iOS端)",
-        "qipad": "115管理(iPad端)",
-        "windows": "115生活(Windows端)",
-        "os_windows": "115生活(Windows端)",
-        "mac": "115生活(macOS端)",
-        "os_mac": "115生活(macOS端)",
-        "linux": "115生活(Linux端)",
-        "os_linux": "115生活(Linux端)",
-        "wechatmini": "115生活(微信小程序)",
-        "alipaymini": "115生活(支付宝小程序)",
-        "harmony": "115网盘(鸿蒙端)",
-    }
-    return mapping.get(app, app)
+    return format_115_login_app_label(app)
 
 
 def _load_json_file(path: str) -> dict:
@@ -288,18 +261,67 @@ def _find_child_dir_in_115(client: P115Client, parent_cid: int, name: str) -> Op
         resp = client.fs_files({"cid": int(parent_cid), "limit": 1000, "fc_mix": 0})
         if not resp or not resp.get("state"):
             return None
-        for item in resp.get("data", []):
-            if item.get("fid"):
+        raw_items = resp.get("data", [])
+        if isinstance(raw_items, dict):
+            raw_items = (
+                raw_items.get("list")
+                or raw_items.get("files")
+                or raw_items.get("data")
+                or raw_items.get("items")
+                or []
+            )
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
                 continue
-            item_name = str(item.get("n") or item.get("fn") or "").strip()
+            if item.get("fid") and str(item.get("fc", "") or "") != "0":
+                continue
+            item_name = str(item.get("n") or item.get("fn") or item.get("name") or "").strip()
             if item_name == name:
-                return str(item.get("cid") or item.get("fid") or "")
+                return str(item.get("cid") or item.get("id") or item.get("category_id") or item.get("fid") or "")
     except Exception as e:
         logger.warning(f"查找 115 子目录失败: parent={parent_cid}, name={name}, error={e}")
     return None
 
 
-def _ensure_115_dir(client: P115Client, parent_cid: int, name: str) -> str:
+def _normalize_115_remote_path(path: str) -> str:
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    if not text.startswith("/"):
+        text = "/" + text
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text.rstrip("/") or "/"
+
+
+def _get_115_dir_id_by_path(client: P115Client, path: str) -> Optional[str]:
+    normalized_path = _normalize_115_remote_path(path)
+    if not normalized_path or normalized_path == "/":
+        return "0"
+    try:
+        resp = client.fs_dir_getid(normalized_path)
+        if resp and resp.get("state"):
+            cid = str(resp.get("id") or resp.get("cid") or "").strip()
+            if cid:
+                return cid
+    except Exception as e:
+        logger.warning(f"按路径查询 115 目录失败: path={normalized_path}, error={e}")
+    return None
+
+
+def _ensure_115_dir(client: P115Client, parent_cid: int, name: str, parent_path: str = "") -> str:
+    expected_path = ""
+    if parent_path:
+        expected_path = f"{_normalize_115_remote_path(parent_path).rstrip('/')}/{str(name or '').strip()}"
+        existing_cid = _get_115_dir_id_by_path(client, expected_path)
+        if existing_cid:
+            return existing_cid
+    elif int(parent_cid) == 0:
+        expected_path = f"/{str(name or '').strip()}"
+        existing_cid = _get_115_dir_id_by_path(client, expected_path)
+        if existing_cid:
+            return existing_cid
+
     existing_cid = _find_child_dir_in_115(client, parent_cid, name)
     if existing_cid:
         return existing_cid
@@ -319,6 +341,10 @@ def _ensure_115_dir(client: P115Client, parent_cid: int, name: str) -> str:
         created_cid = str(resp.get("cid") or resp.get("id") or "")
         if created_cid:
             return created_cid
+    if expected_path:
+        existing_cid = _get_115_dir_id_by_path(client, expected_path)
+        if existing_cid:
+            return existing_cid
     existing_cid = _find_child_dir_in_115(client, parent_cid, name)
     if existing_cid:
         return existing_cid
@@ -337,13 +363,14 @@ def _ensure_standard_topology_dirs(drive_index: int, local_media_root: str, remo
         local_root_dir = local_root_dir / remote_root_name
 
     client = _get_115_client(drive_index)
+    remote_root_path = f"/{remote_root_name}"
     remote_root_cid = _ensure_115_dir(client, 0, remote_root_name)
-    media_cid = _ensure_115_dir(client, int(remote_root_cid), "媒体目录")
-    instant_cid = _ensure_115_dir(client, int(remote_root_cid), "秒传目录")
-    failed_cid = _ensure_115_dir(client, int(remote_root_cid), "失败目录")
-    transfer_cid = _ensure_115_dir(client, int(remote_root_cid), "转存目录")
-    dedup_cid = _ensure_115_dir(client, int(remote_root_cid), "重复目录")
-    wash_cid = _ensure_115_dir(client, int(remote_root_cid), "洗版目录")
+    media_cid = _ensure_115_dir(client, int(remote_root_cid), "媒体目录", remote_root_path)
+    instant_cid = _ensure_115_dir(client, int(remote_root_cid), "秒传目录", remote_root_path)
+    failed_cid = _ensure_115_dir(client, int(remote_root_cid), "失败目录", remote_root_path)
+    transfer_cid = _ensure_115_dir(client, int(remote_root_cid), "转存目录", remote_root_path)
+    dedup_cid = _ensure_115_dir(client, int(remote_root_cid), "重复目录", remote_root_path)
+    wash_cid = _ensure_115_dir(client, int(remote_root_cid), "洗版目录", remote_root_path)
 
     local_media_dir = local_root_dir / "媒体库"
     local_real_library_dir = local_root_dir / "真实库"
@@ -376,7 +403,8 @@ def _resolve_existing_standard_topology_dirs(drive_index: int, local_media_root:
     remote_root_name = str(remote_root_name or "影视库").strip() or "影视库"
 
     client = _get_115_client(drive_index)
-    remote_root_cid = _find_child_dir_in_115(client, 0, remote_root_name)
+    remote_root_path = f"/{remote_root_name}"
+    remote_root_cid = _get_115_dir_id_by_path(client, remote_root_path) or _find_child_dir_in_115(client, 0, remote_root_name)
     if not remote_root_cid:
         return None
 
@@ -389,11 +417,11 @@ def _resolve_existing_standard_topology_dirs(drive_index: int, local_media_root:
     }
     resolved: dict[str, dict[str, str]] = {}
     for key, dirname in required_dirs.items():
-        cid = _find_child_dir_in_115(client, int(remote_root_cid), dirname)
+        cid = _get_115_dir_id_by_path(client, f"{remote_root_path}/{dirname}") or _find_child_dir_in_115(client, int(remote_root_cid), dirname)
         if not cid:
             return None
         resolved[key] = {"name": f"/{remote_root_name}/{dirname}", "cid": str(cid)}
-    instant_cid = _find_child_dir_in_115(client, int(remote_root_cid), "秒传目录")
+    instant_cid = _get_115_dir_id_by_path(client, f"{remote_root_path}/秒传目录") or _find_child_dir_in_115(client, int(remote_root_cid), "秒传目录")
     resolved["instant"] = {
         "name": f"/{remote_root_name}/秒传目录",
         "cid": str(instant_cid or ""),
@@ -888,7 +916,7 @@ async def save_config_302(config: Config302Payload):
 
         message = '配置已保存'
         if topology_result:
-            message = '配置已保存，115 一条龙目录已创建'
+            message = '配置已保存，115 一条龙目录已就绪'
         return {"status": "success", "message": message, "standard_topology": topology_result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存失败: {str(e)}")
@@ -913,20 +941,15 @@ async def test_115_cookie(payload: Test115Payload):
         return {"status": "error", "message": "Cookie 为空"}
 
     try:
-        client = P115Client(payload.cookie)
-        resp = client.fs_files({'cid': 0, 'limit': 1})
-
-        if resp and resp.get("state"):
-            login_app = (client.login_app() or SSOENT_TO_APP.get(client.login_ssoent) or "").strip()
+        result = probe_115_cookie(payload.cookie)
+        if result.get("status") == "ok":
             return {
                 "status": "ok",
-                "message": "连接成功! Cookie 有效",
-                "login_app": login_app,
-                "login_app_label": _format_115_login_app_label(login_app),
+                "message": result.get("message") or "连接成功! Cookie 有效",
+                "login_app": result.get("login_app") or "",
+                "login_app_label": result.get("login_app_label") or "",
             }
-        else:
-            err_msg = resp.get("error") if resp else "未知错误"
-            return {"status": "error", "message": f"Cookie 无效或已过期 ({err_msg})"}
+        return {"status": "error", "message": result.get("message") or "Cookie 无效或已过期"}
 
     except Exception as e:
         return {"status": "error", "message": f"连接异常: {str(e)}"}

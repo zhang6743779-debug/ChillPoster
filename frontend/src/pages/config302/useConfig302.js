@@ -241,8 +241,16 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
                 qrcode115State.statusText = '扫码登录成功，Cookie 已写入';
 
                 const payload = build302Payload();
-                await axios.post('/api/config_302/save', payload);
-                showToast('扫码登录成功，Cookie 已写入后台配置', 'success');
+                try {
+                    await axios.post('/api/config_302/save', payload);
+                    showToast('扫码登录成功，Cookie 已写入后台配置', 'success');
+                } catch (saveError) {
+                    qrcode115State.status = 'error';
+                    qrcode115State.statusText = '保存 Cookie 失败';
+                    qrcode115State.error = saveError.response?.data?.detail || saveError.response?.data?.message || saveError.message;
+                    showToast('Cookie 已获取，但保存后台配置失败: ' + qrcode115State.error, 'error');
+                    return;
+                }
 
                 if (qrcode115State.autoTest) {
                     await test115Cookie(qrcode115State.driveRef);

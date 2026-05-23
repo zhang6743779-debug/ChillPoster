@@ -5,13 +5,12 @@ import time
 import threading
 import psutil
 from datetime import datetime
-from p115client import P115Client
-from p115client.const import SSOENT_TO_APP
 from fastapi import APIRouter, HTTPException, Body
 from app.schemas import ConnectionRequest, EmbySearchRequest, EmbyItemImagesRequest, EmbyRandomPoolRequest
 from core.configs import CONFIG_FILE, TASKS_FILE, RSS_TASKS_FILE, BACKUPS_DIR, FONTS_DIR
 from core.emby_client import EmbyClient
 from app.dependencies import apply_proxy_settings
+from app.services.drive115_auth_probe import format_115_login_app_label, probe_115_cookie
 
 router = APIRouter(tags=["Server"])
 
@@ -127,34 +126,7 @@ def _load_primary_115_drive_config():
 
 
 def _format_115_login_app_label(app: str) -> str:
-    app = (app or "").strip()
-    if not app:
-        return ""
-    mapping = {
-        "web": "115生活(网页版)",
-        "desktop": "115浏览器",
-        "android": "115生活(Android端)",
-        "ios": "115生活(iOS端)",
-        "ipad": "115生活(iPad端)",
-        "115android": "115网盘(Android端)",
-        "115ios": "115网盘(iOS端)",
-        "115ipad": "115网盘(iPad端)",
-        "tv": "115生活(Android电视端)",
-        "apple_tv": "115生活(Apple TV端)",
-        "qandroid": "115管理(Android端)",
-        "qios": "115管理(iOS端)",
-        "qipad": "115管理(iPad端)",
-        "windows": "115生活(Windows端)",
-        "os_windows": "115生活(Windows端)",
-        "mac": "115生活(macOS端)",
-        "os_mac": "115生活(macOS端)",
-        "linux": "115生活(Linux端)",
-        "os_linux": "115生活(Linux端)",
-        "wechatmini": "115生活(微信小程序)",
-        "alipaymini": "115生活(支付宝小程序)",
-        "harmony": "115网盘(鸿蒙端)",
-    }
-    return mapping.get(app, app)
+    return format_115_login_app_label(app)
 
 
 def _get_dashboard_overview_cache_key(req: ConnectionRequest) -> str:
@@ -428,50 +400,38 @@ def get_dashboard_115_account():
         return _build_dashboard_115_payload(message="未配置 115 账号", account_name=configured_name)
 
     try:
-        client = P115Client(cookie)
-        login_info = client.login_info() or {}
-        login_data = login_info.get("data") or {}
-        user_info = client.user_info() or {}
-        user_data = user_info.get("data") or {}
-        user_my = client.user_my() or {}
-        user_my_data = user_my.get("data") or {}
-        space_info = client.user_space_info() or {}
-        space_data = space_info.get("data") or {}
-        storage_data = client.fs_storage_info() or {}
+        probe = probe_115_cookie(cookie, configured_name)
+        if probe.get("status") != "ok":
+            return _build_dashboard_115_payload(
+                message=probe.get("message") or "Cookie 无效或已过期",
+                account_name=configured_name,
+            )
 
-        account_name = _safe_str(
-            user_data.get("user_name")
-            or user_data.get("user_name_prepub")
-            or user_my_data.get("user_name")
-            or login_data.get("user_name"),
-            configured_name,
-        )
-        uid = _safe_str(
-            user_data.get("display_uid")
-            or user_data.get("user_id")
-            or user_my_data.get("display_uid")
-            or user_my_data.get("user_id")
-            or login_data.get("user_id"),
-            "--",
-        )
-        login_app = _safe_str(client.login_app() or SSOENT_TO_APP.get(client.login_ssoent) or "")
-        login_app_label = _format_115_login_app_label(login_app)
+        client = probe.pop("client")
+        login_data = probe.get("login_data") or {}
+        user_my_data = probe.get("user_my_data") or {}
 
-        vip_forever = bool(
-            user_my_data.get("forever")
-            or login_data.get("is_forever")
-        )
-        vip_active = bool(
-            vip_forever
-            or _safe_int(user_my_data.get("vip")) > 0
-            or _safe_int(user_data.get("is_vip")) > 0
-            or _safe_int(login_data.get("is_vip")) > 0
-        )
+        account_name = _safe_str(probe.get("account_name"), configured_name)
+        uid = _safe_str(probe.get("uid"), "--")
+        login_app = _safe_str(probe.get("login_app"))
+        login_app_label = _safe_str(probe.get("login_app_label"))
+        vip_forever = bool(probe.get("vip_forever"))
+        vip_active = bool(probe.get("vip_active"))
         vip_expire_at = _format_unix_ms_timestamp(
             user_my_data.get("expire")
             or login_data.get("expire")
         )
         vip_label = "永久 VIP" if vip_forever else "VIP" if vip_active else "普通用户"
+
+        try:
+            space_info = client.user_space_info() or {}
+            space_data = space_info.get("data") or {}
+        except Exception:
+            space_data = {}
+        try:
+            storage_data = client.fs_storage_info() or {}
+        except Exception:
+            storage_data = {}
 
         storage = _extract_115_storage(login_data, space_data, storage_data)
         return _build_dashboard_115_payload(
