@@ -2035,7 +2035,7 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 def _tmdb_search_cache_key(parsed: dict) -> str:
     payload = {
-        "v": 4,
+        "v": 5,
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],

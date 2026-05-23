@@ -820,6 +820,20 @@ def get_collection_details(collection_id: int, api_key: str) -> Optional[Dict[st
     logger.debug(f"TMDb: 获取合集详情 (ID: {collection_id})")
     return _tmdb_request(endpoint, api_key, params)
 # --- 搜索媒体 ---
+def _merge_search_results(*result_groups: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for results in result_groups:
+        for result in results or []:
+            result_id = result.get("id") if isinstance(result, dict) else None
+            key = result_id if result_id is not None else id(result)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(result)
+    return merged
+
+
 def search_media(query: str, api_key: str, item_type: str = 'movie', year: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
     """
     【V3 - 年份感知版】通过名字在 TMDb 上搜索媒体（电影、电视剧、演员），支持年份筛选。
@@ -857,14 +871,27 @@ def search_media(query: str, api_key: str, item_type: str = 'movie', year: Optio
     year_info = f" (年份: {year})" if year else ""
     logger.debug(f"TMDb: 正在搜索 {item_type}: '{query}'{year_info}")
     data = _tmdb_request(endpoint, api_key, params)
-    
-    # 如果中文搜索不到，可以尝试用英文再搜一次
-    if data and not data.get("results") and params['language'].startswith("zh"):
-        logger.debug(f"中文搜索 '{query}'{year_info} 未找到结果，尝试使用英文再次搜索...")
-        params['language'] = 'en-US'
-        data = _tmdb_request(endpoint, api_key, params)
+    results = data.get("results") if data else None
 
-    return data.get("results") if data else None
+    if params['language'].startswith("zh"):
+        en_params = dict(params)
+        en_params['language'] = 'en-US'
+
+        # 如果中文搜索不到，可以尝试用英文再搜一次
+        if data and not results:
+            logger.debug(f"中文搜索 '{query}'{year_info} 未找到结果，尝试使用英文再次搜索...")
+            en_data = _tmdb_request(endpoint, api_key, en_params)
+            return en_data.get("results") if en_data else None
+
+        # 非中文标题在 zh-CN 搜索下可能返回中文本地化字段，导致后续精确匹配看不到英文名。
+        # 合并 en-US 结果并放在前面，保留中文结果作为补充候选。
+        if results and not contains_chinese(query):
+            en_data = _tmdb_request(endpoint, api_key, en_params)
+            en_results = en_data.get("results") if en_data else None
+            if en_results:
+                return _merge_search_results(en_results, results)
+
+    return results
 
 
 def get_null_language_backdrop(media_id: int, media_type: str, api_key: str) -> str:
