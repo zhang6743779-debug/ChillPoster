@@ -12,6 +12,7 @@ import { allSearchItems, allValidTabs, coverItems, dockItems, getPanelIcon, getP
 import { useDockerManager } from './pages/docker/useDockerManager';
 import { useWebhookConfig } from './pages/webhook/useWebhookConfig';
 import { useRssTasks } from './pages/rss/useRssTasks';
+import { useRealLibrary } from './pages/realLibrary/useRealLibrary';
 import { useResourceTransfer } from './pages/transfer/useResourceTransfer';
 import { useMoviePilotConfig } from './pages/moviepilot/useMoviePilotConfig';
 import { useHdhiveConfig } from './pages/hdhive/useHdhiveConfig';
@@ -292,6 +293,28 @@ createApp({
             runRssTask,
             deleteRssTask,
         } = useRssTasks({ showToast, showConfirm });
+
+        const {
+            realLibraryConfig,
+            realLibraryForm,
+            realLibraryTasks,
+            realLibraryEditingId,
+            showCreateRealLibrary,
+            realLibraryTesting,
+            realLibraryPathChecking,
+            realLibraryTestResult,
+            realLibraryPathResult,
+            fetchRealLibraryData,
+            saveRealLibraryConfig,
+            testRealLibraryEmby,
+            validateRealLibraryPaths,
+            saveRealLibraryTask,
+            editRealLibraryTask,
+            cancelRealLibraryEdit,
+            runRealLibraryTask,
+            toggleRealLibraryTask,
+            deleteRealLibraryTask,
+        } = useRealLibrary({ showToast, showConfirm });
 
         const {
             webhookConfig,
@@ -892,6 +915,7 @@ createApp({
                 close115QrLogin();
             }
             if (val === 'rss') fetchRssData();
+            if (val === 'real_library') fetchRealLibraryData();
             if (val === 'webhook') fetchWebhookConfig();
             if (val === 'library_preview') fetchLibraryCovers();
             if (val === 'config_yingchao') fetchHdhiveConfig();
@@ -987,7 +1011,7 @@ createApp({
         const pageTitle = computed(() => {
             const map = {
                 'dashboard': '仪表盘', 'manual':'手动设计', 'custom':'封面设计', 'auto':'自动封面',
-                'rss': 'RSS 真实库', 'webhook': 'Webhook', 'config_302': '302 配置',
+                'rss': 'RSS 真实库', 'real_library': '独立真实库', 'webhook': 'Webhook', 'config_302': '302 配置',
                 'server':'Emby 配置', 'fonts':'字体库', 'templates':'模板管理',
                 'library_preview':'封面备份', 'translations':'翻译配置', 'account':'账户管理',
                 'upgrade': '系统升级',
@@ -1072,6 +1096,7 @@ createApp({
             await fetchGlobalSettings();
             fetchFonts(); fetchLayouts(); fetchLayoutAndPresets(); fetchSuites(); fetchTranslations(); fetchTasks(); fetchDashboardStats();
             fetchWebhookConfig();
+            if (tab.value === 'real_library') fetchRealLibraryData();
             await fetch302Config();
             fetchStrmConfig();
             fetchMediaOrganizeConfig();
@@ -1838,6 +1863,12 @@ createApp({
             // [新增] RSS 订阅
             rssConfig, rssForm, rssTasks,
             saveRssConfig, createRssTask, runRssTask, deleteRssTask,
+            realLibraryConfig, realLibraryForm, realLibraryTasks, realLibraryEditingId,
+            showCreateRealLibrary, realLibraryTesting, realLibraryPathChecking,
+            realLibraryTestResult, realLibraryPathResult,
+            fetchRealLibraryData, saveRealLibraryConfig, testRealLibraryEmby, validateRealLibraryPaths,
+            saveRealLibraryTask, editRealLibraryTask, cancelRealLibraryEdit,
+            runRealLibraryTask, toggleRealLibraryTask, deleteRealLibraryTask,
 
             // [新增] Webhook 
             webhookConfig, webhookUrl, fetchWebhookConfig, saveWebhookConfig, copyWebhookUrl, toggleWebhookStatus,

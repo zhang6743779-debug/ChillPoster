@@ -59,6 +59,7 @@ from app.routers import drive115_cleanup
 from app.routers import drive115_upload
 from app.routers import system_health
 from app.routers import forward_hdhive
+from app.routers import real_library
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -75,6 +76,7 @@ from app.services.rss_service import rss_service_instance
 from app.services.hdhive_service import hdhive_service
 from app.services.telegram_service import telegram_notify_service
 from app.services.drive115_upload_service import drive115_upload_service
+from app.services.real_library_service import real_library_service_instance
 from app.dependencies import load_task_progress_from_file
 # ============================================
 
@@ -233,6 +235,7 @@ async def lifespan_ui(app: FastAPI):
     strm.schedule_daily_full_sync_job(task_service_instance.scheduler)
     task_service_instance.load_active_jobs()
     rss_service_instance.load_active_jobs()
+    real_library_service_instance.load_active_jobs()
     hdhive_service.setup_scheduler(task_service_instance.scheduler)
     drive115_upload_service.start()
     if telegram_notify_service.should_bot_poll():
@@ -379,6 +382,7 @@ app.include_router(drive115_cleanup.router)
 app.include_router(drive115_upload.router)
 app.include_router(system_health.router)
 app.include_router(forward_hdhive.router)
+app.include_router(real_library.router)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")

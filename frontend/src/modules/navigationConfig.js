@@ -21,6 +21,7 @@ export const coverItems = [
 ];
 
 export const toolboxItems = [
+    { id: 'real_library', icon: 'fa-hard-drive', label: '独立真实库', group: '工具箱' },
     { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
     { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' },
     { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
@@ -60,6 +61,7 @@ export const allValidTabs = new Set([
     'fonts',
     'templates',
     'translations',
+    'real_library',
     'rss',
     'docker_manager',
     'drive115_cleanup',

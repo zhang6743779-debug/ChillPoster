@@ -61,6 +61,9 @@
                     <div class="nav-item" :class="{active: tab === 'translations'}" @click="tab = 'translations'">
                         <i class="fa-solid fa-language"></i> 翻译配置
                     </div>
+                    <div class="nav-item" :class="{active: tab === 'real_library'}" @click="tab = 'real_library'">
+                        <i class="fa-solid fa-hard-drive"></i> 独立真实库
+                    </div>
                     <div class="nav-item" :class="{active: tab === 'rss'}" @click="tab = 'rss'">
                         <i class="fa-solid fa-rss"></i> RSS真实库
                     </div>
@@ -690,6 +693,189 @@
 
                     </div>
                     
+                    <div v-else-if="tab === 'real_library'" key="real_library" class="scroll-view">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <div>
+                                    <h2>独立真实库</h2>
+                                    <div class="muted-text">独立配置 Emby、真实库路径和 RSS 订阅，不读取一条龙路径。</div>
+                                </div>
+                                <div class="server-toolbar-actions">
+                                    <button class="btn btn-secondary" @click="validateRealLibraryPaths" :disabled="realLibraryPathChecking">
+                                        <i class="fa-solid" :class="realLibraryPathChecking ? 'fa-spinner fa-spin' : 'fa-folder-tree'"></i>
+                                        检测路径
+                                    </button>
+                                    <button class="btn btn-secondary" @click="testRealLibraryEmby" :disabled="realLibraryTesting">
+                                        <i class="fa-solid" :class="realLibraryTesting ? 'fa-spinner fa-spin' : 'fa-plug-circle-check'"></i>
+                                        测试 Emby
+                                    </button>
+                                    <button class="btn btn-primary" @click="saveRealLibraryConfig">
+                                        <i class="fa-solid fa-floppy-disk"></i>
+                                        保存配置
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="card mb-20">
+                                <div class="card-header">
+                                    <div class="card-title-l"><i class="fa-solid fa-server"></i> Emby 与路径</div>
+                                    <label class="ios-switch" title="启停独立真实库">
+                                        <input type="checkbox" v-model="realLibraryConfig.enabled">
+                                        <span class="ios-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="form-grid-3">
+                                    <div>
+                                        <label>显示名称</label>
+                                        <input v-model="realLibraryConfig.emby_name" placeholder="填写这个真实库配置的名称">
+                                    </div>
+                                    <div>
+                                        <label>Emby 地址</label>
+                                        <input v-model="realLibraryConfig.emby_url" placeholder="填写 Emby 内网访问地址">
+                                    </div>
+                                    <div>
+                                        <label>Emby API Key</label>
+                                        <input type="password" v-model="realLibraryConfig.emby_key" placeholder="填写 Emby API Key">
+                                    </div>
+                                </div>
+
+                                <div class="form-grid-3 mt-15">
+                                    <div>
+                                        <label>Emby 公网地址</label>
+                                        <input v-model="realLibraryConfig.emby_public_host" placeholder="可留空，用于打开外部链接">
+                                    </div>
+                                    <div>
+                                        <label>TMDb API Key</label>
+                                        <input type="password" v-model="realLibraryConfig.tmdb_key" placeholder="填写用于识别 RSS 条目的 TMDb Key">
+                                    </div>
+                                    <div>
+                                        <label>代理地址</label>
+                                        <input v-model="realLibraryConfig.proxy_url" placeholder="可留空，用于 TMDb 请求代理">
+                                    </div>
+                                </div>
+
+                                <div class="form-grid-2-tight mt-15">
+                                    <div>
+                                        <label>源媒体根路径</label>
+                                        <input v-model="realLibraryConfig.source_root" placeholder="填写 Emby 原始媒体文件所在根路径">
+                                    </div>
+                                    <div>
+                                        <label>真实库输出路径</label>
+                                        <input v-model="realLibraryConfig.link_root" placeholder="填写硬链接真实库生成路径">
+                                    </div>
+                                </div>
+
+                                <div v-if="realLibraryTestResult" class="info-alert-box mt-15" :class="realLibraryTestResult.status === 'success' ? 'info-alert-box-success' : ''">
+                                    <i class="fa-solid" :class="realLibraryTestResult.status === 'success' ? 'fa-circle-check' : 'fa-circle-info'"></i>
+                                    <div class="info-content">{{ realLibraryTestResult.message || 'Emby 检测完成' }}</div>
+                                </div>
+
+                                <div v-if="realLibraryPathResult" class="info-alert-box mt-15" :class="realLibraryPathResult.status === 'success' ? 'info-alert-box-success' : ''">
+                                    <i class="fa-solid" :class="realLibraryPathResult.status === 'success' ? 'fa-circle-check' : 'fa-triangle-exclamation'"></i>
+                                    <div class="info-content">
+                                        源路径：{{ realLibraryPathResult.checks?.source_exists ? '存在' : '未找到' }}；
+                                        输出父目录：{{ realLibraryPathResult.checks?.link_parent_exists ? '存在' : '未找到' }}；
+                                        同文件系统：{{ realLibraryPathResult.checks?.same_filesystem ? '是' : '否' }}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="server-toolbar mb-20">
+                                <h2>RSS 任务</h2>
+                                <button class="btn btn-primary" @click="showCreateRealLibrary = !showCreateRealLibrary">
+                                    <i class="fa-solid" :class="showCreateRealLibrary ? 'fa-minus' : 'fa-plus'"></i>
+                                    {{ showCreateRealLibrary ? '收起配置' : '新建任务' }}
+                                </button>
+                            </div>
+
+                            <transition name="slide">
+                                <div v-if="showCreateRealLibrary || realLibraryEditingId" class="card card-accent mb-20">
+                                    <div class="card-header">
+                                        <div class="card-title-l">
+                                            <i class="fa-solid" :class="realLibraryEditingId ? 'fa-pen-to-square' : 'fa-plus-circle'"></i>
+                                            {{ realLibraryEditingId ? '编辑真实库任务' : '配置真实库任务' }}
+                                        </div>
+                                        <button v-if="realLibraryEditingId" class="btn btn-ghost btn-sm" @click="cancelRealLibraryEdit">取消编辑</button>
+                                    </div>
+
+                                    <div class="form-grid-3">
+                                        <div>
+                                            <label>任务名称</label>
+                                            <input v-model="realLibraryForm.name" placeholder="填写要创建的 Emby 媒体库名称">
+                                        </div>
+                                        <div>
+                                            <label>媒体类型</label>
+                                            <select v-model="realLibraryForm.content_type">
+                                                <option value="movies">电影</option>
+                                                <option value="tvshows">剧集</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label>Cron 表达式</label>
+                                            <input v-model="realLibraryForm.cron" placeholder="填写定时运行规则">
+                                        </div>
+                                    </div>
+
+                                    <label>RSS 地址</label>
+                                    <input v-model="realLibraryForm.rss_url" placeholder="填写 RSS 订阅地址">
+
+                                    <div class="module-card-actions-split mt-15">
+                                        <label class="ios-switch" title="启停任务">
+                                            <input type="checkbox" v-model="realLibraryForm.enabled">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                        <span class="meta-row">启用定时任务</span>
+                                    </div>
+
+                                    <div class="form-actions-end">
+                                        <button class="btn btn-primary" @click="saveRealLibraryTask">
+                                            {{ realLibraryEditingId ? '保存修改' : '创建任务' }}
+                                        </button>
+                                    </div>
+                                </div>
+                            </transition>
+
+                            <div class="server-grid-layout mt-20">
+                                <div v-for="task in realLibraryTasks" :key="task.id" class="module-card">
+                                    <div class="mc-header">
+                                        <div class="mc-title"><i class="fa-solid fa-hard-drive"></i> {{ task.name }}</div>
+                                        <div class="module-card-actions-split">
+                                            <label class="ios-switch" title="启停任务">
+                                                <input type="checkbox" :checked="task.enabled !== false" @change="toggleRealLibraryTask(task, $event)">
+                                                <span class="ios-slider"></span>
+                                            </label>
+                                            <div class="module-card-divider"></div>
+                                            <button class="icon-btn icon-btn-success" @click="runRealLibraryTask(task.id)" title="立即运行"><i class="fa-solid fa-play"></i></button>
+                                            <button class="icon-btn" @click="editRealLibraryTask(task)" title="编辑"><i class="fa-solid fa-pen"></i></button>
+                                            <button class="icon-btn danger" @click="deleteRealLibraryTask(task.id)" title="删除"><i class="fa-solid fa-trash"></i></button>
+                                        </div>
+                                    </div>
+                                    <div class="mc-body mc-body-compact">
+                                        <div class="meta-row"><strong>RSS:</strong> <span>{{ task.rss_url }}</span></div>
+                                        <div class="module-card-actions-split mt-5">
+                                            <div class="meta-row meta-row-accent"><i class="fa-solid fa-clock"></i> {{ task.cron }}</div>
+                                            <div class="badge-chip">{{ task.content_type === 'tvshows' ? '剧集' : '电影' }}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div v-if="realLibraryTasks.length === 0" class="empty-state-card">
+                                    暂无独立真实库任务
+                                </div>
+                            </div>
+
+                            <div class="info-stack">
+                                <div class="info-alert-box">
+                                    <i class="fa-solid fa-circle-info"></i>
+                                    <div class="info-content">
+                                        <div class="info-alert-box-title">独立模式说明</div>
+                                        这里保存到独立配置文件，不读取也不覆盖 302 一条龙、媒体整理和原 RSS 真实库配置。硬链接要求源媒体路径和真实库输出路径在同一个文件系统内。
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'rss'" key="rss" class="scroll-view">
                         <div class="content-shell shell-lg">
 
@@ -5643,6 +5829,7 @@
                     <div class="mobile-more-section">
                         <div class="mobile-more-section-title">网盘与自动化</div>
                         <div class="mobile-more-grid">
+                            <button class="mobile-more-item" :class="{active: tab === 'real_library'}" @click="selectMobileTab('real_library')"><i class="fa-solid fa-hard-drive"></i><span>真实库</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'rss'}" @click="selectMobileTab('rss')"><i class="fa-solid fa-rss"></i><span>RSS</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'webhook'}" @click="selectMobileTab('webhook')"><i class="fa-solid fa-bolt"></i><span>Webhook</span></button>
