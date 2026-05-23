@@ -1,5 +1,6 @@
 import json
 import os
+import posixpath
 import queue
 import re
 import threading
@@ -18,7 +19,7 @@ from core.logger import logger
 
 REAL_LIBRARY_CONFIG_FILE = os.path.join(CONFIG_DIR, "real_library.json")
 REAL_LIBRARY_TASKS_FILE = os.path.join(CONFIG_DIR, "real_library_tasks.json")
-REAL_LIBRARY_JOB_QUEUE: queue.Queue[str] = queue.Queue()
+REAL_LIBRARY_JOB_QUEUE: queue.Queue[Any] = queue.Queue()
 RUNTIME_STATE_KEYS = {"last_entries", "entry_tmdb_map", "last_sync_at"}
 
 
@@ -82,6 +83,13 @@ def save_tasks(tasks: list[dict]):
     _write_json(REAL_LIBRARY_TASKS_FILE, tasks)
 
 
+def get_task_by_id(task_id: str) -> dict | None:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return None
+    return next((task for task in load_tasks() if task.get("id") == task_id), None)
+
+
 def _normalize_title(title):
     if not title:
         return ""
@@ -135,6 +143,118 @@ def _flatten_items(entry_tmdb_map, active_entry_keys):
             seen.add(dedupe_key)
             items.append(item)
     return items
+
+
+def _normalize_slash_path(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").rstrip("/")
+
+
+def _is_path_inside(path: str, root: str) -> bool:
+    path_norm = _normalize_slash_path(path).lower()
+    root_norm = _normalize_slash_path(root).lower()
+    return bool(root_norm and (path_norm == root_norm or path_norm.startswith(root_norm + "/")))
+
+
+def _relative_from_root(path: str, root: str) -> str:
+    path_norm = _normalize_slash_path(path)
+    root_norm = _normalize_slash_path(root)
+    if path_norm == root_norm:
+        return ""
+    return path_norm[len(root_norm):].lstrip("/")
+
+
+def _common_remote_root(paths: list[str]) -> str:
+    normalized = [_normalize_slash_path(path) for path in paths if _normalize_slash_path(path)]
+    if not normalized:
+        return ""
+    try:
+        return posixpath.commonpath(normalized).rstrip("/")
+    except Exception:
+        return ""
+
+
+class SourceMappedEmbyClient:
+    def __init__(self, client: EmbyClient, source_root: str):
+        self._client = client
+        self._source_root = str(source_root or "").strip()
+        self._remote_roots: list[str] | None = None
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def _get_remote_roots(self) -> list[str]:
+        if self._remote_roots is not None:
+            return self._remote_roots
+        roots = []
+        try:
+            for lib in self._client.get_libraries() or []:
+                for path in lib.get("paths") or []:
+                    normalized = _normalize_slash_path(path)
+                    if normalized:
+                        roots.append(normalized)
+        except Exception as e:
+            logger.debug(f"[RealLibrary] 读取 Emby 媒体库路径用于映射失败: {e}")
+
+        common = _common_remote_root(roots)
+        if common:
+            roots.append(common)
+
+        seen = set()
+        unique_roots = []
+        for root in sorted(roots, key=len, reverse=True):
+            key = root.lower()
+            if key not in seen:
+                seen.add(key)
+                unique_roots.append(root)
+        self._remote_roots = unique_roots
+        return unique_roots
+
+    def _map_source_path(self, remote_path: str) -> str:
+        if not remote_path:
+            return remote_path
+        normalized_remote = os.path.normpath(remote_path)
+        if os.path.exists(normalized_remote):
+            return normalized_remote
+
+        source_root = self._source_root
+        if not source_root:
+            return normalized_remote
+
+        candidates = []
+        for remote_root in self._get_remote_roots():
+            if not _is_path_inside(remote_path, remote_root):
+                continue
+            rel = _relative_from_root(remote_path, remote_root)
+            candidates.append(os.path.normpath(os.path.join(source_root, rel)))
+            leaf = os.path.basename(remote_root.rstrip("/"))
+            if leaf:
+                candidates.append(os.path.normpath(os.path.join(source_root, leaf, rel)))
+
+        remote_parts = [part for part in _normalize_slash_path(remote_path).split("/") if part]
+        for start in range(max(0, len(remote_parts) - 4), len(remote_parts)):
+            candidates.append(os.path.normpath(os.path.join(source_root, *remote_parts[start:])))
+
+        seen = set()
+        fallback = ""
+        for candidate in candidates:
+            key = candidate.lower()
+            if not candidate or key in seen:
+                continue
+            seen.add(key)
+            if not fallback:
+                fallback = candidate
+            if os.path.exists(candidate):
+                logger.debug(f"[RealLibrary] 源路径映射: {remote_path} -> {candidate}")
+                return candidate
+
+        if fallback:
+            logger.warning(f"[RealLibrary] Emby 路径本机不可访问，已尝试映射但仍不存在: {remote_path} -> {fallback}")
+            return fallback
+        return normalized_remote
+
+    def find_path_by_id(self, tmdb_id, item_type="Movie", exclude_path=None):
+        remote_path = self._client.find_path_by_id(tmdb_id, item_type, exclude_path=exclude_path)
+        return self._map_source_path(remote_path)
 
 
 def _update_task_runtime_state(task_id, last_entries, entry_tmdb_map):
@@ -196,14 +316,15 @@ def validate_paths(config: dict) -> dict:
     return {"status": status, "checks": checks}
 
 
-def execute_real_library_job(task_id: str):
+def execute_real_library_job(task_id: str, run_id: str | None = None):
     logger.info(f"[RealLibrary] 开始执行任务: {task_id}")
-    run_id = f"real_library_run_{task_id}_{int(time.time())}"
+    run_id = run_id or f"real_library_run_{task_id}_{int(time.time())}"
+    client = None
 
     try:
-        tasks = load_tasks()
-        task = next((t for t in tasks if t.get("id") == task_id), None)
+        task = get_task_by_id(task_id)
         if not task:
+            update_task_progress(run_id, "错误: 独立真实库任务不存在", 100, "error")
             return
 
         config = load_config()
@@ -222,6 +343,7 @@ def execute_real_library_job(task_id: str):
         if not client:
             update_task_progress(run_id, "错误: Emby 连接未配置", 100, "error")
             return
+        mapped_client = SourceMappedEmbyClient(client, str(config.get("source_root") or "").strip())
 
         current_link_root = os.path.join(link_root_base, task["name"])
         tmdb_key = str(config.get("tmdb_key") or "").strip()
@@ -276,7 +398,22 @@ def execute_real_library_job(task_id: str):
 
         update_task_progress(run_id, "执行硬链接同步", 45, "running")
         linker = HardLinkManager(current_link_root)
-        success_count = linker.sync_items(target_items, client)
+        success_count = linker.sync_items(target_items, mapped_client)
+        if success_count <= 0:
+            _update_task_runtime_state(task_id, current_entries, entry_tmdb_map)
+            update_task_progress(
+                run_id,
+                "错误: 未同步到任何文件，请检查 Emby 路径和源媒体根路径",
+                100,
+                "error",
+                detail={
+                    "matched_items": len(target_items),
+                    "synced_items": success_count,
+                    "source_root": str(config.get("source_root") or "").strip(),
+                    "link_root": current_link_root,
+                },
+            )
+            return
 
         update_task_progress(run_id, "刷新 Emby 媒体库", 90, "running")
         target_lib_id, _ = client.ensure_library_exists(
@@ -305,9 +442,15 @@ def real_library_worker_loop():
     logger.trace("[RealLibrary] 队列处理器已启动")
     while True:
         try:
-            task_id = REAL_LIBRARY_JOB_QUEUE.get()
+            payload = REAL_LIBRARY_JOB_QUEUE.get()
             try:
-                execute_real_library_job(task_id)
+                if isinstance(payload, dict):
+                    task_id = str(payload.get("task_id") or "")
+                    run_id = str(payload.get("run_id") or "") or None
+                else:
+                    task_id = str(payload or "")
+                    run_id = None
+                execute_real_library_job(task_id, run_id=run_id)
             except Exception as e:
                 logger.error(f"[RealLibrary] 队列任务异常: {e}", exc_info=True)
             finally:
@@ -322,7 +465,19 @@ class RealLibraryService:
         self.thread.start()
 
     def enqueue(self, task_id: str):
-        REAL_LIBRARY_JOB_QUEUE.put(task_id)
+        task = get_task_by_id(task_id)
+        if not task:
+            raise ValueError("任务不存在")
+        run_id = f"real_library_run_{task_id}_{int(time.time())}"
+        update_task_progress(
+            run_id,
+            f"真实库: {task.get('name', task_id)}",
+            0,
+            "running",
+            detail={"queued": True},
+        )
+        REAL_LIBRARY_JOB_QUEUE.put({"task_id": task_id, "run_id": run_id})
+        return run_id
 
     def load_active_jobs(self):
         tasks = load_tasks()
@@ -342,7 +497,10 @@ class RealLibraryService:
 
         def job_wrapper():
             logger.debug(f"[RealLibrary] 触发定时任务: {task.get('name', task_id)}")
-            REAL_LIBRARY_JOB_QUEUE.put(task_id)
+            try:
+                self.enqueue(task_id)
+            except Exception as e:
+                logger.error(f"[RealLibrary] 任务入队失败 {task.get('name', task_id)}: {e}")
 
         try:
             task_service_instance.scheduler.add_job(

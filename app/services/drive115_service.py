@@ -22,6 +22,11 @@ _115_READ_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS = 10
 _RAPID_RANGE_READ_TIMEOUT_SECONDS = 15
 _RAPID_UPLOAD_INIT_TIMEOUT_SECONDS = 30
+_GATEWAY_DIRECT_URL_REQUEST_TIMEOUT_SECONDS = 12
+_GATEWAY_DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
+_GATEWAY_DIRECT_LOW_PRIORITY_GRACE_SECONDS = 0.15
+_GATEWAY_DIRECT_PRIORITY_PLAYBACK = 0
+_GATEWAY_DIRECT_PRIORITY_DIRECT = 10
 
 class Drive115Service:
     def __init__(self):
@@ -57,10 +62,13 @@ class Drive115Service:
         self._item_locks = {}
         self._locks_cleanup_lock = asyncio.Lock()
         self._direct_url_batch_lock = threading.Lock()
-        self._gateway_playback_direct_url_lock = asyncio.Lock()
+        self._gateway_direct_url_sequence = 0
+        self._gateway_direct_url_sequence_lock = threading.Lock()
+        self._gateway_direct_url_queues: dict[int, asyncio.PriorityQueue] = {}
+        self._gateway_direct_url_workers: dict[int, asyncio.Task] = {}
+        self._last_gateway_direct_url_at: dict[int, float] = {}
 
         self._last_direct_url_batch_at = 0.0
-        self._last_gateway_playback_direct_url_at = 0.0
 
         # 每个事件循环单独持有 HTTP 客户端，避免 UI loop 和网关 loop 交叉使用同一个 AsyncClient。
         self._http_clients: dict[int, httpx.AsyncClient] = {}
@@ -135,16 +143,125 @@ class Drive115Service:
             return client
 
     async def _run_gateway_playback_direct_url_request(self, request_name: str, request_factory):
-        async with self._gateway_playback_direct_url_lock:
-            now = time.monotonic()
-            pacing_seconds = random.uniform(1.0, 1.5)
-            wait_seconds = pacing_seconds - (now - self._last_gateway_playback_direct_url_at)
-            if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
+        return await self._run_gateway_direct_url_request(
+            request_name,
+            request_factory,
+            priority=_GATEWAY_DIRECT_PRIORITY_PLAYBACK,
+        )
+
+    async def _run_gateway_direct_pickcode_url_request(self, request_name: str, request_factory):
+        return await self._run_gateway_direct_url_request(
+            request_name,
+            request_factory,
+            priority=_GATEWAY_DIRECT_PRIORITY_DIRECT,
+        )
+
+    def _next_gateway_direct_url_sequence(self) -> int:
+        with self._gateway_direct_url_sequence_lock:
+            self._gateway_direct_url_sequence += 1
+            return self._gateway_direct_url_sequence
+
+    def _get_gateway_direct_url_queue(self) -> asyncio.PriorityQueue:
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        queue = self._gateway_direct_url_queues.get(loop_id)
+        if queue is None:
+            queue = asyncio.PriorityQueue()
+            self._gateway_direct_url_queues[loop_id] = queue
+            self._last_gateway_direct_url_at[loop_id] = 0.0
+        worker = self._gateway_direct_url_workers.get(loop_id)
+        if worker is None or worker.done():
+            self._gateway_direct_url_workers[loop_id] = loop.create_task(
+                self._gateway_direct_url_worker(loop_id, queue)
+            )
+        return queue
+
+    async def _run_gateway_direct_url_request(self, request_name: str, request_factory, *, priority: int):
+        loop = asyncio.get_running_loop()
+        queue = self._get_gateway_direct_url_queue()
+        future = loop.create_future()
+        await queue.put((
+            int(priority),
+            self._next_gateway_direct_url_sequence(),
+            request_name,
+            request_factory,
+            future,
+        ))
+        return await future
+
+    @staticmethod
+    def _gateway_queue_has_higher_priority(queue: asyncio.PriorityQueue, priority: int) -> bool:
+        try:
+            next_item = queue._queue[0] if queue._queue else None
+        except Exception:
+            return False
+        return bool(next_item and int(next_item[0]) < int(priority))
+
+    async def _gateway_direct_url_worker(self, loop_id: int, queue: asyncio.PriorityQueue):
+        while True:
+            priority, sequence, request_name, request_factory, future = await queue.get()
+            request_executed = False
             try:
-                return await _run_115_serial_request(request_name, request_factory)
+                if future.cancelled():
+                    continue
+
+                if priority > _GATEWAY_DIRECT_PRIORITY_PLAYBACK:
+                    await asyncio.sleep(_GATEWAY_DIRECT_LOW_PRIORITY_GRACE_SECONDS)
+                    if self._gateway_queue_has_higher_priority(queue, priority):
+                        await queue.put((priority, sequence, request_name, request_factory, future))
+                        continue
+
+                pacing_seconds = random.uniform(1.0, 1.5)
+                wait_seconds = pacing_seconds - (time.monotonic() - self._last_gateway_direct_url_at.get(loop_id, 0.0))
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                    if priority > _GATEWAY_DIRECT_PRIORITY_PLAYBACK and self._gateway_queue_has_higher_priority(queue, priority):
+                        await queue.put((priority, sequence, request_name, request_factory, future))
+                        continue
+
+                request_executed = True
+                result = await self._execute_gateway_direct_url_request(request_name, request_factory)
+                if not future.cancelled():
+                    future.set_result(result)
+            except Exception as e:
+                if not future.cancelled():
+                    future.set_exception(e)
             finally:
-                self._last_gateway_playback_direct_url_at = time.monotonic()
+                if request_executed:
+                    self._last_gateway_direct_url_at[loop_id] = time.monotonic()
+                queue.task_done()
+
+    async def _execute_gateway_direct_url_request(self, request_name: str, request_factory):
+        for attempt in range(_GATEWAY_DIRECT_URL_TIMEOUT_MAX_RETRIES + 1):
+            request_started_at = time.monotonic()
+            try:
+                result = request_factory()
+                if inspect.isawaitable(result):
+                    result = await asyncio.wait_for(
+                        result,
+                        timeout=_GATEWAY_DIRECT_URL_REQUEST_TIMEOUT_SECONDS,
+                    )
+                if isinstance(result, dict) and not result.get("state", True):
+                    raise RuntimeError(f"{request_name}失败: {result}")
+                elapsed = time.monotonic() - request_started_at
+                if request_name.startswith("获取直链"):
+                    label = request_name.split(":", 1)[1].strip() if ":" in request_name else ""
+                    label_text = f": {label}" if label else ""
+                    logger.debug(f"[115] 直链获取完成{label_text} | 请求耗时={elapsed:.2f}s")
+                return result
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - request_started_at
+                if request_name.startswith("获取直链"):
+                    label = request_name.split(":", 1)[1].strip() if ":" in request_name else ""
+                    label_text = f": {label}" if label else ""
+                    request_name_for_log = f"直链获取{label_text}"
+                else:
+                    request_name_for_log = request_name
+                if attempt < _GATEWAY_DIRECT_URL_TIMEOUT_MAX_RETRIES:
+                    logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s，准备重试 ({attempt + 1}/{_GATEWAY_DIRECT_URL_TIMEOUT_MAX_RETRIES})")
+                    continue
+                logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s")
+                return {}
 
     async def get_secondary_client(self):
         """获取或初始化小号 P115Client（用于秒传）- 支持多账号池
@@ -896,6 +1013,8 @@ class Drive115Service:
                 )
                 if direct_link_context == "gateway_playback":
                     result = await self._run_gateway_playback_direct_url_request(request_name, request_factory)
+                elif direct_link_context == "gateway_direct":
+                    result = await self._run_gateway_direct_pickcode_url_request(request_name, request_factory)
                 else:
                     result = await _run_115_serial_request(request_name, request_factory)
             except Exception as e:

@@ -722,6 +722,27 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
         };
 
+        const isMissingEpisodeCompareTopLayer = () => (
+            missingEpisodeCompareModal.visible &&
+            !mpSubscribeModal.visible &&
+            !resourceSearchModal.visible &&
+            !detailModal.visible &&
+            !gridModal.visible
+        );
+
+        const handleMissingEpisodeCompareOutsidePointerDown = (event) => {
+            if (!isMissingEpisodeCompareTopLayer()) return;
+            const panel = document.querySelector('.missing-episode-compare-panel');
+            if (!panel || panel.contains(event.target)) return;
+            closeMissingEpisodeCompare();
+        };
+
+        const handleMissingEpisodeCompareKeydown = (event) => {
+            if (event.key !== 'Escape' || !isMissingEpisodeCompareTopLayer()) return;
+            event.preventDefault();
+            closeMissingEpisodeCompare();
+        };
+
         const openMissingEpisodeCard = (row = {}) => {
             openMissingEpisodeCompare(row);
         };
@@ -845,10 +866,14 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         window.addEventListener('scroll', onMissingEpisodeScrollFallback, { passive: true });
         document.addEventListener('click', handleResourceSearchSourceOutsideClick);
+        document.addEventListener('pointerdown', handleMissingEpisodeCompareOutsidePointerDown, true);
+        document.addEventListener('keydown', handleMissingEpisodeCompareKeydown);
 
         onBeforeUnmount(() => {
             window.removeEventListener('scroll', onMissingEpisodeScrollFallback);
             document.removeEventListener('click', handleResourceSearchSourceOutsideClick);
+            document.removeEventListener('pointerdown', handleMissingEpisodeCompareOutsidePointerDown, true);
+            document.removeEventListener('keydown', handleMissingEpisodeCompareKeydown);
             teardownMissingEpisodeLoadMoreObserver();
             if (discoverRealtimeEventSource) {
                 discoverRealtimeEventSource.close();

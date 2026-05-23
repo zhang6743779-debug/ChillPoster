@@ -36,6 +36,7 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
             if (taskType === 'media_organize' || id.startsWith('organize_') || name.includes('整理')) return 'media_organize';
             if (taskType === 'strm' || name.includes('STRM')) return 'strm';
             if (taskType === 'rss' || id.startsWith('rss_run_') || name.startsWith('RSS')) return 'rss';
+            if (taskType === 'real_library' || id.startsWith('real_library_run_') || name.startsWith('真实库')) return 'real_library';
             if (taskType === 'upgrade' || name.includes('升级')) return 'system';
             if (taskType === 'backup' || taskType === 'preset_task' || name.includes('封面') || name.includes('备份') || name.startsWith('任务:')) return 'cover';
             return 'other';
@@ -86,6 +87,11 @@ export function useTaskProgress({ showToast, showConfirm, onRssFinished, onBacku
                 if (detail.downloaded !== undefined) parts.push(`下载 ${detail.downloaded || 0}`);
                 if (detail.failed) parts.push(`失败 ${detail.failed}`);
                 summary = parts.length ? `STRM 同步：${parts.join(' · ')}` : summary;
+            } else if (category === 'real_library') {
+                const parts = [];
+                if (detail.matched_items !== undefined) parts.push(`匹配 ${detail.matched_items || 0}`);
+                if (detail.synced_items !== undefined) parts.push(`同步 ${detail.synced_items || 0}`);
+                summary = parts.length ? `独立真实库：${parts.join(' · ')}` : summary;
             }
             return elapsed ? `${summary} · 用时 ${elapsed}` : summary;
         };

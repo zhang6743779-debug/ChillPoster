@@ -849,7 +849,9 @@
                                                 <span class="ios-slider"></span>
                                             </label>
                                             <div class="module-card-divider"></div>
-                                            <button class="icon-btn icon-btn-success" @click="runRealLibraryTask(task.id)" title="立即运行"><i class="fa-solid fa-play"></i></button>
+                                            <button class="icon-btn icon-btn-success" @click="runRealLibraryTask(task.id)" :disabled="isRealLibraryTaskRunning(task.id)" title="立即运行">
+                                                <i class="fa-solid" :class="isRealLibraryTaskRunning(task.id) ? 'fa-spinner fa-spin' : 'fa-play'"></i>
+                                            </button>
                                             <button class="icon-btn" @click="editRealLibraryTask(task)" title="编辑"><i class="fa-solid fa-pen"></i></button>
                                             <button class="icon-btn danger" @click="deleteRealLibraryTask(task.id)" title="删除"><i class="fa-solid fa-trash"></i></button>
                                         </div>
@@ -859,6 +861,15 @@
                                         <div class="module-card-actions-split mt-5">
                                             <div class="meta-row meta-row-accent"><i class="fa-solid fa-clock"></i> {{ task.cron }}</div>
                                             <div class="badge-chip">{{ task.content_type === 'tvshows' ? '剧集' : '电影' }}</div>
+                                        </div>
+                                        <div v-if="getRealLibraryTaskState(task.id)" class="module-card-actions-split mt-5">
+                                            <div class="meta-row">
+                                                <span class="dashboard-task-row-pill" :class="getTaskStatusClass(getRealLibraryTaskState(task.id).status)">
+                                                    {{ getTaskStatusLabel(getRealLibraryTaskState(task.id).status) }}
+                                                </span>
+                                                <span>{{ getRealLibraryTaskState(task.id).name }}</span>
+                                            </div>
+                                            <div class="badge-chip">{{ Math.round(Number(getRealLibraryTaskState(task.id).percent || 0)) }}%</div>
                                         </div>
                                     </div>
                                 </div>

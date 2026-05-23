@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.services.real_library_service import (
     RUNTIME_STATE_KEYS,
+    get_task_by_id,
     load_config,
     load_tasks,
     real_library_service_instance,
@@ -147,8 +148,23 @@ def run_real_library_now(payload: dict = Body(...)):
     task_id = str(payload.get("id") or "").strip()
     if not task_id:
         raise HTTPException(status_code=400, detail="缺少任务 ID")
-    real_library_service_instance.enqueue(task_id)
-    return {"status": "triggered"}
+    task = get_task_by_id(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    cfg = load_config()
+    if not cfg.get("enabled", True):
+        raise HTTPException(status_code=400, detail="独立真实库已停用，请先启用并保存配置")
+    if not str(cfg.get("link_root") or "").strip():
+        raise HTTPException(status_code=400, detail="请先填写并保存真实库输出路径")
+    if not str(cfg.get("emby_url") or "").strip() or not str(cfg.get("emby_key") or "").strip():
+        raise HTTPException(status_code=400, detail="请先填写并保存 Emby 地址和 API Key")
+
+    try:
+        run_id = real_library_service_instance.enqueue(task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"status": "triggered", "run_id": run_id}
 
 
 @router.post("/toggle_task")

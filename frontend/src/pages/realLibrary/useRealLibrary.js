@@ -136,7 +136,7 @@ export function useRealLibrary({ showToast, showConfirm }) {
     const runRealLibraryTask = async (id) => {
         try {
             await axios.post('/api/real_library/run_now', { id });
-            showToast('独立真实库任务已开始运行', 'info');
+            showToast('独立真实库任务已提交，进度会在任务卡片显示', 'info');
         } catch (e) {
             showToast('启动失败: ' + (e.response?.data?.detail || e.message), 'error');
         }

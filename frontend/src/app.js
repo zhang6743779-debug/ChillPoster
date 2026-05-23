@@ -372,6 +372,7 @@ createApp({
             { key: 'strm', title: 'STRM 同步', desc: '全量同步 STRM 文件', icon: 'fa-file-code', action: '全量同步' },
             { key: 'cover', title: '封面任务', desc: '封面生成、应用与备份', icon: 'fa-images', action: '运行任务' },
             { key: 'rss', title: 'RSS 同步', desc: '订阅任务同步记录', icon: 'fa-rss', action: '查看' },
+            { key: 'real_library', title: '独立真实库', desc: '独立 RSS 真实库同步记录', icon: 'fa-hard-drive', action: '查看' },
             { key: 'system', title: '系统任务', desc: '升级、健康检查等后台任务', icon: 'fa-shield-heart', action: '查看' },
         ];
         const activeTaskEntries = computed(() => Object.entries(tasksState.activeTasks || {}));
@@ -382,6 +383,7 @@ createApp({
             if (taskType === 'media_organize' || id.startsWith('organize_') || name.includes('整理')) return 'media_organize';
             if (taskType === 'strm' || name.includes('STRM')) return 'strm';
             if (taskType === 'rss' || id.startsWith('rss_run_') || name.startsWith('RSS')) return 'rss';
+            if (taskType === 'real_library' || id.startsWith('real_library_run_') || name.startsWith('真实库')) return 'real_library';
             if (taskType === 'upgrade' || name.includes('升级')) return 'system';
             if (taskType === 'backup' || taskType === 'preset_task' || name.includes('封面') || name.includes('备份') || name.startsWith('任务:')) return 'cover';
             return 'system';
@@ -433,6 +435,15 @@ createApp({
         }));
         const selectedTaskCategory = computed(() => dashboardTaskCategories.value.find(item => item.key === tasksState.selectedTaskCategory) || dashboardTaskCategoryConfig[0]);
         const selectedTaskCategoryHistory = computed(() => tasksState.taskHistory.filter(item => item.category === tasksState.selectedTaskCategory));
+        const getRealLibraryTaskState = (taskId) => {
+            const prefix = `real_library_run_${taskId}_`;
+            const entries = activeTaskEntries.value
+                .filter(([id, task]) => id.startsWith(prefix) || (task.task_type === 'real_library' && id.includes(`_${taskId}_`)))
+                .map(([id, task]) => ({ id, ...task }))
+                .sort((a, b) => Number(b.updated_at || b.completed_at || 0) - Number(a.updated_at || a.completed_at || 0));
+            return entries.find(item => item.status === 'running') || entries[0] || null;
+        };
+        const isRealLibraryTaskRunning = (taskId) => getRealLibraryTaskState(taskId)?.status === 'running';
 
         // ==========================================
         // 3. 任务与核心逻辑
@@ -1881,6 +1892,7 @@ createApp({
             fetchRealLibraryData, saveRealLibraryConfig, testRealLibraryEmby, validateRealLibraryPaths,
             saveRealLibraryTask, editRealLibraryTask, cancelRealLibraryEdit,
             runRealLibraryTask, toggleRealLibraryTask, deleteRealLibraryTask,
+            getRealLibraryTaskState, isRealLibraryTaskRunning,
 
             // [新增] Webhook 
             webhookConfig, webhookUrl, fetchWebhookConfig, saveWebhookConfig, copyWebhookUrl, toggleWebhookStatus,
