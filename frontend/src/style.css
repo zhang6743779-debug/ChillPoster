@@ -7697,10 +7697,10 @@ input:checked + .ios-slider:before {
 .detail-hero .modal-close-btn:hover { background: rgba(26,26,26,0.9); border-color: rgba(255,255,255,0.12); }
 .detail-close-btn {
     position: fixed;
-    top: 22px;
-    right: 22px;
-    width: 42px;
-    height: 42px;
+    top: max(26px, env(safe-area-inset-top, 0px) + 18px);
+    right: max(30px, env(safe-area-inset-right, 0px) + 20px);
+    width: 46px;
+    height: 46px;
     background: rgba(17,17,17,0.82);
     border: 1px solid rgba(255,255,255,0.08);
     color: var(--color-text-main);
@@ -10533,7 +10533,12 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     .detail-hero { height: 280px; }
     .detail-overlay-fullscreen { padding-top: 0; }
     .detail-hero-fullscreen { height: 280px; }
-    .detail-close-btn { top: 14px; right: 14px; width: 38px; height: 38px; }
+    .detail-close-btn {
+        top: max(18px, env(safe-area-inset-top, 0px) + 12px);
+        right: max(18px, env(safe-area-inset-right, 0px) + 12px);
+        width: 42px;
+        height: 42px;
+    }
     .detail-shell-inner { width: 100%; max-width: none; }
     .detail-header-panel { padding: 108px 16px 0; }
     .detail-header-grid { grid-template-columns: 1fr; gap: 18px; }
@@ -18603,8 +18608,7 @@ html[data-theme="light"] :where(.warning, .warn, .health-warning, .icon-btn-ambe
 
 html[data-theme="light"] .btn-primary,
 html[data-theme="light"] .btn-green,
-html[data-theme="light"] .floating-bar .btn-primary,
-html[data-theme="light"] .resource-search-open-btn {
+html[data-theme="light"] .floating-bar .btn-primary {
     color: #111827 !important;
 }
 
@@ -19119,6 +19123,39 @@ html[data-theme="light"] .missing-episode-resource-list .resource-search-item.so
         linear-gradient(90deg, rgba(196, 181, 253, 0.28), rgba(211, 223, 236, 0.52) 58%),
         var(--ui-input-bg) !important;
     border-color: rgba(139, 92, 246, 0.26) !important;
+}
+
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-actions {
+    gap: 10px;
+}
+
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-preview-btn,
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-open-btn {
+    min-width: 104px;
+    min-height: 40px;
+    border-radius: var(--radius-sm);
+    color: #111827 !important;
+    border: 1px solid rgba(71, 85, 105, 0.20) !important;
+    background:
+        linear-gradient(145deg, rgba(244, 248, 252, 0.82), rgba(203, 215, 228, 0.72)),
+        var(--ui-input-bg) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.48),
+        0 8px 18px rgba(71, 85, 105, 0.12) !important;
+}
+
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-open-btn {
+    background:
+        linear-gradient(145deg, rgba(191, 219, 254, 0.78), rgba(160, 181, 210, 0.78)),
+        var(--ui-card-bg-hover) !important;
+    border-color: rgba(37, 99, 235, 0.28) !important;
+    color: #0f2f63 !important;
+}
+
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-preview-btn:hover,
+html[data-theme="light"] .resource-search-list:not(.missing-episode-resource-list) .resource-search-open-btn:hover {
+    filter: brightness(1.03);
+    transform: translateY(-1px);
 }
 
 html[data-theme="light"] .missing-episode-resource-list .resource-search-actions {
