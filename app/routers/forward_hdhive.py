@@ -49,6 +49,10 @@ class ResourceTransferRequest(BaseModel):
     episode: Optional[int] = None
 
 
+class ResourcePreviewRequest(ResourceTransferRequest):
+    pass
+
+
 @router.get("/config")
 async def get_config(request: Request):
     return forward_hdhive_service.get_config(request, telegram_user_id=await _telegram_user_id())
@@ -173,6 +177,37 @@ async def transfer_forward_resource(req: ResourceTransferRequest, request: Reque
         raise HTTPException(status_code=400, detail="缺少影巢资源 slug")
     return await forward_hdhive_service.transfer_resource_to_organize(
         request,
+        slug=slug,
+        media_type=req.type,
+        tmdb_id=tmdb_id,
+        season=req.season,
+        episode=req.episode,
+        require_enabled=False,
+    )
+
+
+@router.post("/preview_resource")
+async def preview_forward_resource(req: ResourcePreviewRequest):
+    tmdb_id = str(req.tmdb_id or "").strip()
+    if not tmdb_id:
+        raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
+    source = str(req.source or "hdhive").strip().lower()
+    if source == "aiying":
+        resource_id = str(req.resource_id or "").strip()
+        if not resource_id:
+            raise HTTPException(status_code=400, detail="缺少爱影资源 ID")
+        return await forward_hdhive_service.preview_aiying_resource(
+            resource_id=resource_id,
+            media_type=req.type,
+            tmdb_id=tmdb_id,
+            season=req.season,
+            episode=req.episode,
+            require_enabled=False,
+        )
+    slug = str(req.slug or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="缺少影巢资源 slug")
+    return await forward_hdhive_service.preview_resource(
         slug=slug,
         media_type=req.type,
         tmdb_id=tmdb_id,

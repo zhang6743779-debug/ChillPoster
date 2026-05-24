@@ -8351,8 +8351,21 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     background: rgba(255,255,255,0.035);
     padding: 14px;
 }
+.resource-search-item.source-hdhive {
+    background: linear-gradient(90deg, rgba(14, 165, 233, 0.12), rgba(255,255,255,0.035) 48%);
+    border-color: rgba(56, 189, 248, 0.22);
+}
+.resource-search-item.source-aiying {
+    background: linear-gradient(90deg, rgba(139, 92, 246, 0.14), rgba(255,255,255,0.035) 48%);
+    border-color: rgba(167, 139, 250, 0.24);
+}
 .resource-search-item-main {
     min-width: 0;
+}
+.resource-search-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
 }
 .resource-search-item-title {
     color: var(--color-text-main);
@@ -8381,6 +8394,14 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     background: rgba(139,92,246,0.18);
     color: #c4b5fd;
 }
+.resource-search-item.source-hdhive .resource-search-source-tag {
+    background: rgba(14, 165, 233, 0.18);
+    color: #7dd3fc;
+}
+.resource-search-item.source-aiying .resource-search-source-tag {
+    background: rgba(139, 92, 246, 0.22);
+    color: #ddd6fe;
+}
 .resource-search-item-desc {
     margin-top: 8px;
     color: var(--color-text-subtle);
@@ -8388,26 +8409,99 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     line-height: 1.5;
     white-space: pre-line;
 }
-.resource-search-open-btn {
+.resource-search-open-btn,
+.resource-search-preview-btn {
     min-height: 38px;
     border: 0;
     border-radius: 10px;
-    background: var(--color-text-main);
-    color: #050505;
     padding: 0 14px;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
     cursor: pointer;
     font-size: 13px;
     font-weight: 800;
+    white-space: nowrap;
 }
-.resource-search-open-btn:hover {
+.resource-search-open-btn {
+    background: var(--color-text-main);
+    color: #050505;
+}
+.resource-search-preview-btn {
+    background: rgba(255,255,255,0.08);
+    color: var(--color-text-main);
+    border: 1px solid rgba(255,255,255,0.10);
+}
+.resource-search-open-btn:hover,
+.resource-search-preview-btn:hover {
     filter: brightness(1.05);
 }
-.resource-search-open-btn:disabled {
+.resource-search-open-btn:disabled,
+.resource-search-preview-btn:disabled {
     cursor: wait;
     opacity: 0.72;
+}
+.resource-search-preview {
+    grid-column: 1 / -1;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 12px;
+}
+.resource-search-preview-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: var(--color-text-subtle);
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.resource-search-preview-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+.resource-search-preview-row {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-height: 30px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    background: rgba(255,255,255,0.035);
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+.resource-search-preview-row.folder {
+    color: var(--color-text-subtle);
+}
+.resource-search-preview-row.matched {
+    background: rgba(34,197,94,0.12);
+    color: #bbf7d0;
+}
+.resource-search-preview-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.resource-search-preview-size {
+    color: var(--color-text-subtle);
+    font-weight: 700;
+}
+.resource-search-preview-state {
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--color-text-subtle);
+    font-size: 12px;
+}
+.resource-search-preview-state.error {
+    color: #fca5a5;
 }
 .resource-search-state {
     min-height: 180px;
@@ -10433,6 +10527,12 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
         grid-template-columns: 1fr;
         align-items: stretch;
     }
+    .resource-search-actions {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+    }
+    .resource-search-preview-btn,
     .resource-search-open-btn {
         width: 100%;
         justify-content: center;
@@ -12214,6 +12314,26 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
         background: rgba(15, 23, 42, 0.04);
     }
 
+    html[data-theme="light"] .resource-search-item.source-hdhive {
+        background: linear-gradient(90deg, rgba(14, 165, 233, 0.12), rgba(15, 23, 42, 0.035) 52%);
+        border-color: rgba(14, 165, 233, 0.22);
+    }
+
+    html[data-theme="light"] .resource-search-item.source-aiying {
+        background: linear-gradient(90deg, rgba(139, 92, 246, 0.13), rgba(15, 23, 42, 0.035) 52%);
+        border-color: rgba(139, 92, 246, 0.22);
+    }
+
+    html[data-theme="light"] .resource-search-item.source-hdhive .resource-search-source-tag {
+        background: rgba(14, 165, 233, 0.16);
+        color: #0369a1;
+    }
+
+    html[data-theme="light"] .resource-search-item.source-aiying .resource-search-source-tag {
+        background: rgba(139, 92, 246, 0.16);
+        color: #6d28d9;
+    }
+
     html[data-theme="light"] .resource-search-head,
     html[data-theme="light"] .resource-search-item {
         border-color: rgba(15, 23, 42, 0.08);
@@ -12222,6 +12342,21 @@ html[data-theme="light"] .btn-subscribe:hover { background: #ffffff; }
     html[data-theme="light"] .resource-search-open-btn {
         background: #111827;
         color: #fff;
+    }
+
+    html[data-theme="light"] .resource-search-preview-btn,
+    html[data-theme="light"] .resource-search-preview-row {
+        background: rgba(15, 23, 42, 0.05);
+        border-color: rgba(15, 23, 42, 0.08);
+    }
+
+    html[data-theme="light"] .resource-search-preview {
+        border-color: rgba(15, 23, 42, 0.08);
+    }
+
+    html[data-theme="light"] .resource-search-preview-row.matched {
+        background: rgba(22, 163, 74, 0.12);
+        color: #166534;
     }
 
     html[data-theme="light"] .mp-poster {

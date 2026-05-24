@@ -78,6 +78,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             season: null,
             episode: null,
             transferringId: '',
+            previewingId: '',
         });
         let resourceSearchSourcesPromise = null;
 
@@ -1844,9 +1845,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             resourceSearchModal.loading = false;
         };
 
-        const openForwardResource = async (item = {}) => {
+        const buildForwardResourcePayload = (item = {}) => {
             const source = String(item.sourceKey || item.source || 'hdhive').trim().toLowerCase();
-            const transferId = String(item.id || item.url || item.title || Date.now());
             const payload = {
                 source,
                 slug: item.slug || '',
@@ -1856,11 +1856,17 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             };
             if (resourceSearchModal.season != null) payload.season = resourceSearchModal.season;
             if (resourceSearchModal.episode != null) payload.episode = resourceSearchModal.episode;
-            if (source === 'aiying' && !payload.resource_id) {
+            return payload;
+        };
+
+        const openForwardResource = async (item = {}) => {
+            const transferId = String(item.id || item.url || item.title || Date.now());
+            const payload = buildForwardResourcePayload(item);
+            if (payload.source === 'aiying' && !payload.resource_id) {
                 showToast?.('该爱影资源缺少转存 ID，请重新搜索', 'warning');
                 return;
             }
-            if (source !== 'aiying' && !payload.slug) {
+            if (payload.source !== 'aiying' && !payload.slug) {
                 showToast?.('该影巢资源缺少转存标识，请重新搜索', 'warning');
                 return;
             }
@@ -1875,6 +1881,46 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             } finally {
                 if (resourceSearchModal.transferringId === transferId) {
                     resourceSearchModal.transferringId = '';
+                }
+            }
+        };
+
+        const previewForwardResource = async (item = {}) => {
+            if (Array.isArray(item.previewItems) && item.previewItems.length && !item.previewError) {
+                item.previewOpen = !item.previewOpen;
+                return;
+            }
+            const previewId = String(item.id || item.url || item.title || Date.now());
+            const payload = buildForwardResourcePayload(item);
+            if (payload.source === 'aiying' && !payload.resource_id) {
+                showToast?.('该爱影资源缺少预览 ID，请重新搜索', 'warning');
+                return;
+            }
+            if (payload.source !== 'aiying' && !payload.slug) {
+                showToast?.('该影巢资源缺少预览标识，请重新搜索', 'warning');
+                return;
+            }
+            resourceSearchModal.previewingId = previewId;
+            item.previewOpen = true;
+            item.previewLoading = true;
+            item.previewError = '';
+            try {
+                const res = await axios.post('/api/forward/preview_resource', payload);
+                item.previewItems = res.data?.items || [];
+                item.previewCount = res.data?.count || item.previewItems.length;
+                item.previewMatchedCount = res.data?.matchedCount || 0;
+                item.previewTotalSizeLabel = res.data?.totalSizeLabel || '';
+                if (!item.previewItems.length) {
+                    item.previewError = '分享内未找到可预览内容';
+                }
+            } catch (e) {
+                item.previewItems = [];
+                item.previewError = e.response?.data?.detail || e.message || '预览失败';
+                showToast?.('预览失败: ' + item.previewError, 'error');
+            } finally {
+                item.previewLoading = false;
+                if (resourceSearchModal.previewingId === previewId) {
+                    resourceSearchModal.previewingId = '';
                 }
             }
         };
@@ -2293,6 +2339,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         openDetailResourceSearch,
         closeResourceSearchModal,
         openForwardResource,
+        previewForwardResource,
         genreList,
         discoverSourceTabs,
         discoverActiveSource,

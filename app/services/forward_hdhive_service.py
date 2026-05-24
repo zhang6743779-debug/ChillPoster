@@ -491,23 +491,16 @@ class ForwardHDHiveService:
 
     def _describe_resource(self, item: dict[str, Any]) -> str:
         parts = []
-        tag_parts = []
         for key in ("video_resolution", "source", "subtitle_language", "subtitle_type"):
             values = item.get(key)
             if isinstance(values, list):
                 parts.extend(str(v) for v in values if v)
-                if key == "source":
-                    tag_parts.extend(str(v).split("/")[0] for v in values if v)
             elif values:
                 parts.append(str(values))
-                if key == "source":
-                    tag_parts.append(str(values).split("/")[0])
         if item.get("share_size"):
             parts.append(f"整包 {item.get('share_size')}")
         parts.append(f"解锁 {self._resource_points(item)} 积分")
-        tag_parts.append("HDHive")
-        tag_line = "|".join(dict.fromkeys(tag.strip() for tag in tag_parts if tag and tag.strip()))
-        return " | ".join(parts) + (f"\n{tag_line}" if tag_line else "")
+        return " | ".join(parts)
 
     def _aiying_resource_id(self, item: dict[str, Any]) -> str:
         seed = "|".join(
@@ -524,8 +517,8 @@ class ForwardHDHiveService:
                 parts.append(value)
         size = str(item.get("size") or "").strip()
         if size:
-            parts.append(f"单集 {size}GB")
-        return " | ".join(parts) + "\nAY|SVIP"
+            parts.append(f"{size}GB")
+        return " | ".join(parts)
 
     def _aiying_tags(self, item: dict[str, Any]) -> str:
         text = " ".join(
@@ -622,9 +615,9 @@ class ForwardHDHiveService:
                 query["ignore_enabled"] = "1"
             qs = urlencode({k: v for k, v in query.items() if v})
             play_url = f"{base}/api/forward/play?{qs}"
-            size = str(item.get("size") or "").strip()
-            size_label = f"单集 {size}GB" if size else "单集大小未知"
-            title = f"{item.get('name') or '爱影资源'} · {size_label}"
+            base_title = item.get("name") or "爱影资源"
+            title_suffix = f"{{tmdb-{tmdb_id}}}" if tmdb_id else ""
+            title = f"{base_title} {title_suffix}" if title_suffix else base_title
             result.append({
                 "id": play_url,
                 "type": "url",
@@ -683,8 +676,9 @@ class ForwardHDHiveService:
                 query["ignore_enabled"] = "1"
             qs = urlencode({k: v for k, v in query.items() if v})
             play_url = f"{base}/api/forward/play?{qs}"
-            size_label = str(item.get("share_size") or "未知大小").strip()
-            title = f"{item.get('title') or '影巢资源'} · {size_label}"
+            base_title = item.get("title") or "影巢资源"
+            title_suffix = f"{{tmdb-{tmdb_id}}}" if tmdb_id else ""
+            title = f"{base_title} {title_suffix}" if title_suffix else base_title
             result.append({
                 "id": play_url,
                 "type": "url",
@@ -772,6 +766,22 @@ class ForwardHDHiveService:
                 pass
         return 0
 
+    def _format_size(self, size: int | float | str | None) -> str:
+        try:
+            value = float(size or 0)
+        except Exception:
+            value = 0
+        if value <= 0:
+            return ""
+        units = ("B", "KB", "MB", "GB", "TB")
+        idx = 0
+        while value >= 1024 and idx < len(units) - 1:
+            value /= 1024
+            idx += 1
+        if idx == 0:
+            return f"{int(value)}{units[idx]}"
+        return f"{value:.2f}".rstrip("0").rstrip(".") + units[idx]
+
     def _share_item_is_dir(self, item: dict[str, Any]) -> bool:
         if item.get("is_dir") is True or item.get("is_directory") is True:
             return True
@@ -811,7 +821,7 @@ class ForwardHDHiveService:
             resp = await run_115_write_request(
                 client,
                 "查询115分享文件",
-                lambda write_client: write_client.share_snap_app({
+                lambda write_client: write_client.share_snap({
                     "share_code": share_code,
                     "receive_code": receive_code,
                     "cid": cid,
@@ -864,6 +874,109 @@ class ForwardHDHiveService:
                         "depth": depth,
                     })
         return videos
+
+    async def _collect_share_preview_items(
+        self,
+        client,
+        *,
+        share_code: str,
+        receive_code: str,
+        root_cid: str | int = 0,
+        max_depth: int = 4,
+        max_nodes: int = 800,
+        max_items: int = 300,
+    ) -> list[dict[str, Any]]:
+        queue: list[tuple[str | int, int, str]] = [(root_cid, 0, "")]
+        preview_items: list[dict[str, Any]] = []
+        visited = 0
+        while queue and visited < max_nodes and len(preview_items) < max_items:
+            cid, depth, path = queue.pop(0)
+            visited += 1
+            for child in await self._list_share_children(
+                client,
+                share_code=share_code,
+                receive_code=receive_code,
+                cid=cid,
+            ):
+                name = self._share_item_name(child)
+                if not name:
+                    continue
+                child_path = f"{path}/{name}" if path else name
+                item_id = self._share_item_id(child)
+                is_dir = self._share_item_is_dir(child)
+                ext = os.path.splitext(name)[1].lower()
+                size = 0 if is_dir else self._share_item_size(child)
+                preview_items.append({
+                    "id": item_id,
+                    "name": name,
+                    "path": child_path,
+                    "type": "folder" if is_dir else "file",
+                    "depth": depth,
+                    "size": size,
+                    "sizeLabel": self._format_size(size),
+                    "isVideo": bool(ext in VIDEO_EXTS),
+                })
+                if is_dir and item_id and depth < max_depth:
+                    queue.append((item_id, depth + 1, child_path))
+                if len(preview_items) >= max_items:
+                    break
+        return preview_items
+
+    async def _preview_share_url(
+        self,
+        share_url: str,
+        *,
+        media_type: str,
+        tmdb_id: str,
+        source_key: str,
+        source_label: str,
+        source_id: str,
+        title: str = "",
+        season: int | None = None,
+        episode: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            payload = share_extract_payload(share_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"115 分享链接解析失败: {e}") from e
+        client, _ = await drive115_service.get_client()
+        if not client:
+            raise HTTPException(status_code=400, detail="115 客户端未就绪，请先配置 115 Cookie")
+        share_code = str(payload.get("share_code") or "")
+        receive_code = str(payload.get("receive_code") or "")
+        items = await self._collect_share_preview_items(
+            client,
+            share_code=share_code,
+            receive_code=receive_code,
+        )
+        is_tv = str(media_type or "").lower() in {"tv", "series"}
+        matched_count = 0
+        total_size = 0
+        for item in items:
+            if item.get("type") != "file":
+                continue
+            total_size += int(item.get("size") or 0)
+            ep_score = self._episode_match_score(str(item.get("name") or ""), season, episode) if is_tv else 0
+            item["episodeMatched"] = bool(ep_score > 0)
+            item["episodeScore"] = ep_score
+            if ep_score > 0:
+                matched_count += 1
+        logger.info(f"[Forward预览] {source_label} 资源预览: id={source_id} items={len(items)} tmdb={tmdb_id}")
+        return {
+            "source": source_key,
+            "sourceName": source_label,
+            "sourceId": source_id,
+            "title": title,
+            "tmdbId": tmdb_id,
+            "mediaType": media_type,
+            "season": season,
+            "episode": episode,
+            "count": len(items),
+            "matchedCount": matched_count,
+            "totalSize": total_size,
+            "totalSizeLabel": self._format_size(total_size),
+            "items": items,
+        }
 
     async def _select_share_file_id(
         self,
@@ -1312,6 +1425,50 @@ class ForwardHDHiveService:
         logger.info(f"[ForwardHDHive] 播放直链已生成: slug={slug}")
         return direct_url
 
+    async def preview_resource(
+        self,
+        *,
+        slug: str,
+        media_type: str,
+        tmdb_id: str,
+        season: int | None = None,
+        episode: int | None = None,
+        require_enabled: bool = True,
+    ) -> dict[str, Any]:
+        if require_enabled and not self.config.get("enabled", True):
+            raise HTTPException(status_code=403, detail="Forward 模块未启用")
+        if require_enabled and not self.config.get("hdhive_enabled", True):
+            raise HTTPException(status_code=403, detail="影巢资源源未启用")
+        resources = self.fetch_resources(media_type, tmdb_id, require_enabled=require_enabled) if tmdb_id else []
+        resource = self._find_resource_by_slug(resources, slug) if resources else None
+        title = ""
+        if resource is not None:
+            title = str(resource.get("title") or "")
+            if not self._resource_allowed(resource):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"资源需要 {self._resource_points(resource)} 积分，超过当前上限 {self.config.get('max_unlock_points')}",
+                )
+            if str(resource.get("pan_type") or "").lower() != "115":
+                raise HTTPException(status_code=400, detail="当前仅支持预览 115 资源")
+
+        unlock_data = self._unlock_resource(slug)
+        share_url = self._extract_unlock_url(unlock_data, slug)
+        if not share_url:
+            raise HTTPException(status_code=502, detail="影巢解锁成功但未返回资源链接")
+
+        return await self._preview_share_url(
+            share_url,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            source_key="hdhive",
+            source_label="影巢",
+            source_id=slug,
+            title=title,
+            season=season,
+            episode=episode,
+        )
+
     async def transfer_resource_to_organize(
         self,
         request: Request,
@@ -1448,6 +1605,50 @@ class ForwardHDHiveService:
             source_id=resource_id,
             source_detail_mode="aiying",
             log_prefix="[Forward爱影]",
+            season=season,
+            episode=episode,
+        )
+
+    async def preview_aiying_resource(
+        self,
+        *,
+        resource_id: str,
+        media_type: str,
+        tmdb_id: str,
+        season: int | None = None,
+        episode: int | None = None,
+        require_enabled: bool = True,
+    ) -> dict[str, Any]:
+        if require_enabled and not self.config.get("enabled", True):
+            raise HTTPException(status_code=403, detail="Forward 模块未启用")
+        if not self._aiying_configured(require_enabled=require_enabled):
+            raise HTTPException(status_code=403, detail="爱影未启用或未配置 Token/TG ID")
+
+        now = time.time()
+        cached = self._aiying_play_cache.get(resource_id)
+        item = cached[1] if cached and cached[0] > now else None
+        if item is None and tmdb_id:
+            resources = await self.fetch_aiying_resources(media_type, tmdb_id, require_enabled=require_enabled)
+            for candidate in self.filter_aiying_resources(resources, media_type=media_type, season=season, episode=episode):
+                candidate_id = self._aiying_resource_id(candidate)
+                self._aiying_play_cache[candidate_id] = (now + 21600, dict(candidate))
+                if candidate_id == resource_id:
+                    item = candidate
+                    break
+        if not item:
+            raise HTTPException(status_code=404, detail="爱影资源已过期，请返回详情页重新查询")
+
+        share_url = str(item.get("link") or "").strip()
+        if not share_url:
+            raise HTTPException(status_code=502, detail="爱影资源未返回 115 分享链接")
+        return await self._preview_share_url(
+            share_url,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            source_key="aiying",
+            source_label="爱影",
+            source_id=resource_id,
+            title=str(item.get("name") or ""),
             season=season,
             episode=episode,
         )
