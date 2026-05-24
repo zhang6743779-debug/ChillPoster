@@ -321,9 +321,36 @@ _FILE_OP_WRITE_SUBMIT_INFO_THRESHOLD_SECONDS = 5.0
 _FILE_OP_MOVE_WAIT_INFO_THRESHOLD_SECONDS = 5.0
 
 
+def _read_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"[115] 环境变量 {name}={raw!r} 无效，使用默认值 {default}")
+        return default
+    if value < 1:
+        logger.warning(f"[115] 环境变量 {name}={raw!r} 必须大于 0，使用默认值 {default}")
+        return default
+    return value
+
+
+_WRITE_REQUEST_WORKERS = _read_positive_int_env("CHILLPOSTER_115_WRITE_WORKERS", 4)
+_WRITE_REQUEST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_WRITE_REQUEST_WORKERS,
+    thread_name_prefix="chillposter-115-write",
+)
+_WRITE_LOCK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="chillposter-115-write-lock",
+)
+
+
 @asynccontextmanager
 async def _thread_lock_context(lock: threading.Lock):
-    await asyncio.to_thread(lock.acquire)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(_WRITE_LOCK_EXECUTOR, lock.acquire)
     try:
         yield
     finally:
@@ -485,8 +512,12 @@ async def run_115_write_request(
 
         try:
             write_client = _clone_115_client_for_write(client)
+            loop = asyncio.get_running_loop()
             result = await asyncio.wait_for(
-                asyncio.to_thread(request_factory, write_client),
+                loop.run_in_executor(
+                    _WRITE_REQUEST_EXECUTOR,
+                    lambda _write_client=write_client: request_factory(_write_client),
+                ),
                 timeout=_WRITE_REQUEST_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as e:

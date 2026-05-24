@@ -82,11 +82,16 @@ def _read_positive_int_env(name: str, default: int) -> int:
 
 
 _MEDIA_METADATA_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_METADATA_WORKERS", 20)
-_MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 20)
+_MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 5)
+_MEDIA_ORGANIZE_SYNC_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_SYNC_WORKERS", _MEDIA_ORGANIZE_CONCURRENCY)
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
 _SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 50000
+_ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_MEDIA_ORGANIZE_SYNC_WORKERS,
+    thread_name_prefix="chillposter-organize-sync",
+)
 
 
 _WASH_CODEC_MULTIPLIERS = {
@@ -2315,7 +2320,7 @@ async def _run_organize_async(run_id: str, req):
 
                     if media_type == 'movie':
                         notify_elapsed_started_at = _time.time()
-                        result = await loop.run_in_executor(None, lambda _c=client, _fi=file_item, _fn=file_name, _e=ext, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _ow=req.overwrite, _cp=category_path or "", _tb=target_base, _sp=subtitles_by_parent, _ltk=library_task_key: _organize_movie(
+                        result = await loop.run_in_executor(_ORGANIZE_SYNC_EXECUTOR, lambda _c=client, _fi=file_item, _fn=file_name, _e=ext, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _ow=req.overwrite, _cp=category_path or "", _tb=target_base, _sp=subtitles_by_parent, _ltk=library_task_key: _organize_movie(
                             _c, _fi, _fn, _e, _td, _v, _tc, _cd, _ow, category_path=_cp, target_path_base=_tb, subtitles_by_parent=_sp, main_loop=_state._main_event_loop, library_task_key=_ltk
                         ))
                         notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
@@ -2374,7 +2379,7 @@ async def _run_organize_async(run_id: str, req):
                         tv_summary_key = str(tmdb_id)
                         should_log_tv_summary = tv_summary_key not in _tv_summary_logged
                         if batch_context is None:
-                            batch_context = await loop.run_in_executor(None, lambda _c=client, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _fr=file_req, _cp=category_path or "", _tb=target_base, _ltk=library_task_key: _build_tv_batch_context(
+                            batch_context = await loop.run_in_executor(_ORGANIZE_SYNC_EXECUTOR, lambda _c=client, _td=tmdb_data, _v=variables, _tc=effective_target_cid, _cd=config_data, _fr=file_req, _cp=category_path or "", _tb=target_base, _ltk=library_task_key: _build_tv_batch_context(
                                 _c, _td, _v, _tc, _cd, _fr, category_path=_cp, target_path_base=_tb, library_task_key=_ltk
                             ))
                             if batch_context.get("status") != "planned":
@@ -2516,7 +2521,7 @@ async def _run_organize_async(run_id: str, req):
                 plan_items = batch_entry.get("items", [])
                 notify_elapsed_started_at = _time.time()
                 batch_results = await loop.run_in_executor(
-                    None,
+                    _ORGANIZE_SYNC_EXECUTOR,
                     lambda _c=client, _items=plan_items, _sp=subtitles_by_parent: _execute_tv_batch_plan(_c, _items, subtitles_by_parent=_sp, main_loop=_state._main_event_loop),
                 )
                 notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
@@ -3053,6 +3058,7 @@ async def _run_organize_async(run_id: str, req):
             logger.info(
                 f"[MediaOrganize] 流水线启动: TMDb识别并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
                 f"整理并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
+                f"同步整理线程={_MEDIA_ORGANIZE_SYNC_WORKERS}, "
                 f"后处理并发={_MEDIA_ORGANIZE_CONCURRENCY}, "
                 f"后处理合批窗口={_MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS:.2f}s"
             )
