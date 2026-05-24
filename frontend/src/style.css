@@ -17864,33 +17864,20 @@ html[data-theme="light"] .network-connectivity-skeleton {
 .content-shell.organize-history-shell {
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 14px;
     width: min(1760px, calc(100vw - 72px)) !important;
     max-width: min(1760px, calc(100vw - 72px)) !important;
 }
 
 .organize-history-header {
     display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
+    justify-content: flex-end;
+    align-items: center;
     gap: 18px;
-    padding: 18px;
-    border: 1px solid var(--color-border);
-    border-radius: 8px;
-    background: rgba(18, 18, 18, 0.78);
-    backdrop-filter: blur(16px);
-}
-
-.organize-history-title {
-    margin-bottom: 8px;
-}
-
-.organize-history-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    color: var(--color-text-muted);
-    font-size: 13px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    backdrop-filter: none;
 }
 
 .organize-history-actions {
@@ -17898,6 +17885,7 @@ html[data-theme="light"] .network-connectivity-skeleton {
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
+    width: 100%;
 }
 
 .organize-history-search {
@@ -18207,7 +18195,6 @@ html[data-theme="light"] .network-connectivity-skeleton {
     font-weight: 700;
 }
 
-html[data-theme="light"] .organize-history-header,
 html[data-theme="light"] .organize-history-categories,
 html[data-theme="light"] .organize-history-panel {
     background: rgba(255, 255, 255, 0.86);
@@ -18221,6 +18208,10 @@ html[data-theme="light"] .organize-history-row {
 html[data-theme="light"] .organize-history-table th,
 html[data-theme="light"] .organize-history-table td {
     border-color: rgba(15, 23, 42, 0.08);
+}
+
+html[data-theme="light"] .organize-history-table th {
+    color: #111827;
 }
 
 /* === Light mode surface unification === */
@@ -18261,7 +18252,6 @@ html[data-theme="light"] .cleanup-task-card,
 html[data-theme="light"] .rapid-account-card,
 html[data-theme="light"] .upgrade-meta-item,
 html[data-theme="light"] .stat-tile,
-html[data-theme="light"] .organize-history-header,
 html[data-theme="light"] .organize-history-categories,
 html[data-theme="light"] .organize-history-panel,
 html[data-theme="light"] .system-health-panel,
@@ -18570,7 +18560,6 @@ html[data-theme="light"] :where(
     .designer-side,
     .preview-canvas,
     .floating-bar,
-    .organize-history-header,
     .organize-history-categories,
     .organize-history-panel
 ) :where(
@@ -19474,7 +19463,6 @@ html[data-theme="light"] .missing-episode-library-panel {
     .resource-group-header,
     .resource-search-item,
     .server-accordion,
-    .organize-history-header,
     .organize-history-categories,
     .organize-history-panel,
     .organize-history-category,
@@ -19513,7 +19501,6 @@ html[data-theme="light"] .missing-episode-library-panel {
 }
 
 @media (max-width: 640px) {
-    .organize-history-header,
     .organize-history-panel {
         padding: 12px;
     }
