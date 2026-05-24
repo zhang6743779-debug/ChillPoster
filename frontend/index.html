@@ -999,8 +999,9 @@
                                         <div class="meta-row"><strong>URL:</strong> <span>{{ task.rss_url }}</span></div>
                                         <div class="module-card-actions-split mt-5">
                                             <div class="meta-row meta-row-accent"><i class="fa-solid fa-clock"></i> {{ task.cron }}</div>
-                                            <div class="badge-chip">
-                                                {{ task.content_type === 'tvshows' ? '📺 剧集' : '🎬 电影' }}
+                                            <div class="badge-chip rss-type-badge" :class="task.content_type === 'tvshows' ? 'type-tv' : 'type-movie'">
+                                                <i class="fa-solid" :class="task.content_type === 'tvshows' ? 'fa-tv' : 'fa-film'"></i>
+                                                <span>{{ task.content_type === 'tvshows' ? '剧集' : '电影' }}</span>
                                             </div>
                                         </div>
                                     </div>
@@ -4185,7 +4186,7 @@
                         </div>
                     </div>
 
-                    <div v-else-if="tab === 'config_yingchao'" key="config_yingchao" class="scroll-view">
+                    <div v-else-if="tab === 'config_yingchao'" key="config_yingchao" class="scroll-view hdhive-config-page">
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
                                 <h2><i class="fa-solid fa-film icon-brand-bell"></i> 影巢配置</h2>
