@@ -3001,10 +3001,20 @@ html[data-theme="light"] .forward-hdhive-page .stat-mini-card {
 .upgrade-meta-item span { font-size: 11px; color: var(--color-text-muted); }
 .upgrade-meta-item strong { font-size: 13px; color: var(--color-text-main); word-break: break-all; }
 .upgrade-mode-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
-.upgrade-badge { font-size: 11px; border: 1px solid var(--color-border); border-radius: 999px; padding: 4px 9px; color: var(--color-text-muted); background: rgba(255,255,255,0.03); }
+.upgrade-badge { appearance: none; font: inherit; font-size: 11px; border: 1px solid var(--color-border); border-radius: 999px; padding: 4px 9px; color: var(--color-text-muted); background: rgba(255,255,255,0.03); }
+button.upgrade-badge { cursor: pointer; transition: background var(--ui-transition-fast), border-color var(--ui-transition-fast), color var(--ui-transition-fast), transform var(--ui-transition-fast); }
+button.upgrade-badge:hover,
+button.upgrade-badge.active { color: var(--color-text-main); border-color: rgba(100,116,139,0.5); background: rgba(100,116,139,0.14); }
+button.upgrade-badge:active { transform: translateY(1px); }
 .upgrade-badge.ok { color: #10b981; border-color: rgba(16,185,129,0.35); background: rgba(16,185,129,0.08); }
 .upgrade-badge.warn { color: #f59e0b; border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
 .upgrade-badge.muted { color: #64748b; }
+button.upgrade-badge.ok.active,
+button.upgrade-badge.ok:hover { color: #059669; border-color: rgba(16,185,129,0.58); background: rgba(16,185,129,0.16); }
+button.upgrade-badge.warn.active,
+button.upgrade-badge.warn:hover { color: #b45309; border-color: rgba(245,158,11,0.58); background: rgba(245,158,11,0.18); }
+button.upgrade-badge.muted.active,
+button.upgrade-badge.muted:hover { color: var(--color-text-main); border-color: rgba(100,116,139,0.48); background: rgba(100,116,139,0.14); }
 .icon-brand-docker { color: #38bdf8; }
 .docker-manager-view { padding: 14px 18px 96px 18px !important; }
 .docker-manager-shell { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 0 !important; }
@@ -6347,6 +6357,47 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px
 .confirm-actions { display: flex; justify-content: flex-end; gap: 12px; }
 .btn-secondary { background: transparent; border: 1px solid var(--color-border); color: var(--color-text-muted); }
 .btn-secondary:hover { background: rgba(255, 255, 255, 0.04); color: var(--color-text-main); }
+html[data-theme="light"] .confirm-mask {
+    background: rgba(15, 23, 42, 0.34);
+}
+html[data-theme="light"] .confirm-box {
+    background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(232, 240, 248, 0.94)),
+        var(--ui-card-bg) !important;
+    border-color: rgba(71, 85, 105, 0.18) !important;
+    box-shadow: 0 28px 70px rgba(15, 23, 42, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.72) !important;
+}
+html[data-theme="light"] .confirm-title {
+    color: #111827 !important;
+}
+html[data-theme="light"] .confirm-desc,
+html[data-theme="light"] .confirm-input-suffix {
+    color: #475569 !important;
+}
+html[data-theme="light"] .confirm-icon-box.danger {
+    background: rgba(220, 38, 38, 0.1);
+    color: #dc2626;
+    border-color: rgba(220, 38, 38, 0.18);
+}
+html[data-theme="light"] .confirm-icon-box.warning {
+    background: rgba(217, 119, 6, 0.12);
+    color: #b45309;
+    border-color: rgba(217, 119, 6, 0.18);
+}
+html[data-theme="light"] .confirm-icon-box.info {
+    background: rgba(59, 130, 246, 0.1);
+    color: #1d4ed8;
+    border-color: rgba(59, 130, 246, 0.18);
+}
+html[data-theme="light"] .confirm-box .btn-secondary {
+    background: rgba(255, 255, 255, 0.54);
+    border-color: rgba(71, 85, 105, 0.2);
+    color: #334155;
+}
+html[data-theme="light"] .confirm-box .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.82);
+    color: #111827;
+}
 @keyframes fadeIn { to { opacity: 1; } }
 @keyframes popIn { to { transform: scale(1); } }
 
@@ -18290,6 +18341,23 @@ html[data-theme="light"] .transfer-panel:hover {
     box-shadow: var(--shadow-md) !important;
 }
 
+html[data-theme="light"] .rc-preview {
+    color: #334155 !important;
+    border: 1px solid rgba(71, 85, 105, 0.12) !important;
+    background:
+        radial-gradient(rgba(100, 116, 139, 0.18) 1px, transparent 1px),
+        linear-gradient(145deg, rgba(248, 250, 252, 0.78), rgba(219, 230, 242, 0.86)) !important;
+    background-size: 10px 10px, auto !important;
+}
+
+html[data-theme="light"] .rc-preview i {
+    color: #64748b !important;
+}
+
+html[data-theme="light"] .rc-info {
+    color: #334155 !important;
+}
+
 html[data-theme="light"] .card-header,
 html[data-theme="light"] .mc-header,
 html[data-theme="light"] .mc-footer,
@@ -18527,6 +18595,49 @@ html[data-theme="light"] .floating-bar {
 
 html[data-theme="light"] .designer-side {
     border-right-color: rgba(71, 85, 105, 0.20) !important;
+}
+
+@media (min-width: 769px) {
+    html[data-theme="light"] #app[data-v-app] .content-area > .designer-wrap {
+        padding: 16px;
+        gap: 18px;
+    }
+
+    html[data-theme="light"] #app[data-v-app] .content-area > .designer-wrap .designer-side {
+        align-self: flex-start;
+        height: clamp(640px, calc(100% - 110px), calc(100% - 32px));
+        max-height: calc(100% - 32px);
+        border: 1px solid rgba(71, 85, 105, 0.16) !important;
+        border-radius: 24px !important;
+        overflow: hidden;
+        overflow-y: auto;
+        clip-path: inset(0 round 24px);
+        background-clip: padding-box;
+    }
+
+    html[data-theme="light"] #app[data-v-app] .designer-side .modern-accordion {
+        border-color: rgba(71, 85, 105, 0.18) !important;
+        background:
+            linear-gradient(145deg, rgba(231, 240, 248, 0.62), rgba(198, 213, 228, 0.72)),
+            var(--ui-card-bg-soft) !important;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.52) !important;
+    }
+
+    html[data-theme="light"] #app[data-v-app] .designer-side .modern-accordion .acc-header {
+        background: rgba(197, 212, 227, 0.42) !important;
+        border-bottom-color: rgba(71, 85, 105, 0.12) !important;
+    }
+
+    html[data-theme="light"] #app[data-v-app] .designer-side .modern-accordion .acc-content {
+        border-top-color: rgba(71, 85, 105, 0.14) !important;
+        background:
+            linear-gradient(180deg, rgba(222, 233, 243, 0.82), rgba(207, 221, 234, 0.78)),
+            var(--ui-card-bg-soft) !important;
+    }
+
+    html[data-theme="light"] #app[data-v-app] .content-area > .designer-wrap .designer-main {
+        min-width: 0;
+    }
 }
 
 html[data-theme="light"] .preview-empty-state {
@@ -19084,6 +19195,86 @@ html[data-theme="light"] .docker-update-corner {
     background: #ffcc99 !important;
 }
 
+html[data-theme="light"] .docker-update-modal {
+    background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(232, 240, 248, 0.94)),
+        var(--ui-card-bg) !important;
+    border-color: rgba(71, 85, 105, 0.18) !important;
+    box-shadow: 0 30px 76px rgba(15, 23, 42, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.72) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.error {
+    border-color: rgba(220, 38, 38, 0.3) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.done {
+    border-color: rgba(5, 150, 105, 0.3) !important;
+}
+
+html[data-theme="light"] .docker-update-icon {
+    color: #0f766e !important;
+    border: 1px solid rgba(15, 118, 110, 0.18) !important;
+    background: rgba(20, 184, 166, 0.14) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.error .docker-update-icon {
+    color: #dc2626 !important;
+    border-color: rgba(220, 38, 38, 0.18) !important;
+    background: rgba(220, 38, 38, 0.1) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.done .docker-update-icon {
+    color: #059669 !important;
+    border-color: rgba(5, 150, 105, 0.18) !important;
+    background: rgba(16, 185, 129, 0.12) !important;
+}
+
+html[data-theme="light"] .docker-update-title strong {
+    color: #111827 !important;
+}
+
+html[data-theme="light"] .docker-update-title span,
+html[data-theme="light"] .docker-update-progress-row,
+html[data-theme="light"] .docker-update-log-empty {
+    color: #475569 !important;
+}
+
+html[data-theme="light"] .docker-update-progress {
+    background: rgba(100, 116, 139, 0.16) !important;
+}
+
+html[data-theme="light"] .docker-update-progress-fill {
+    background: linear-gradient(90deg, #0f766e, #22c55e) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.error .docker-update-progress-fill {
+    background: linear-gradient(90deg, #dc2626, #fb7185) !important;
+}
+
+html[data-theme="light"] .docker-update-modal.done .docker-update-progress-fill {
+    background: linear-gradient(90deg, #059669, #34d399) !important;
+}
+
+html[data-theme="light"] .docker-update-log {
+    color: #1f2937 !important;
+    border-color: rgba(71, 85, 105, 0.16) !important;
+    background: rgba(248, 250, 252, 0.88) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.64) !important;
+}
+
+html[data-theme="light"] .docker-update-log-line {
+    color: #1f2937 !important;
+}
+
+html[data-theme="light"] .docker-update-log-line span {
+    color: #64748b !important;
+}
+
+html[data-theme="light"] .docker-update-log-line.error,
+html[data-theme="light"] .docker-update-log-line i {
+    color: #dc2626 !important;
+}
+
 html[data-theme="light"] .docker-image-icon {
     color: #2563eb !important;
     border-color: rgba(37, 99, 235, 0.18) !important;
@@ -19103,6 +19294,15 @@ html[data-theme="light"] .docker-image-card.untagged .docker-image-icon {
 
 html[data-theme="light"] .docker-image-id {
     border-bottom-color: rgba(71, 85, 105, 0.14) !important;
+}
+
+html[data-theme="light"] .docker-log-view {
+    color: #1f2937 !important;
+    border-color: rgba(71, 85, 105, 0.16) !important;
+    background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.76), rgba(232, 240, 248, 0.9)),
+        var(--ui-card-bg-soft) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68) !important;
 }
 
 html[data-theme="light"] .forward-hdhive-page > .content-shell > .card,

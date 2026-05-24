@@ -35,6 +35,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         updateMap: {},
         imageDrafts: {},
         search: '',
+        containerFilter: 'all',
         imageSearch: '',
         imageFilter: 'all',
         pullImage: '',
@@ -76,6 +77,14 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
     const DOCKER_UPDATE_CACHE_TTL_MS = 30 * 60 * 1000;
     let dockerSilentRefreshTimer = null;
     let dockerUpdatePollTimer = null;
+
+    const scrollDockerUpdateLogToBottom = () => {
+        if (typeof window === 'undefined' || typeof document === 'undefined') return;
+        window.requestAnimationFrame(() => {
+            const logEl = document.querySelector('.docker-update-log');
+            if (logEl) logEl.scrollTop = logEl.scrollHeight;
+        });
+    };
 
     const loadProjectVersion = async () => {
         try {
@@ -196,10 +205,15 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
 
     const filteredDockerContainers = computed(() => {
         const q = dockerManager.search.trim().toLowerCase();
-        if (!q) return dockerManager.containers;
-        return dockerManager.containers.filter(item =>
-            [item.name, item.image, item.short_id, item.state, item.status].some(v => String(v || '').toLowerCase().includes(q))
-        );
+        const filter = dockerManager.containerFilter || 'all';
+        return dockerManager.containers.filter(item => {
+            const hasUpdate = !!dockerManager.updateMap[item.image]?.update_available;
+            if (filter === 'running' && item.state !== 'running') return false;
+            if (filter === 'stopped' && item.state === 'running') return false;
+            if (filter === 'updates' && !hasUpdate) return false;
+            if (!q) return true;
+            return [item.name, item.image, item.short_id, item.state, item.status].some(v => String(v || '').toLowerCase().includes(q));
+        });
     });
 
     const filteredDockerImages = computed(() => {
@@ -219,6 +233,13 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         return !!info?.update_available;
     }).length);
 
+    const dockerContainerStats = computed(() => {
+        const total = dockerManager.containers.length;
+        const running = dockerManager.containers.filter(item => item.state === 'running').length;
+        const stopped = Math.max(0, total - running);
+        return { total, running, stopped, updates: dockerUpdateCount.value };
+    });
+
     const dockerImageStats = computed(() => {
         const total = dockerManager.images.length;
         const unused = dockerManager.images.filter(item => Number(item.containers) === 0).length;
@@ -229,6 +250,10 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
 
     const setDockerImageFilter = (filter) => {
         dockerManager.imageFilter = filter || 'all';
+    };
+
+    const setDockerContainerFilter = (filter) => {
+        dockerManager.containerFilter = filter || 'all';
     };
 
     const syncDockerImageDrafts = () => {
@@ -405,6 +430,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         dockerManager.updateDialog.message = task.message || '';
         dockerManager.updateDialog.logs = Array.isArray(task.logs) ? task.logs : [];
         dockerManager.updateDialog.selfUpdate = !!task.self_update;
+        scrollDockerUpdateLogToBottom();
         if (task.status === 'restarting' || task.step === 'helper' || task.percent >= 85) {
             dockerManager.updateDialog.restartSeen = true;
             if (!dockerManager.updateDialog.restartStartedAt) dockerManager.updateDialog.restartStartedAt = Date.now();
@@ -455,6 +481,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
                         level: 'success',
                         message: '服务已恢复，容器更新完成',
                     });
+                    scrollDockerUpdateLogToBottom();
                     stopDockerUpdatePolling();
                     clearDockerUpdateForImages([
                         dockerManager.updateDialog.image,
@@ -477,6 +504,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
                 level: 'error',
                 message: dockerManager.updateDialog.message,
             });
+            scrollDockerUpdateLogToBottom();
             stopDockerUpdatePolling();
         }
     };
@@ -504,6 +532,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
             restartSeen: false,
             restartStartedAt: 0,
         });
+        scrollDockerUpdateLogToBottom();
         pollDockerUpdateTask(runId);
         dockerUpdatePollTimer = setInterval(() => pollDockerUpdateTask(runId), 1500);
     };
@@ -751,6 +780,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         filteredDockerContainers,
         filteredDockerImages,
         dockerUpdateCount,
+        dockerContainerStats,
         dockerImageStats,
         fetchDockerStatus,
         fetchDockerContainers,
@@ -773,6 +803,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         pruneUnusedDockerImages,
         pruneUntaggedDockerImages,
         setDockerImageFilter,
+        setDockerContainerFilter,
         closeDockerUpdateDialog,
         openDockerVersionDialog,
         closeDockerVersionDialog,

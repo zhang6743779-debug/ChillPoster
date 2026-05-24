@@ -4624,10 +4624,10 @@
                                         <input v-model="dockerManager.search" placeholder="搜索容器名称、镜像、状态">
                                     </div>
                                     <div class="upgrade-mode-row docker-summary">
-                                        <span class="upgrade-badge ok">全部 {{ dockerManager.containers.length }}</span>
-                                        <span class="upgrade-badge ok">运行中 {{ dockerManager.containers.filter(c => c.state === 'running').length }}</span>
-                                        <span class="upgrade-badge muted">已停止 {{ dockerManager.containers.filter(c => c.state !== 'running').length }}</span>
-                                        <span class="upgrade-badge" :class="dockerUpdateCount > 0 ? 'warn' : 'muted'">有更新 {{ dockerUpdateCount }}</span>
+                                        <button type="button" class="upgrade-badge" :class="{active: dockerManager.containerFilter === 'all'}" @click="setDockerContainerFilter('all')">全部 {{ dockerContainerStats.total }}</button>
+                                        <button type="button" class="upgrade-badge ok" :class="{active: dockerManager.containerFilter === 'running'}" @click="setDockerContainerFilter('running')">运行中 {{ dockerContainerStats.running }}</button>
+                                        <button type="button" class="upgrade-badge muted" :class="{active: dockerManager.containerFilter === 'stopped'}" @click="setDockerContainerFilter('stopped')">已停止 {{ dockerContainerStats.stopped }}</button>
+                                        <button type="button" class="upgrade-badge" :class="[dockerUpdateCount > 0 ? 'warn' : 'muted', {active: dockerManager.containerFilter === 'updates'}]" @click="setDockerContainerFilter('updates')">有更新 {{ dockerContainerStats.updates }}</button>
                                     </div>
                                 </div>
 
