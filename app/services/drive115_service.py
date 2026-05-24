@@ -12,8 +12,8 @@ from cachetools import TTLCache
 from p115client import P115Client
 from app.services.media_organize_115_ops import (
     _run_115_serial_request,
+    run_115_read_request,
     run_115_write_request,
-    run_115_write_request_sync,
     DIRECT_URL_PRIORITY_DEFAULT,
     DIRECT_URL_PRIORITY_DIRECT,
     DIRECT_URL_PRIORITY_PLAYBACK,
@@ -35,6 +35,7 @@ _GATEWAY_DIRECT_LOW_PRIORITY_GRACE_SECONDS = 0.15
 _GATEWAY_DIRECT_PRIORITY_PLAYBACK = 0
 _GATEWAY_DIRECT_PRIORITY_DIRECT = 10
 _115_APP_LIST_SAFE_PAGE_SIZE = 7000
+_115_CLEANUP_DELETE_TIMEOUT_SECONDS = 300
 
 class Drive115Service:
     def __init__(self):
@@ -135,7 +136,7 @@ class Drive115Service:
     async def _run_115_read_request(self, request_name: str, request_factory, *, timeout: float = _115_READ_REQUEST_TIMEOUT_SECONDS):
         started_at = time.monotonic()
         try:
-            return await asyncio.wait_for(asyncio.to_thread(request_factory), timeout=timeout)
+            return await run_115_read_request(request_name, request_factory, timeout=timeout)
         except asyncio.TimeoutError as e:
             elapsed = time.monotonic() - started_at
             logger.warning(f"[115] {request_name}超时: 耗时={elapsed:.2f}s")
@@ -1642,7 +1643,7 @@ class Drive115Service:
                             collected.append(item_id)
                 return collected
 
-            ids = await asyncio.to_thread(collect_ids)
+            ids = await run_115_read_request("收集清空目标", collect_ids, timeout=1800)
         except Exception as e:
             message = f"列出目录失败: {folder_label} | {e}"
             logger.warning(f"[CleanUp] {message}")
@@ -1665,12 +1666,12 @@ class Drive115Service:
                     logger.warning(f"[CleanUp] 批量删除失败，1秒后重试: {batch_label}")
                     await asyncio.sleep(1)
                 try:
-                    resp = await asyncio.to_thread(
-                        run_115_write_request_sync,
+                    resp = await run_115_write_request(
                         client,
                         "清空指定目录",
                         lambda write_client, _ids=batch_ids: write_client.fs_delete_app(_ids, async_=False),
                         raise_on_state_false=False,
+                        timeout=_115_CLEANUP_DELETE_TIMEOUT_SECONDS,
                     )
                     if isinstance(resp, dict) and resp.get("state") is False:
                         raise RuntimeError(resp)

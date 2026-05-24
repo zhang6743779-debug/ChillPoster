@@ -77,8 +77,7 @@ def _get_115_file_name(client, file_cid: str) -> str:
     """通过文件 cid 获取文件名"""
     try:
         fs = _get_115_fs(client)
-        with _read_lock:
-            attr = fs._get_attr_by_id(int(file_cid))
+        attr = run_115_read_request_sync("获取文件名", lambda: fs._get_attr_by_id(int(file_cid)))
         return attr.get("name", "")
     except Exception as e:
         logger.warning(f"[MediaOrganize] 获取文件名失败: {e}")
@@ -144,8 +143,7 @@ def _find_cached_dir(task_key: str, parent_id: int, name: str, dir_path: str = "
 
 def _find_existing_115_child_dir(client, parent_cid: str, name: str) -> tuple[str, str]:
     fs = _get_115_fs(client)
-    with _read_lock:
-        children = list(fs.iterdir(int(parent_cid)))
+    children = run_115_read_request_sync("查找已有目录", lambda: list(fs.iterdir(int(parent_cid))))
     for child in children:
         child_name = str(child.get("name", "") or "")
         is_dir = child.get("is_dir") is True or str(child.get("fc", "") or "") == "0"
@@ -264,7 +262,7 @@ def _try_remove_empty_dir(client, dir_cid: str):
     """检查目录是否为空（无视频和字幕文件），是则删除"""
     fs = _get_115_fs(client)
     try:
-        items = list(fs.iterdir(int(dir_cid)))
+        items = run_115_read_request_sync("检查空目录", lambda: list(fs.iterdir(int(dir_cid))))
         if not items:
             run_115_write_request_sync(
                 client,
@@ -337,9 +335,16 @@ def _read_positive_int_env(name: str, default: int) -> int:
 
 
 _WRITE_REQUEST_WORKERS = _read_positive_int_env("CHILLPOSTER_115_WRITE_WORKERS", 4)
+_READ_REQUEST_WORKERS = _read_positive_int_env("CHILLPOSTER_115_READ_WORKERS", 4)
+_READ_REQUEST_TIMEOUT_SECONDS = 60
+_READ_SCAN_TIMEOUT_SECONDS = 1800
 _WRITE_REQUEST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=_WRITE_REQUEST_WORKERS,
     thread_name_prefix="chillposter-115-write",
+)
+_READ_REQUEST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_READ_REQUEST_WORKERS,
+    thread_name_prefix="chillposter-115-read",
 )
 _WRITE_LOCK_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
     max_workers=1,
@@ -360,6 +365,39 @@ async def _thread_lock_context(lock: threading.Lock):
 def _clone_115_client_for_write(client):
     from p115client import P115Client
     return P115Client(str(client.cookies_str), app="android")
+
+
+def run_115_read_request_sync(request_name: str, request_factory: Callable[[], Any]):
+    with _read_lock:
+        return request_factory()
+
+
+async def run_115_read_request(
+    request_name: str,
+    request_factory: Callable[[], Any],
+    *,
+    timeout: float = _READ_REQUEST_TIMEOUT_SECONDS,
+):
+    started_at = time.monotonic()
+    try:
+        loop = asyncio.get_running_loop()
+        return await asyncio.wait_for(
+            loop.run_in_executor(_READ_REQUEST_EXECUTOR, request_factory),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError as e:
+        elapsed = time.monotonic() - started_at
+        logger.warning(f"[115] {request_name}超时: 耗时={elapsed:.2f}s")
+        raise TimeoutError(f"{request_name}超时: {elapsed:.2f}s") from e
+
+
+async def run_115_scan_request(
+    request_name: str,
+    request_factory: Callable[[], Any],
+    *,
+    timeout: float = _READ_SCAN_TIMEOUT_SECONDS,
+):
+    return await run_115_read_request(request_name, request_factory, timeout=timeout)
 
 
 def _is_115_rate_limited_response(response: Any) -> bool:
@@ -498,6 +536,7 @@ async def run_115_write_request(
     request_factory: Callable[[Any], Any],
     *,
     raise_on_state_false: bool = True,
+    timeout: float = _WRITE_REQUEST_TIMEOUT_SECONDS,
 ):
     global _LAST_WRITE_API_AT
 
@@ -518,7 +557,7 @@ async def run_115_write_request(
                     _WRITE_REQUEST_EXECUTOR,
                     lambda _write_client=write_client: request_factory(_write_client),
                 ),
-                timeout=_WRITE_REQUEST_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except asyncio.TimeoutError as e:
             elapsed = time.monotonic() - start_at
@@ -1289,8 +1328,7 @@ def _resolve_failed_move_target(client, file_item: dict, source_cid_str: str) ->
             if not current_id or current_id in seen_ids:
                 break
             seen_ids.add(current_id)
-            with _read_lock:
-                attr = fs._get_attr_by_id(int(current_id))
+            attr = run_115_read_request_sync("解析失败移动目标", lambda _id=current_id: fs._get_attr_by_id(int(_id)))
             current_name = str(attr.get("name", "") or current_name)
             current_parent = str(attr.get("parent_id", attr.get("cid", "")) or "")
             if current_parent == source_cid:
@@ -1452,7 +1490,7 @@ def _check_and_move(client, file_id, target_cid: str, filename: str, reused: boo
     if file_id:
         try:
             fs = _get_115_fs(client)
-            attr = fs._get_attr_by_id(int(file_id))
+            attr = run_115_read_request_sync("上传后检查文件位置", lambda: fs._get_attr_by_id(int(file_id)))
             actual_parent = str(attr.get("parent_id", ""))
             if actual_parent != str(target_cid):
                 run_115_write_request_sync(
@@ -1484,14 +1522,16 @@ def _list_115_tree_entries(client, cid: str) -> list[dict]:
             time.sleep(_TREE_SCAN_MIN_INTERVAL_SECONDS - elapsed_since_last_scan)
         scan_started_at = time.monotonic()
         _prime_115_pickcode_stable_point(client, str(cid))
-        with _read_lock:
-            items = list(traverse_tree_with_path(
+        items = run_115_read_request_sync(
+            "目录树遍历",
+            lambda: list(traverse_tree_with_path(
                 client,
                 cid=int(cid),
                 with_ancestors=True,
                 app="android",
                 max_workers=0,
-            ))
+            )),
+        )
         _LAST_TREE_SCAN_FINISHED_AT = time.monotonic()
         logger.debug(f"[MediaOrganize] 目录树遍历完成: cid={cid} 条目={len(items)} 耗时={_LAST_TREE_SCAN_FINISHED_AT - scan_started_at:.2f}s")
         return items
@@ -1612,8 +1652,7 @@ def _collect_event_video_sha1s_for_cache(file_id: str, file_name: str, drive_ind
         from p115client.tool.attr import get_attr
 
         if not is_dir and not sha1_set:
-            with _read_lock:
-                attr = get_attr(client, int(file_id_str))
+            attr = run_115_read_request_sync("提取事件文件SHA1", lambda: get_attr(client, int(file_id_str)))
             attr_sha1 = str((attr or {}).get("sha1") or "").upper().strip()
             if attr_sha1:
                 sha1_set.add(attr_sha1)
@@ -1621,8 +1660,10 @@ def _collect_event_video_sha1s_for_cache(file_id: str, file_name: str, drive_ind
 
         if is_dir:
             from p115client.tool.iterdir import iter_files_with_path
-            with _read_lock:
-                items = list(iter_files_with_path(client, cid=int(file_id_str), app="android", cooldown=1.0, page_size=1000))
+            items = run_115_read_request_sync(
+                "提取事件目录SHA1",
+                lambda: list(iter_files_with_path(client, cid=int(file_id_str), app="android", cooldown=1.0, page_size=1000)),
+            )
             for item in items:
                 if item.get("is_dir"):
                     continue
@@ -1632,8 +1673,10 @@ def _collect_event_video_sha1s_for_cache(file_id: str, file_name: str, drive_ind
                 s = str(item.get("sha1", "") or "").upper().strip()
                 if not s:
                     try:
-                        with _read_lock:
-                            attr = get_attr(client, int(item.get("id", 0) or 0))
+                        attr = run_115_read_request_sync(
+                            "补充事件文件SHA1",
+                            lambda _id=item.get("id", 0) or 0: get_attr(client, int(_id)),
+                        )
                         s = str((attr or {}).get("sha1") or "").upper().strip()
                     except Exception:
                         s = ""

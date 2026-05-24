@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from app.services import media_organize_state as _state
 from app.services.media_organize_state import (
     _organize_trigger_lock, _target_event_lock, _target_event_queue,
-    _source_poll_lock, _read_lock,
+    _source_poll_lock,
     VIDEO_EXTS, SUBTITLE_EXTS, CONFIG_FILE,
     _record_organized_source_path, _is_self_organized_event, _record_self_organized_event_skip,
 )
@@ -38,7 +38,8 @@ from app.services.media_organize_115_ops import (
     _rename_115_file, _rename_115_files_batch, _match_and_move_subtitles, _move_top_dir_to_failed, _move_failed_files_batch,
     _move_matched_subtitles_to_target, _match_and_move_subtitles_batch, _ensure_115_dir_chain_cached,
     _collect_event_video_sha1s_for_cache, _mkdir_115_dir, _move_115_items, _run_115_write_request_sync,
-    _get_115_direct_url, _get_115_direct_urls,
+    _get_115_direct_url, _get_115_direct_urls, run_115_read_request, run_115_read_request_sync, run_115_scan_request,
+    run_115_write_request,
 )
 from app.services.media_organize_tmdb import (
     _parse_filename, _search_tmdb_for_title, _fetch_tmdb_data,
@@ -88,6 +89,7 @@ _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
 _SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 45000
+_SOURCE_CLEANUP_DELETE_TIMEOUT_SECONDS = 300
 _ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
     max_workers=_MEDIA_ORGANIZE_SYNC_WORKERS,
     thread_name_prefix="chillposter-organize-sync",
@@ -664,8 +666,7 @@ def _collect_candidate_associated_subtitles(client, candidate: dict) -> list[dic
 
     try:
         fs = _get_115_fs(client)
-        with _read_lock:
-            siblings = list(fs.iterdir(parent_id))
+        siblings = run_115_read_request_sync("扫描旧字幕", lambda: list(fs.iterdir(parent_id)))
     except Exception as e:
         logger.debug(f"[Wash] 扫描旧字幕失败: parent_id={parent_id}, file={candidate_name}, err={e}")
         return []
@@ -1139,13 +1140,10 @@ def _await_on_main_loop(coro, main_loop: asyncio.AbstractEventLoop, timeout: flo
 
 
 async def _scan_source_poll_snapshot(drive_index: int, source_cid: str) -> dict:
-    loop = asyncio.get_event_loop()
     client = _get_115_client(drive_index)
-    tree_entries = await loop.run_in_executor(
-        None,
-        _list_115_tree_entries,
-        client,
-        str(source_cid),
+    tree_entries = await run_115_scan_request(
+        "源目录轮询快照",
+        lambda: _list_115_tree_entries(client, str(source_cid)),
     )
     return {
         "tree_entries": tree_entries,
@@ -2861,11 +2859,9 @@ async def _run_organize_async(run_id: str, req):
 
         if not has_prefetched_source_tree:
             logger.debug("[MediaOrganize] 加载源目录完整快照")
-            prefetched_source_tree_entries = await loop.run_in_executor(
-                None,
-                _list_115_tree_entries,
-                client,
-                str(source_cid),
+            prefetched_source_tree_entries = await run_115_scan_request(
+                "加载源目录完整快照",
+                lambda: _list_115_tree_entries(client, str(source_cid)),
             )
             logger.info(f"[MediaOrganize] 源目录快照加载完成: 条目={len(prefetched_source_tree_entries or [])}")
 
@@ -3178,6 +3174,7 @@ async def _run_organize_async(run_id: str, req):
         notify_detail = ""
         if failed_count:
             notify_detail = f"部分条目失败：{failed_count} 个，请查看日志中的失败文件明细"
+        await asyncio.sleep(2)
         _send_organize_task_notify(
             status="success",
             total_files=total_files,
@@ -4850,8 +4847,10 @@ async def _collect_target_event_entries(
         if not client:
             return _done([])
 
-        with _read_lock:
-            attr = get_attr(client, int(file_id)) or {}
+        attr = await run_115_read_request(
+            "目标新增事件读取属性",
+            lambda: get_attr(client, int(file_id)) or {},
+        )
         is_dir = bool(
             attr.get("is_dir")
             or attr.get("is_directory")
@@ -4893,8 +4892,10 @@ async def _collect_target_event_entries(
         caught_warnings = []
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with _read_lock:
-                scanned_items = list(iter_files_with_path(client, cid=int(file_id), app="android", cooldown=1.0, page_size=1000))
+            scanned_items = await run_115_scan_request(
+                "目标新增事件扫描目录",
+                lambda: list(iter_files_with_path(client, cid=int(file_id), app="android", cooldown=1.0, page_size=1000)),
+            )
             caught_warnings = list(caught)
         for warning_item in caught_warnings:
             message = str(getattr(warning_item, "message", "") or "")
@@ -5118,8 +5119,10 @@ async def _process_target_event_entries(
                 if client:
                     for entry in missing_pickcode_entries:
                         try:
-                            with _read_lock:
-                                attr = get_attr(client, int(entry["file_id"])) or {}
+                            attr = await run_115_read_request(
+                                "目标事件补齐pickcode",
+                                lambda _file_id=entry["file_id"]: get_attr(client, int(_file_id)) or {},
+                            )
                             pickcode = str(attr.get("pickcode") or attr.get("pick_code") or attr.get("pc") or "")
                             if not pickcode:
                                 continue
@@ -5328,7 +5331,11 @@ def _build_source_cleanup_delete_queue(client, source_cid: int) -> list[tuple[st
     scanned_dir_count = 0
     scanned_file_count = 0
 
-    for item in iter_dirs_with_path(client, cid=int(source_cid), app="android"):
+    scanned_dirs = run_115_read_request_sync(
+        "清理源目录扫描目录",
+        lambda: list(iter_dirs_with_path(client, cid=int(source_cid), app="android")),
+    )
+    for item in scanned_dirs:
         relpath = _normalize_source_cleanup_relpath(item.get("relpath") or item.get("path") or "")
         if not relpath:
             continue
@@ -5342,8 +5349,10 @@ def _build_source_cleanup_delete_queue(client, source_cid: int) -> list[tuple[st
         children_by_parent.setdefault(relpath, set())
         scanned_dir_count += 1
 
-    with _read_lock:
-        scanned_files = list(iter_files_with_path(client, cid=int(source_cid), app="android", cooldown=1.0, page_size=1000))
+    scanned_files = run_115_read_request_sync(
+        "清理源目录扫描文件",
+        lambda: list(iter_files_with_path(client, cid=int(source_cid), app="android", cooldown=1.0, page_size=1000)),
+    )
 
     for item in scanned_files:
         relpath = _normalize_source_cleanup_relpath(item.get("relpath") or item.get("path") or "")
@@ -5408,7 +5417,10 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
             if delay > 0:
                 await asyncio.sleep(delay)
             try:
-                to_delete = await asyncio.to_thread(_build_source_cleanup_delete_queue, client, int(source_cid))
+                to_delete = await run_115_scan_request(
+                    "清理源目录扫描",
+                    lambda: _build_source_cleanup_delete_queue(client, int(source_cid)),
+                )
                 if attempt > 1:
                     logger.info(f"[MediaOrganize] 清理扫描重试成功: source_cid={source_cid} attempt={attempt}")
                 break
@@ -5451,12 +5463,12 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                 if delay > 0:
                     await asyncio.sleep(delay)
                 try:
-                    resp = await asyncio.to_thread(
-                        _run_115_write_request_sync,
+                    resp = await run_115_write_request(
                         client,
                         f"清理源目录{log_label}",
                         lambda write_client: write_client.fs_delete_app(ids, async_=False),
                         raise_on_state_false=False,
+                        timeout=_SOURCE_CLEANUP_DELETE_TIMEOUT_SECONDS,
                     )
                     if isinstance(resp, dict) and resp.get("state") is False:
                         raise RuntimeError(resp)
