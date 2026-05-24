@@ -40,6 +40,7 @@ _source_poll_lock = threading.Lock()      # 源目录轮询并发锁
 
 _organize_running = False        # 整理任务是否正在执行
 _organize_done_event: asyncio.Event | None = None  # 整理完成通知事件
+_transfer_auto_organize_running = False  # 转存后自动整理是否已在调度/执行
 _target_event_running = False    # 目标目录事件同步任务是否在运行
 _source_poll_running = False     # 源目录轮询任务是否在运行
 

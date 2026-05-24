@@ -5317,7 +5317,7 @@
                                     <div v-else class="resource-search-preview-list">
                                         <div v-for="file in (item.previewItems || [])" :key="file.path || file.name" class="resource-search-preview-row" :class="{matched: file.episodeMatched, folder: file.type === 'folder'}">
                                             <i class="fa-solid" :class="file.type === 'folder' ? 'fa-folder' : (file.isVideo ? 'fa-file-video' : 'fa-file')"></i>
-                                            <span class="resource-search-preview-name">{{ file.path || file.name }}</span>
+                                            <span class="resource-search-preview-name">{{ file.name }}</span>
                                             <span v-if="file.sizeLabel" class="resource-search-preview-size">{{ file.sizeLabel }}</span>
                                         </div>
                                     </div>
@@ -5677,7 +5677,7 @@
                             <div v-else class="resource-search-preview-list">
                                 <div v-for="file in (item.previewItems || [])" :key="file.path || file.name" class="resource-search-preview-row" :class="{matched: file.episodeMatched, folder: file.type === 'folder'}">
                                     <i class="fa-solid" :class="file.type === 'folder' ? 'fa-folder' : (file.isVideo ? 'fa-file-video' : 'fa-file')"></i>
-                                    <span class="resource-search-preview-name">{{ file.path || file.name }}</span>
+                                    <span class="resource-search-preview-name">{{ file.name }}</span>
                                     <span v-if="file.sizeLabel" class="resource-search-preview-size">{{ file.sizeLabel }}</span>
                                 </div>
                             </div>

@@ -10,7 +10,14 @@ import random
 import threading
 from cachetools import TTLCache
 from p115client import P115Client
-from app.services.media_organize_115_ops import _run_115_serial_request, run_115_write_request, run_115_write_request_sync
+from app.services.media_organize_115_ops import (
+    _run_115_serial_request,
+    run_115_write_request,
+    run_115_write_request_sync,
+    DIRECT_URL_PRIORITY_DEFAULT,
+    DIRECT_URL_PRIORITY_DIRECT,
+    DIRECT_URL_PRIORITY_PLAYBACK,
+)
 from p115pickcode import to_id
 from p115client.tool.attr import get_attr
 from app.routers.config_302 import get_config_302
@@ -1012,11 +1019,16 @@ class Drive115Service:
                     timeout=_DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS,
                 )
                 if direct_link_context == "gateway_playback":
-                    result = await self._run_gateway_playback_direct_url_request(request_name, request_factory)
+                    priority = DIRECT_URL_PRIORITY_PLAYBACK
                 elif direct_link_context == "gateway_direct":
-                    result = await self._run_gateway_direct_pickcode_url_request(request_name, request_factory)
+                    priority = DIRECT_URL_PRIORITY_DIRECT
                 else:
-                    result = await _run_115_serial_request(request_name, request_factory)
+                    priority = DIRECT_URL_PRIORITY_DEFAULT
+                result = await _run_115_serial_request(
+                    request_name,
+                    request_factory,
+                    priority=priority,
+                )
             except Exception as e:
                 logger.debug(f"[115] 批量获取直链失败: count={len(normalized)}, err={e}")
                 return {}

@@ -11,6 +11,9 @@ import random
 import inspect
 import asyncio
 import threading
+import itertools
+import queue
+import concurrent.futures
 from contextlib import asynccontextmanager
 from typing import Optional, Iterator, Callable, Any
 
@@ -291,12 +294,20 @@ def _try_remove_empty_dir(client, dir_cid: str):
 _WRITE_API_RATE_INTERVAL_SECONDS = 0.5
 _DIRECT_URL_PACING_MIN_SECONDS = 1.0
 _DIRECT_URL_PACING_MAX_SECONDS = 1.5
+DIRECT_URL_PRIORITY_PLAYBACK = 0
+DIRECT_URL_PRIORITY_DEFAULT = 50
+# STRM /d requests may come from Emby scans, so keep them behind organize ffprobe.
+DIRECT_URL_PRIORITY_DIRECT = 80
+_DIRECT_URL_LOW_PRIORITY_GRACE_SECONDS = 0.15
 _WRITE_API_RATE_LOCK = threading.Lock()
 _LAST_WRITE_API_AT = 0.0
-_DIRECT_URL_LOCK = threading.Lock()
 _LAST_DIRECT_URL_AT = 0.0
 _DIRECT_URL_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
+_DIRECT_URL_QUEUE: "queue.PriorityQueue[tuple[int, int, str, Callable[[], Any], concurrent.futures.Future]]" = queue.PriorityQueue()
+_DIRECT_URL_SEQUENCE = itertools.count(1)
+_DIRECT_URL_WORKER_THREAD: Optional[threading.Thread] = None
+_DIRECT_URL_WORKER_LOCK = threading.Lock()
 _WRITE_REQUEST_TIMEOUT_SECONDS = 20
 _WRITE_API_RATE_LIMIT_MAX_RETRIES = 3
 _WRITE_API_RATE_LIMIT_BACKOFF_SECONDS = (5.0, 10.0, 20.0)
@@ -497,23 +508,61 @@ async def run_115_write_request(
         return result
 
 
-async def _run_115_serial_request(request_name: str, request_factory: Callable[[], Any]):
-    global _LAST_DIRECT_URL_AT
-    await asyncio.to_thread(_DIRECT_URL_LOCK.acquire)
-    try:
-        for attempt in range(_DIRECT_URL_TIMEOUT_MAX_RETRIES + 1):
-            now = time.monotonic()
-            pacing_seconds = random.uniform(_DIRECT_URL_PACING_MIN_SECONDS, _DIRECT_URL_PACING_MAX_SECONDS)
-            wait_seconds = pacing_seconds - (now - _LAST_DIRECT_URL_AT)
-            if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
-            _LAST_DIRECT_URL_AT = time.monotonic()
+def _ensure_direct_url_worker() -> None:
+    global _DIRECT_URL_WORKER_THREAD
+    with _DIRECT_URL_WORKER_LOCK:
+        if _DIRECT_URL_WORKER_THREAD is not None and _DIRECT_URL_WORKER_THREAD.is_alive():
+            return
+        _DIRECT_URL_WORKER_THREAD = threading.Thread(
+            target=_direct_url_worker,
+            name="chillposter-115-direct-url",
+            daemon=True,
+        )
+        _DIRECT_URL_WORKER_THREAD.start()
 
-            request_started_at = time.monotonic()
+
+def _direct_url_queue_has_higher_priority(priority: int) -> bool:
+    try:
+        next_item = _DIRECT_URL_QUEUE.queue[0] if _DIRECT_URL_QUEUE.queue else None
+    except Exception:
+        return False
+    return bool(next_item and int(next_item[0]) < int(priority))
+
+
+def _run_request_factory_with_timeout(request_factory: Callable[[], Any]) -> Any:
+    result = request_factory()
+    if inspect.isawaitable(result):
+        return asyncio.run(asyncio.wait_for(result, timeout=_DIRECT_URL_REQUEST_TIMEOUT_SECONDS))
+    return result
+
+
+def _direct_url_worker() -> None:
+    global _LAST_DIRECT_URL_AT
+    while True:
+        priority, sequence, request_name, request_factory, future = _DIRECT_URL_QUEUE.get()
+        for attempt in range(_DIRECT_URL_TIMEOUT_MAX_RETRIES + 1):
             try:
-                result = request_factory()
-                if inspect.isawaitable(result):
-                    result = await asyncio.wait_for(result, timeout=_DIRECT_URL_REQUEST_TIMEOUT_SECONDS)
+                if future.cancelled():
+                    break
+
+                if priority > DIRECT_URL_PRIORITY_PLAYBACK:
+                    time.sleep(_DIRECT_URL_LOW_PRIORITY_GRACE_SECONDS)
+                    if _direct_url_queue_has_higher_priority(priority):
+                        _DIRECT_URL_QUEUE.put((priority, sequence, request_name, request_factory, future))
+                        break
+
+                now = time.monotonic()
+                pacing_seconds = random.uniform(_DIRECT_URL_PACING_MIN_SECONDS, _DIRECT_URL_PACING_MAX_SECONDS)
+                wait_seconds = pacing_seconds - (now - _LAST_DIRECT_URL_AT)
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
+                    if priority > DIRECT_URL_PRIORITY_PLAYBACK and _direct_url_queue_has_higher_priority(priority):
+                        _DIRECT_URL_QUEUE.put((priority, sequence, request_name, request_factory, future))
+                        break
+                _LAST_DIRECT_URL_AT = time.monotonic()
+
+                request_started_at = time.monotonic()
+                result = _run_request_factory_with_timeout(request_factory)
                 if isinstance(result, dict) and not result.get("state", True):
                     raise RuntimeError(f"{request_name}失败: {result}")
                 elapsed = time.monotonic() - request_started_at
@@ -521,7 +570,9 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
                     label = request_name.split(":", 1)[1].strip() if ":" in request_name else ""
                     label_text = f": {label}" if label else ""
                     logger.debug(f"[115] 直链获取完成{label_text} | 请求耗时={elapsed:.2f}s")
-                return result
+                if not future.cancelled():
+                    future.set_result(result)
+                break
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - request_started_at
                 if request_name.startswith("获取直链"):
@@ -534,9 +585,31 @@ async def _run_115_serial_request(request_name: str, request_factory: Callable[[
                     logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s，准备重试 ({attempt + 1}/{_DIRECT_URL_TIMEOUT_MAX_RETRIES})")
                     continue
                 logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s")
-                return {}
-    finally:
-        _DIRECT_URL_LOCK.release()
+                if not future.cancelled():
+                    future.set_result({})
+            except Exception as e:
+                if not future.cancelled():
+                    future.set_exception(e)
+                break
+        _DIRECT_URL_QUEUE.task_done()
+
+
+async def _run_115_serial_request(
+    request_name: str,
+    request_factory: Callable[[], Any],
+    *,
+    priority: int = DIRECT_URL_PRIORITY_DEFAULT,
+):
+    _ensure_direct_url_worker()
+    future: concurrent.futures.Future = concurrent.futures.Future()
+    _DIRECT_URL_QUEUE.put((
+        int(priority),
+        next(_DIRECT_URL_SEQUENCE),
+        request_name,
+        request_factory,
+        future,
+    ))
+    return await asyncio.wrap_future(future)
 
 
 _run_115_write_request = run_115_write_request

@@ -1275,6 +1275,15 @@ def schedule_auto_organize_after_transfer(drive_index: int = 0, source: str = ""
         logger.warning(f"[转存] 无法触发媒体整理，主事件循环未就绪: source={source or '-'}")
         return False
 
+    with _organize_trigger_lock:
+        if _state._organize_running:
+            logger.info(f"[转存] 整理任务已在运行，忽略转存后自动整理触发: source={source or '-'}")
+            return False
+        if _state._transfer_auto_organize_running:
+            logger.info(f"[转存] 转存后自动整理已在处理，忽略重复触发: source={source or '-'}")
+            return False
+        _state._transfer_auto_organize_running = True
+
     async def _runner():
         try:
             logger.info(f"[转存] 115 分享转存成功，准备触发媒体整理: source={source or '-'} reason={reason or '-'}")
@@ -1282,11 +1291,14 @@ def schedule_auto_organize_after_transfer(drive_index: int = 0, source: str = ""
             if run_id:
                 logger.info(f"[转存] 转存后媒体整理完成: source={source or '-'} run_id={run_id} status={status}")
             elif status == "organize_running":
-                logger.info(f"[转存] 整理任务已在运行，跳过转存后补跑，交给整理结束后的源目录复查: source={source or '-'}")
+                logger.info(f"[转存] 整理任务已在运行，忽略转存后自动整理触发: source={source or '-'}")
             else:
                 logger.warning(f"[转存] 转存后媒体整理未启动: source={source or '-'} reason={status or 'unknown'}")
         except Exception as e:
             logger.error(f"[转存] 转存后触发媒体整理失败: source={source or '-'} error={e}", exc_info=True)
+        finally:
+            with _organize_trigger_lock:
+                _state._transfer_auto_organize_running = False
 
     future = asyncio.run_coroutine_threadsafe(_runner(), main_loop)
 
