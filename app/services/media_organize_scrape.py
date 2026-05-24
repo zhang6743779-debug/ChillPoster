@@ -47,6 +47,8 @@ _TMDB_IMAGE_DOWNLOAD_RETRIES = 3
 _IMAGE_SESSION_LOCAL = threading.local()
 _METADATA_PROGRESS_LOG_LOCK = threading.Lock()
 _METADATA_PROGRESS_LOG_COUNTS: dict[str, int] = {}
+_METADATA_DONE_LOG_TIMES: dict[str, float] = {}
+_METADATA_DONE_LOG_TTL_SECONDS = 3600.0
 
 _bulk_mode_local = threading.local()
 
@@ -100,7 +102,23 @@ def _metadata_done_label(tmdb_data: Optional[dict] = None, folder_name: str = ""
 
 
 def _log_metadata_download_done(label: str):
-    logger.info(f"[MediaOrganize] 元数据下载完成: {label}")
+    normalized_label = str(label or "未知标题").strip() or "未知标题"
+    now = _time.monotonic()
+    with _METADATA_PROGRESS_LOG_LOCK:
+        if len(_METADATA_DONE_LOG_TIMES) > 2000:
+            expired_before = now - _METADATA_DONE_LOG_TTL_SECONDS
+            for key, logged_at in list(_METADATA_DONE_LOG_TIMES.items()):
+                if logged_at < expired_before:
+                    _METADATA_DONE_LOG_TIMES.pop(key, None)
+        last_logged_at = float(_METADATA_DONE_LOG_TIMES.get(normalized_label, 0.0) or 0.0)
+        should_log_info = not last_logged_at or now - last_logged_at >= _METADATA_DONE_LOG_TTL_SECONDS
+        if should_log_info:
+            _METADATA_DONE_LOG_TIMES[normalized_label] = now
+
+    if should_log_info:
+        logger.info(f"[MediaOrganize] 元数据下载完成: {normalized_label}")
+    else:
+        logger.debug(f"[MediaOrganize] 元数据下载完成，同一部剧已提示: {normalized_label}")
 
 
 def _noop_transfer(src: str, dst: str):

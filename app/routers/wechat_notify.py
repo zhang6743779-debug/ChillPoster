@@ -419,13 +419,13 @@ def send_to_all_channels(title: str, description: str, image_url: str = "",
     """
     exclude_channels = {str(item).lower() for item in (exclude_channels or [])}
     results = {}
-    logger.info(f"[Notify] send_to_all_channels called: type={notify_type}, title={title}, exclude={sorted(exclude_channels)}")
+    logger.info(f"[通知] 准备发送多渠道通知: 类型={notify_type}, 标题={title}, 跳过渠道={sorted(exclude_channels)}")
 
     # 检查微信是否启用
     wechat_enabled = wechat_notify_service.is_notify_type_enabled(notify_type) if notify_type else wechat_notify_service.get_config().get("enabled")
     if "wechat" in exclude_channels:
         wechat_enabled = False
-    logger.info(f"[Notify] wechat enabled={wechat_enabled} (type={notify_type})")
+    logger.info(f"[通知] 微信通知{'已启用' if wechat_enabled else '未启用'}: 类型={notify_type}")
     if wechat_enabled:
         results["wechat"] = wechat_notify_service.send_news_message(
             title=title,
@@ -439,7 +439,7 @@ def send_to_all_channels(title: str, description: str, image_url: str = "",
     tg_enabled = telegram_notify_service.is_notify_type_enabled(notify_type) if notify_type else telegram_notify_service.get_config().get("enabled")
     if "telegram" in exclude_channels:
         tg_enabled = False
-    logger.info(f"[Notify] telegram enabled={tg_enabled} (type={notify_type})")
+    logger.info(f"[通知] Telegram 通知{'已启用' if tg_enabled else '未启用'}: 类型={notify_type}")
     if tg_enabled:
         results["telegram"] = telegram_notify_service.send_message_with_image(
             title=title,

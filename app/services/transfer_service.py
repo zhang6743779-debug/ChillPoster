@@ -266,9 +266,9 @@ class TransferService:
                 lambda write_client: write_client.offline_add_urls(payload, async_=False),
                 raise_on_state_false=False,
             )
-            logger.info(f"[转存] offline_add_urls 返回: {json.dumps(resp, ensure_ascii=False)}")
+            logger.info(f"[转存] 115 离线添加接口返回(offline_add_urls): {json.dumps(resp, ensure_ascii=False)}")
         except Exception as e:
-            logger.error(f"[转存] offline_add_urls 调用失败: {e}")
+            logger.error(f"[转存] 115 离线添加接口调用失败(offline_add_urls): {e}")
             return self._build_ed2k_results(links, False, "离线任务添加失败", f"115 离线接口调用失败: {e}", source, source_meta=source_meta)
 
         success = self._response_success(resp)
