@@ -34,6 +34,7 @@ _GATEWAY_DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
 _GATEWAY_DIRECT_LOW_PRIORITY_GRACE_SECONDS = 0.15
 _GATEWAY_DIRECT_PRIORITY_PLAYBACK = 0
 _GATEWAY_DIRECT_PRIORITY_DIRECT = 10
+_115_APP_LIST_SAFE_PAGE_SIZE = 7000
 
 class Drive115Service:
     def __init__(self):
@@ -139,6 +140,117 @@ class Drive115Service:
             elapsed = time.monotonic() - started_at
             logger.warning(f"[115] {request_name}超时: 耗时={elapsed:.2f}s")
             raise TimeoutError(f"{request_name}超时: {elapsed:.2f}s") from e
+
+    def _normalize_115_remote_path(self, path: str) -> str:
+        text = str(path or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        if not text.startswith("/"):
+            text = "/" + text
+        while "//" in text:
+            text = text.replace("//", "/")
+        return text.rstrip("/") or "/"
+
+    def _extract_115_list_items(self, resp) -> list:
+        if not isinstance(resp, dict):
+            return []
+        raw_items = resp.get("data", [])
+        if isinstance(raw_items, dict):
+            raw_items = (
+                raw_items.get("list")
+                or raw_items.get("files")
+                or raw_items.get("data")
+                or raw_items.get("items")
+                or []
+            )
+        return raw_items if isinstance(raw_items, list) else []
+
+    def _extract_115_folder_cid(self, item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        if item.get("fid") and str(item.get("fc", "") or "") != "0":
+            return ""
+        cid = str(item.get("cid") or item.get("id") or item.get("category_id") or item.get("fid") or "").strip()
+        return cid if cid and cid != "0" else ""
+
+    async def _find_115_child_dir_cid(self, client, parent_cid: str, name: str, *, request_label: str = "115目录") -> str:
+        offset = 0
+        page_index = 0
+        while True:
+            page_index += 1
+            resp = await self._run_115_read_request(
+                f"{request_label}逐级查找:{name}",
+                lambda _cid=parent_cid, _offset=offset: client.fs_files_app(
+                    {
+                        "cid": int(_cid),
+                        "limit": _115_APP_LIST_SAFE_PAGE_SIZE,
+                        "offset": _offset,
+                        "fc_mix": 0,
+                    },
+                    app="android",
+                ),
+            )
+            items = self._extract_115_list_items(resp)
+            for item in items:
+                item_name = str(item.get("n") or item.get("fn") or item.get("name") or "").strip()
+                if item_name != name:
+                    continue
+                next_cid = self._extract_115_folder_cid(item)
+                if next_cid:
+                    return next_cid
+
+            if len(items) < _115_APP_LIST_SAFE_PAGE_SIZE:
+                return ""
+            offset += len(items)
+            if page_index % 5 == 0:
+                logger.info(
+                    f"[CleanUp] {request_label}逐级查找仍在翻页: "
+                    f"parent={parent_cid}, name={name}, pages={page_index}, scanned={offset}"
+                )
+
+    async def _resolve_115_dir_id_by_path(self, client, path: str, *, request_label: str = "115目录") -> str | None:
+        normalized_path = self._normalize_115_remote_path(path)
+        if not normalized_path:
+            return None
+        if normalized_path == "/":
+            return "0"
+
+        try:
+            resp = await self._run_115_read_request(
+                f"{request_label}按路径查询",
+                lambda: client.fs_dir_getid(normalized_path),
+            )
+            if isinstance(resp, dict) and resp.get("state"):
+                cid = str(resp.get("id") or resp.get("cid") or "").strip()
+                if cid:
+                    return cid
+        except Exception as e:
+            err_text = str(e)
+            if len(err_text) > 300:
+                err_text = err_text[:300] + "..."
+            logger.warning(f"[CleanUp] {request_label}按路径查询失败，改用逐级查找: {normalized_path} | {err_text}")
+
+        parent_cid = "0"
+        for part in [item for item in normalized_path.strip("/").split("/") if item]:
+            try:
+                next_cid = await self._find_115_child_dir_cid(
+                    client,
+                    parent_cid,
+                    part,
+                    request_label=request_label,
+                )
+            except Exception as e:
+                err_text = str(e)
+                if len(err_text) > 300:
+                    err_text = err_text[:300] + "..."
+                logger.warning(f"[CleanUp] {request_label}逐级查找失败: parent={parent_cid}, name={part} | {err_text}")
+                return None
+
+            if not next_cid:
+                return None
+            parent_cid = next_cid
+
+        return parent_cid
 
     def _get_http_client(self) -> httpx.AsyncClient:
         loop_id = id(asyncio.get_running_loop())
@@ -1419,12 +1531,12 @@ class Drive115Service:
         try:
             logger.info(f"[CleanUp] 开始清理账号: {name} (类型: {account_type})")
             client = P115Client(cookie)
-            dir_info = await self._run_115_read_request(
-                "查询清理目录",
-                lambda: client.fs_dir_getid_app(upload_dir),
+            target_cid = await self._resolve_115_dir_id_by_path(
+                client,
+                upload_dir,
+                request_label="查询清理目录",
             )
-            target_cid = dir_info.get('id') if dir_info else None
-            if not target_cid:
+            if not target_cid or str(target_cid) == "0":
                 logger.warning(f"[CleanUp] 目录不存在: {upload_dir}")
                 return
 
@@ -1435,10 +1547,14 @@ class Drive115Service:
                     "列出清理目录",
                     lambda: client.fs_files({'cid': target_cid, 'limit': 1000}),
                 )
-                if not resp.get('data'): break
-                file_list = resp['data']
+                file_list = self._extract_115_list_items(resp)
                 if not file_list: break
-                fids = [item['fid'] for item in file_list]
+                fids = []
+                for item in file_list:
+                    item_id = self._extract_cleanup_item_id(item)
+                    if item_id:
+                        fids.append(item_id)
+                if not fids: break
                 await run_115_write_request(
                     client,
                     "清理复制目录",
@@ -1515,57 +1631,56 @@ class Drive115Service:
         if not normalized_cid.isdigit() or normalized_cid == "0":
             return {"status": "error", "cid": normalized_cid, "label": folder_label, "ids": [], "message": "禁止清空根目录或无效目录"}
 
-        ids: list[int] = []
         try:
-            from p115client.tool.iterdir import traverse_tree_with_path
-            items = await asyncio.to_thread(
-                lambda: list(traverse_tree_with_path(
-                    client,
-                    cid=int(normalized_cid),
-                    with_ancestors=True,
-                    app="android",
-                    max_workers=0,
-                ))
-            )
-            for item in items:
-                item_id = self._extract_cleanup_item_id(item)
-                if item_id and str(item_id) != normalized_cid:
-                    ids.append(item_id)
+            def collect_ids() -> list[int]:
+                from p115client.tool.fs_files import iter_fs_files
+                collected: list[int] = []
+                for page in iter_fs_files(client, {"cid": int(normalized_cid)}, page_size=7000, max_workers=0):
+                    for item in self._extract_115_list_items(page):
+                        item_id = self._extract_cleanup_item_id(item)
+                        if item_id:
+                            collected.append(item_id)
+                return collected
+
+            ids = await asyncio.to_thread(collect_ids)
         except Exception as e:
-            logger.warning(f"[CleanUp] 全量遍历目录失败，回退直接子项列表: {folder_label} | {e}")
-            resp = await asyncio.to_thread(client.fs_files, {"cid": int(normalized_cid), "limit": 10000})
-            file_list = resp.get("data") if isinstance(resp, dict) else []
-            for item in file_list:
-                item_id = self._extract_cleanup_item_id(item)
-                if item_id:
-                    ids.append(item_id)
+            message = f"列出目录失败: {folder_label} | {e}"
+            logger.warning(f"[CleanUp] {message}")
+            return {"status": "error", "cid": normalized_cid, "label": folder_label, "ids": [], "message": message}
 
         unique_ids = list(dict.fromkeys(ids))
-        logger.info(f"[CleanUp] 已收集清空目标: {folder_label} | 待删 {len(unique_ids)} 项")
+        logger.info(f"[CleanUp] 已收集清空目标: {folder_label} | 本批待删 {len(unique_ids)} 项")
         return {"status": "ok", "cid": normalized_cid, "label": folder_label, "ids": unique_ids, "message": ""}
 
     async def _delete_115_ids_once_with_retry(self, client, ids: list[int], log_label: str):
         if not ids:
             return True, None
         last_error = None
-        for attempt in range(2):
-            if attempt > 0:
-                logger.warning(f"[CleanUp] 批量删除失败，1秒后重试: {log_label}")
-                await asyncio.sleep(1)
-            try:
-                resp = await asyncio.to_thread(
-                    run_115_write_request_sync,
-                    client,
-                    "清空指定目录",
-                    lambda write_client: write_client.fs_delete(ids, async_=False),
-                    raise_on_state_false=False,
-                )
-                if isinstance(resp, dict) and resp.get("state") is False:
-                    raise RuntimeError(resp)
-                return True, None
-            except Exception as e:
-                last_error = e
-        return False, last_error
+        max_batch_size = 45000
+        batches = [ids[i:i + max_batch_size] for i in range(0, len(ids), max_batch_size)]
+        for batch_index, batch_ids in enumerate(batches, start=1):
+            batch_label = f"{log_label} batch={batch_index}/{len(batches)}"
+            for attempt in range(2):
+                if attempt > 0:
+                    logger.warning(f"[CleanUp] 批量删除失败，1秒后重试: {batch_label}")
+                    await asyncio.sleep(1)
+                try:
+                    resp = await asyncio.to_thread(
+                        run_115_write_request_sync,
+                        client,
+                        "清空指定目录",
+                        lambda write_client, _ids=batch_ids: write_client.fs_delete_app(_ids, async_=False),
+                        raise_on_state_false=False,
+                    )
+                    if isinstance(resp, dict) and resp.get("state") is False:
+                        raise RuntimeError(resp)
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+            if last_error is not None:
+                return False, last_error
+        return True, None
 
     async def execute_selected_folder_cleanup_task(self, task: dict, manual: bool = False) -> dict:
         task_name = str(task.get("name") or "115定时清空").strip() or "115定时清空"
@@ -1599,9 +1714,33 @@ class Drive115Service:
                 logger.warning(f"[CleanUp] {message}")
                 continue
 
-            result = await self.collect_115_folder_child_ids(client, cid, label)
-            ids = list(dict.fromkeys(result.get("ids") or []))
-            if not ids:
+            deleted_count = 0
+            max_iterations = 100
+            result = {"status": "ok", "message": ""}
+            for iteration in range(max_iterations):
+                result = await self.collect_115_folder_child_ids(client, cid, label)
+                if result.get("status") != "ok":
+                    message = result.get("message", "") or f"列出目录失败: {label}"
+                    folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
+                    logger.error(f"[CleanUp] {message}")
+                    return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
+
+                ids = list(dict.fromkeys(result.get("ids") or []))
+                if not ids:
+                    break
+
+                logger.info(f"[CleanUp] 准备删除目录内容: {task_name} | {label} | 第 {iteration + 1} 批 {len(ids)} 项")
+                ok, error = await self._delete_115_ids_once_with_retry(client, ids, f"{task_name} {label} size={len(ids)}")
+                if not ok:
+                    message = f"批量删除失败: {label} | {error}"
+                    folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
+                    logger.error(f"[CleanUp] {message}")
+                    return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
+
+                deleted_count += len(ids)
+                await asyncio.sleep(0.5)
+
+            if deleted_count <= 0:
                 folder_results.append({
                     "cid": cid,
                     "label": label,
@@ -1610,16 +1749,6 @@ class Drive115Service:
                     "message": result.get("message", "") or "没有待删除项",
                 })
                 continue
-
-            logger.info(f"[CleanUp] 准备删除目录内容: {task_name} | {label} | {len(ids)} 项")
-            ok, error = await self._delete_115_ids_once_with_retry(client, ids, f"{task_name} {label} size={len(ids)}")
-            if not ok:
-                message = f"批量删除失败: {label} | {error}"
-                folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": 0, "message": message})
-                logger.error(f"[CleanUp] {message}")
-                return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
-
-            deleted_count = len(ids)
             total_deleted_count += deleted_count
             folder_results.append({"cid": cid, "label": label, "status": "ok", "deleted_count": deleted_count, "message": "清理完成"})
             logger.info(f"[CleanUp] 目录内容删除完成: {task_name} | {label} | 已删除 {deleted_count} 项")

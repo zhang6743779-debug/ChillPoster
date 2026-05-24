@@ -87,7 +87,7 @@ _MEDIA_ORGANIZE_SYNC_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZ
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
-_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 50000
+_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 45000
 _ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
     max_workers=_MEDIA_ORGANIZE_SYNC_WORKERS,
     thread_name_prefix="chillposter-organize-sync",
@@ -1072,13 +1072,21 @@ def _clear_streaming_progress_throttle(run_id: str) -> None:
 def _update_streaming_progress(run_id: str, *, scanned_video_count: int, processed_result_count: int,
                                success_count: int, error_count: int, strm_generated_count: int,
                                scan_complete: bool = False, status: Optional[str] = None,
-                               results: Optional[list[dict]] = None):
-    if scan_complete:
-        pct = min(int(processed_result_count / scanned_video_count * 90) + 10, 100) if scanned_video_count > 0 else 100
+                               results: Optional[list[dict]] = None, phase: str = ""):
+    if phase == "finish":
+        pct = 98
+        message = f"整理收尾: {processed_result_count}/{scanned_video_count}"
+    elif phase == "batch_move":
+        pct = 95
+        message = f"整理移动中: {processed_result_count}/{scanned_video_count}"
+    elif scan_complete:
+        scan_floor = 5 if scanned_video_count <= 0 else min(5 + scanned_video_count // 400, 15)
+        processed_pct = min(5 + int(processed_result_count / scanned_video_count * 90), 95) if scanned_video_count > 0 else 95
+        pct = max(scan_floor, processed_pct)
         message = f"整理: {processed_result_count}/{scanned_video_count}"
     else:
-        pct = 5 if scanned_video_count <= 0 else min(5 + scanned_video_count // 20, 90)
-        message = f"整理: 已扫描 {scanned_video_count} 个视频，已完成 {processed_result_count} 个"
+        pct = 5 if scanned_video_count <= 0 else min(5 + scanned_video_count // 400, 15)
+        message = f"整理扫描中: 已扫描 {scanned_video_count} 个视频，已完成 {processed_result_count} 个"
     effective_status = status or "running"
     if not _should_emit_streaming_progress(
         run_id,
@@ -2498,6 +2506,8 @@ async def _run_organize_async(run_id: str, req):
 
                         pending_tv_batches[batch_key]["items"].append(plan)
                         pending_tv_batches[batch_key]["item_index"][(season_num, episode_num)] = plan
+                except _OrganizeCancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"[MediaOrganize] 整理文件失败 {file_name}: {e}", exc_info=True)
                     results.append({"file": file_name, "status": "error", "message": str(e)})
@@ -2520,10 +2530,38 @@ async def _run_organize_async(run_id: str, req):
             for batch_key, batch_entry in pending_tv_batches.items():
                 plan_items = batch_entry.get("items", [])
                 notify_elapsed_started_at = _time.time()
-                batch_results = await loop.run_in_executor(
+                _update_streaming_progress(
+                    run_id,
+                    scanned_video_count=scanned_video_count,
+                    processed_result_count=len(results),
+                    success_count=success_count,
+                    error_count=_count_error_results(results),
+                    strm_generated_count=strm_generated_count,
+                    results=results,
+                    scan_complete=True,
+                    phase="batch_move",
+                )
+                batch_future = loop.run_in_executor(
                     _ORGANIZE_SYNC_EXECUTOR,
                     lambda _c=client, _items=plan_items, _sp=subtitles_by_parent: _execute_tv_batch_plan(_c, _items, subtitles_by_parent=_sp, main_loop=_state._main_event_loop),
                 )
+                while True:
+                    try:
+                        batch_results = await asyncio.wait_for(asyncio.shield(batch_future), timeout=30.0)
+                        break
+                    except asyncio.TimeoutError:
+                        _update_streaming_progress(
+                            run_id,
+                            scanned_video_count=scanned_video_count,
+                            processed_result_count=len(results),
+                            success_count=success_count,
+                            error_count=_count_error_results(results),
+                            strm_generated_count=strm_generated_count,
+                            results=results,
+                            scan_complete=True,
+                            phase="batch_move",
+                        )
+                        _raise_if_organize_cancelled(run_id)
                 notify_elapsed_seconds = _time.time() - notify_elapsed_started_at
                 batch_success = 0
                 batch_size = 0
@@ -3052,6 +3090,16 @@ async def _run_organize_async(run_id: str, req):
         scan_complete = True
         total_files = scanned_video_count
         logger.info(f"[MediaOrganize] 扫描完成，按媒体聚合为 {len(grouped_items_by_key)} 组")
+        _update_streaming_progress(
+            run_id,
+            scanned_video_count=scanned_video_count,
+            processed_result_count=len(results),
+            success_count=success_count,
+            error_count=_count_error_results(results),
+            strm_generated_count=strm_generated_count,
+            results=results,
+            scan_complete=True,
+        )
         if grouped_items_by_key:
             for group_key, group_items in grouped_items_by_key.items():
                 identify_queue.put_nowait((group_key, list(group_items)))
@@ -3172,6 +3220,17 @@ async def _run_organize_async(run_id: str, req):
             "tv_episodes": tv_success_count,
             "elapsed_seconds": elapsed,
         })
+        _update_streaming_progress(
+            run_id,
+            scanned_video_count=total_files,
+            processed_result_count=len(results),
+            success_count=success_count,
+            error_count=failed_count,
+            strm_generated_count=strm_generated_count,
+            results=results,
+            scan_complete=True,
+            phase="finish",
+        )
         await _run_finish_maintenance("整理结束清理后", include_refresh=True)
         _clear_streaming_progress_throttle(run_id)
         update_task_progress(run_id, f"整理完成: {success_count}/{total_files} 成功", 100, "finished")
@@ -3185,12 +3244,32 @@ async def _run_organize_async(run_id: str, req):
         for task in pending_async_tasks:
             if not task.done():
                 task.cancel()
+        if pending_async_tasks:
+            await asyncio.gather(*pending_async_tasks, return_exceptions=True)
         try:
             flushed_count = _flush_pending_library_cache_updates()
             if flushed_count:
                 logger.info(f"[MediaOrganize] 取消前已写入待处理媒体库缓存: {flushed_count} 条")
         except Exception as flush_err:
             logger.error(f"[MediaOrganize] 取消前批量写缓存失败: {flush_err}")
+        try:
+            failed_pending_count = len(pending_failed_moves)
+            wash_pending_count = len(pending_wash_reject_moves)
+            if failed_pending_count or wash_pending_count:
+                logger.info(
+                    f"[MediaOrganize] 取消前处理待移动文件: "
+                    f"失败 {failed_pending_count} 条，洗版未通过 {wash_pending_count} 条"
+                )
+            if failed_pending_count:
+                failed_left = await _flush_pending_failed_moves()
+                moved_failed = max(0, failed_pending_count - int(failed_left or 0))
+                logger.info(f"[MediaOrganize] 取消前失败文件/目录移动完成: {moved_failed}/{failed_pending_count}")
+            if wash_pending_count:
+                wash_left = await _flush_pending_wash_reject_moves()
+                moved_wash = max(0, wash_pending_count - int(wash_left or 0))
+                logger.info(f"[Wash] 取消前洗版未通过文件移动完成: {moved_wash}/{wash_pending_count}")
+        except Exception as move_err:
+            logger.warning(f"[MediaOrganize] 取消前移动待处理文件失败: {move_err}")
         try:
             if metadata_executor:
                 metadata_executor.shutdown(wait=False, cancel_futures=True)
@@ -5376,7 +5455,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                         _run_115_write_request_sync,
                         client,
                         f"清理源目录{log_label}",
-                        lambda write_client: write_client.fs_delete(ids, async_=False),
+                        lambda write_client: write_client.fs_delete_app(ids, async_=False),
                         raise_on_state_false=False,
                     )
                     if isinstance(resp, dict) and resp.get("state") is False:
