@@ -4213,6 +4213,73 @@ html[data-theme="light"] .transfer-history-row:hover {
     border: 1px solid var(--color-border);
     background: rgba(0, 0, 0, 0.16);
 }
+.emby-sync-section .panel-section-body {
+    padding: 16px;
+}
+.emby-sync-card {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+.media-rules-page .panel-section {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+}
+.media-rules-page .panel-section-head {
+    padding: 0 0 12px;
+    border-bottom: 0;
+    background: transparent;
+}
+.media-rules-page .panel-section-body {
+    padding: 0;
+}
+.media-rules-page .emby-sync-card {
+    padding: 18px;
+    border-radius: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(255, 255, 255, 0.045);
+}
+.media-rules-page .subclass-col-card,
+.media-rules-page .media-rules-col-card {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    overflow: visible;
+}
+.media-rules-page .subclass-col-card > .card-header,
+.media-rules-page .media-rules-col-card > .card-header {
+    min-height: 0;
+    padding: 0 0 12px;
+    border-bottom: 0;
+    background: transparent;
+}
+.media-rules-page .subclass-col-card-body,
+.media-rules-page .media-rules-col-card-body {
+    padding: 0;
+}
+.media-rules-page .subclass-card {
+    border-color: rgba(148, 163, 184, 0.16);
+    background: rgba(255, 255, 255, 0.045);
+    box-shadow: none;
+}
+.media-rules-page .subclass-preview-card {
+    background: rgba(120, 169, 255, 0.055);
+    border-color: rgba(120, 169, 255, 0.14);
+}
+html[data-theme="light"] .media-rules-page .emby-sync-card,
+html[data-theme="light"] .media-rules-page .subclass-card {
+    background: rgba(241, 246, 252, 0.72);
+    border-color: rgba(71, 85, 105, 0.12);
+}
+html[data-theme="light"] .media-rules-page .subclass-preview-card {
+    background: rgba(59, 130, 246, 0.055);
+    border-color: rgba(59, 130, 246, 0.11);
+}
 .subclass-card-head-main {
     display: flex;
     flex-direction: column;
@@ -19466,5 +19533,645 @@ html[data-theme="light"] .missing-episode-library-panel {
     .organize-history-pager {
         align-items: flex-start;
         flex-direction: column;
+    }
+}
+
+/* Dashboard media stats: compact metric tiles */
+.dashboard-media-stats-card .media-stat-grid--summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+}
+
+.dashboard-media-stats-card .media-stat-grid--summary .media-stat-chip {
+    position: relative;
+    display: grid !important;
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+    align-items: center !important;
+    justify-content: stretch !important;
+    min-height: 54px !important;
+    padding: 9px 12px !important;
+    gap: 9px;
+    border-radius: 14px !important;
+    text-align: left !important;
+    color: rgba(241, 245, 249, 0.9) !important;
+    background:
+        linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(20, 184, 166, 0.07)),
+        rgba(255, 255, 255, 0.065) !important;
+    border-color: rgba(148, 163, 184, 0.14) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 10px 20px rgba(2, 6, 23, 0.14) !important;
+}
+
+.media-stat-chip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+    color: #e0f2fe;
+    background: rgba(59, 130, 246, 0.18);
+    border: 1px solid rgba(125, 211, 252, 0.16);
+}
+
+.dashboard-media-stats-card .media-stat-chip:nth-child(2) .media-stat-chip-icon,
+.dashboard-media-stats-card .media-stat-chip:nth-child(5) .media-stat-chip-icon {
+    color: #ede9fe;
+    background: rgba(139, 92, 246, 0.18);
+    border-color: rgba(196, 181, 253, 0.16);
+}
+
+.dashboard-media-stats-card .media-stat-chip:nth-child(3) .media-stat-chip-icon,
+.dashboard-media-stats-card .media-stat-chip:nth-child(6) .media-stat-chip-icon {
+    color: #dcfce7;
+    background: rgba(16, 185, 129, 0.18);
+    border-color: rgba(134, 239, 172, 0.16);
+}
+
+.media-stat-chip-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 750;
+    line-height: 1.2;
+    letter-spacing: 0;
+    color: rgba(226, 232, 240, 0.78);
+}
+
+.media-stat-chip-value {
+    min-width: 0;
+    font-size: 16px;
+    font-weight: 850;
+    line-height: 1;
+    letter-spacing: 0;
+    color: rgba(248, 250, 252, 0.96);
+    font-variant-numeric: tabular-nums;
+}
+
+html[data-theme="light"] .dashboard-media-stats-card .media-stat-grid--summary .media-stat-chip {
+    color: #0f172a !important;
+    background:
+        linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(20, 184, 166, 0.06)),
+        rgba(241, 246, 252, 0.82) !important;
+    border-color: rgba(71, 85, 105, 0.13) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62), 0 8px 18px rgba(71, 85, 105, 0.08) !important;
+}
+
+html[data-theme="light"] .media-stat-chip-label {
+    color: #46566b;
+}
+
+html[data-theme="light"] .media-stat-chip-value {
+    color: #0f172a;
+}
+
+html[data-theme="light"] .media-stat-chip-icon {
+    color: #2563eb;
+    background: rgba(59, 130, 246, 0.12);
+    border-color: rgba(37, 99, 235, 0.14);
+}
+
+html[data-theme="light"] .dashboard-media-stats-card .media-stat-chip:nth-child(2) .media-stat-chip-icon,
+html[data-theme="light"] .dashboard-media-stats-card .media-stat-chip:nth-child(5) .media-stat-chip-icon {
+    color: #7c3aed;
+    background: rgba(139, 92, 246, 0.12);
+    border-color: rgba(124, 58, 237, 0.14);
+}
+
+html[data-theme="light"] .dashboard-media-stats-card .media-stat-chip:nth-child(3) .media-stat-chip-icon,
+html[data-theme="light"] .dashboard-media-stats-card .media-stat-chip:nth-child(6) .media-stat-chip-icon {
+    color: #059669;
+    background: rgba(16, 185, 129, 0.12);
+    border-color: rgba(5, 150, 105, 0.14);
+}
+
+@media (max-width: 420px) {
+    .dashboard-media-stats-card .media-stat-grid--summary {
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+}
+
+/* Media organize rules page: keep sections flat, only editing surfaces are framed. */
+.media-rules-page .panel-section,
+.media-rules-page .subclass-col-card,
+.media-rules-page .media-rules-col-card {
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.media-rules-page .subclass-card,
+.media-rules-page .emby-sync-card {
+    border-radius: 14px !important;
+    box-shadow: none !important;
+}
+
+.media-rules-page .subclass-col-card:hover,
+.media-rules-page .media-rules-col-card:hover {
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+.media-rules-page .subclass-col-card > .card-header,
+.media-rules-page .media-rules-col-card > .card-header {
+    width: 100% !important;
+    min-height: 32px !important;
+    margin: 0 0 12px !important;
+    padding: 0 !important;
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.media-rules-page .subclass-col-card > .card-header .ios-switch {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.media-rules-page .subclass-col-card-body,
+.media-rules-page .media-rules-col-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 0 !important;
+}
+
+.media-rules-page .media-rules-col-title,
+.media-rules-page .subclass-section-title,
+.media-rules-page .panel-section-title {
+    min-height: 24px;
+}
+
+/* Media organize rules: match the Emby sync row layout for every section. */
+.media-rules-page .subclass-col-card,
+.media-rules-page .media-rules-col-card {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 14px !important;
+    min-width: 0 !important;
+    padding: 18px !important;
+    border-radius: 14px !important;
+    border: 1px solid rgba(148, 163, 184, 0.16) !important;
+    background: rgba(255, 255, 255, 0.045) !important;
+    box-shadow: none !important;
+    overflow: visible !important;
+}
+
+.media-rules-page .subclass-col-card-head,
+.media-rules-page .media-rules-col-card-head {
+    display: flex !important;
+    align-items: flex-start !important;
+    justify-content: space-between !important;
+    gap: 12px !important;
+    min-height: 24px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.media-rules-page .subclass-col-card-head .ios-switch {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.media-rules-page .subclass-col-card-body,
+.media-rules-page .media-rules-col-card-body,
+.media-rules-page .subclass-col-card-content {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 14px !important;
+    padding: 0 !important;
+}
+
+.media-rules-page .subclass-preview-card {
+    margin-top: 0 !important;
+}
+
+html[data-theme="light"] .media-rules-page .subclass-col-card,
+html[data-theme="light"] .media-rules-page .media-rules-col-card {
+    background: rgba(224, 236, 247, 0.62) !important;
+    border-color: rgba(71, 85, 105, 0.14) !important;
+}
+
+.media-rules-page .rule-card {
+    background: rgba(255, 255, 255, 0.075) !important;
+    border-color: rgba(203, 213, 225, 0.2) !important;
+    box-shadow: 0 10px 22px rgba(2, 6, 23, 0.12) !important;
+}
+
+html[data-theme="light"] .media-rules-page .rule-card {
+    background: rgba(232, 241, 249, 0.82) !important;
+    border-color: rgba(71, 85, 105, 0.2) !important;
+    box-shadow: 0 10px 20px rgba(71, 85, 105, 0.08) !important;
+}
+
+html[data-theme="light"] .media-rules-page .rule-card:hover {
+    background: rgba(237, 245, 252, 0.88) !important;
+    border-color: rgba(71, 85, 105, 0.25) !important;
+}
+
+/* Subclass settings: calmer two-panel composition. */
+.media-rules-page .subclass-col-card {
+    gap: 12px !important;
+    padding: 16px !important;
+}
+
+.media-rules-page .subclass-col-card-head {
+    align-items: center !important;
+    padding-bottom: 12px !important;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.16) !important;
+}
+
+.media-rules-page .subclass-card-head-main {
+    gap: 3px;
+}
+
+.media-rules-page .subclass-card-title {
+    font-size: 13px;
+    font-weight: 750;
+}
+
+.media-rules-page .subclass-card-subtitle {
+    max-width: 440px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.media-rules-page .subclass-summary-row {
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    background: rgba(15, 23, 42, 0.035);
+}
+
+.media-rules-page .subclass-summary-text {
+    font-size: 11px;
+}
+
+.media-rules-page .subclass-editor-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr);
+    align-items: center;
+    gap: 14px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(15, 23, 42, 0.028);
+}
+
+.media-rules-page .subclass-editor-section {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    min-height: 34px;
+    gap: 10px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.media-rules-page .subclass-editor-section + .subclass-editor-section {
+    position: relative;
+    padding-left: 14px;
+}
+
+.media-rules-page .subclass-editor-section + .subclass-editor-section::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 1px;
+    background: rgba(148, 163, 184, 0.16);
+}
+
+.media-rules-page .subclass-editor-help {
+    display: none;
+}
+
+.media-rules-page .subclass-editor-label {
+    font-size: 11px;
+    font-weight: 750;
+    color: var(--color-text-main);
+    white-space: nowrap;
+}
+
+.media-rules-page .level-chip-list,
+.media-rules-page .level-chip-picker {
+    gap: 6px;
+}
+
+.media-rules-page .level-chip,
+.media-rules-page .level-chip-add {
+    min-height: 28px;
+    padding: 5px 10px;
+    font-size: 11px;
+}
+
+.media-rules-page .subclass-preview-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    padding: 11px 12px;
+    border-radius: 12px;
+    background: rgba(120, 169, 255, 0.07) !important;
+}
+
+.media-rules-page .subclass-preview-card .subclass-editor-label {
+    white-space: nowrap;
+}
+
+.media-rules-page .subclass-preview-main {
+    min-width: 0;
+    justify-content: flex-end;
+    font-size: 12px;
+}
+
+.media-rules-page .subclass-preview-desc {
+    display: none;
+}
+
+.media-rules-page .subclass-preview-segment {
+    min-height: 24px;
+    padding: 0 9px;
+    font-size: 11px;
+}
+
+html[data-theme="light"] .media-rules-page .subclass-col-card-head {
+    border-bottom-color: rgba(71, 85, 105, 0.13) !important;
+}
+
+html[data-theme="light"] .media-rules-page .subclass-summary-row,
+html[data-theme="light"] .media-rules-page .subclass-editor-section {
+    border-color: rgba(71, 85, 105, 0.12);
+}
+
+html[data-theme="light"] .media-rules-page .subclass-editor-grid {
+    background: rgba(214, 228, 240, 0.42);
+    border-color: rgba(71, 85, 105, 0.12);
+}
+
+html[data-theme="light"] .media-rules-page .subclass-editor-section + .subclass-editor-section::before {
+    background: rgba(71, 85, 105, 0.13);
+}
+
+@media (max-width: 760px) {
+    .media-rules-page .subclass-editor-grid,
+    .media-rules-page .subclass-preview-card {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .media-rules-page .subclass-editor-section {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .media-rules-page .subclass-editor-section + .subclass-editor-section {
+        padding-left: 0;
+        padding-top: 10px;
+        border-top: 1px solid rgba(148, 163, 184, 0.16);
+    }
+
+    .media-rules-page .subclass-editor-section + .subclass-editor-section::before {
+        display: none;
+    }
+
+    .media-rules-page .subclass-preview-main {
+        justify-content: flex-start;
+    }
+}
+
+/* Subclass path builder: one compact control strip with quieter add buttons. */
+.media-rules-page .subclass-path-builder {
+    display: flex !important;
+    align-items: center !important;
+    gap: 0 !important;
+    min-height: 54px;
+    padding: 8px 10px !important;
+    border-radius: 14px !important;
+    border: 1px solid rgba(148, 163, 184, 0.16) !important;
+    background: rgba(15, 23, 42, 0.025) !important;
+}
+
+.media-rules-page .subclass-builder-section {
+    display: flex !important;
+    align-items: center !important;
+    min-width: 0;
+    min-height: 36px !important;
+    gap: 10px !important;
+}
+
+.media-rules-page .subclass-builder-current {
+    flex: 1 1 auto;
+}
+
+.media-rules-page .subclass-builder-actions {
+    flex: 0 0 auto;
+    margin-left: 12px;
+    padding-left: 12px !important;
+    border-left: 1px solid rgba(148, 163, 184, 0.16) !important;
+}
+
+.media-rules-page .subclass-builder-actions::before {
+    display: none !important;
+}
+
+.media-rules-page .subclass-builder-label {
+    flex: 0 0 auto;
+    min-width: 52px;
+    font-size: 11px !important;
+    color: var(--color-text-muted) !important;
+}
+
+.media-rules-page .subclass-builder-list {
+    align-items: center;
+    min-width: 0;
+    min-height: 0 !important;
+    gap: 6px !important;
+}
+
+.media-rules-page .subclass-level-list.subclass-builder-list {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.media-rules-page .subclass-level-list.subclass-builder-list::-webkit-scrollbar {
+    display: none;
+}
+
+.media-rules-page .level-chip {
+    min-height: 30px;
+    padding: 5px 10px;
+    background: rgba(120, 169, 255, 0.13);
+    border-color: rgba(120, 169, 255, 0.2);
+}
+
+.media-rules-page .level-chip-add {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 30px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--color-text-muted);
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1;
+    cursor: pointer;
+    appearance: none;
+    transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+.media-rules-page .level-chip-add i {
+    font-size: 10px;
+    color: var(--color-primary);
+}
+
+.media-rules-page .level-chip-add:hover {
+    transform: translateY(-1px);
+    border-color: rgba(120, 169, 255, 0.22);
+    background: rgba(120, 169, 255, 0.11);
+    color: var(--color-text-main);
+}
+
+html[data-theme="light"] .media-rules-page .subclass-path-builder {
+    background: rgba(211, 226, 239, 0.38) !important;
+    border-color: rgba(71, 85, 105, 0.13) !important;
+}
+
+html[data-theme="light"] .media-rules-page .subclass-builder-actions {
+    border-left-color: rgba(71, 85, 105, 0.13) !important;
+}
+
+html[data-theme="light"] .media-rules-page .level-chip {
+    color: #2563eb;
+    background: rgba(96, 165, 250, 0.18);
+    border-color: rgba(37, 99, 235, 0.12);
+}
+
+html[data-theme="light"] .media-rules-page .level-chip-add {
+    color: #334155;
+    background: rgba(241, 246, 252, 0.64);
+    border-color: rgba(71, 85, 105, 0.1);
+}
+
+html[data-theme="light"] .media-rules-page .level-chip-add:hover {
+    background: rgba(226, 239, 252, 0.9);
+    border-color: rgba(37, 99, 235, 0.16);
+}
+
+.media-rules-page .subclass-builder-current {
+    justify-content: flex-start !important;
+}
+
+.media-rules-page .subclass-builder-current .subclass-builder-label {
+    min-width: 64px;
+    text-align: left;
+}
+
+.media-rules-page .subclass-builder-current .subclass-builder-list {
+    justify-content: flex-start;
+}
+
+.media-rules-page .subclass-builder-current .level-chip {
+    min-height: 32px;
+    gap: 7px;
+    padding: 0 9px 0 8px;
+    border-radius: 10px;
+    color: var(--color-text-main);
+    background: rgba(120, 169, 255, 0.08);
+    border-color: rgba(120, 169, 255, 0.18);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.media-rules-page .subclass-builder-current .level-chip-grip {
+    color: var(--color-text-subtle);
+    opacity: 0.75;
+}
+
+.media-rules-page .subclass-builder-current .level-chip-order {
+    width: 18px;
+    height: 18px;
+    color: #1e3a8a;
+    background: rgba(147, 197, 253, 0.82);
+}
+
+.media-rules-page .subclass-builder-current .level-chip-text {
+    font-weight: 650;
+}
+
+.media-rules-page .subclass-builder-current .level-chip-remove {
+    color: var(--color-text-subtle);
+    opacity: 0.72;
+}
+
+.media-rules-page .subclass-builder-current .level-chip-remove:hover {
+    color: #ef4444;
+    opacity: 1;
+}
+
+html[data-theme="light"] .media-rules-page .subclass-builder-current .level-chip {
+    color: #1f2937;
+    background: rgba(213, 229, 244, 0.8);
+    border-color: rgba(71, 85, 105, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+html[data-theme="light"] .media-rules-page .subclass-builder-current .level-chip-order {
+    color: #1d4ed8;
+    background: rgba(147, 197, 253, 0.64);
+}
+
+@media (max-width: 760px) {
+    .media-rules-page .subclass-path-builder,
+    .media-rules-page .subclass-builder-section {
+        align-items: stretch !important;
+        flex-direction: column;
+    }
+
+    .media-rules-page .subclass-builder-actions {
+        margin-left: 0;
+        padding-left: 0 !important;
+        padding-top: 10px !important;
+        border-left: 0 !important;
+        border-top: 1px solid rgba(148, 163, 184, 0.16) !important;
+    }
+
+    .media-rules-page .subclass-builder-label {
+        min-width: 0;
+    }
+}
+
+@media (min-width: 761px) {
+    .media-rules-page .subclass-path-builder {
+        flex-direction: row !important;
+        align-items: center !important;
+    }
+
+    .media-rules-page .subclass-builder-section {
+        flex-direction: row !important;
+        justify-content: flex-start !important;
+    }
+
+    .media-rules-page .subclass-builder-current .subclass-builder-label {
+        min-width: 36px;
+    }
+
+    .media-rules-page .subclass-builder-actions .subclass-builder-label {
+        min-width: 58px;
     }
 }

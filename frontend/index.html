@@ -626,12 +626,36 @@
                                     <div class="dashboard-stats-total">{{ dashboardMediaStats.total }}</div>
                                 </div>
                                 <div class="media-stat-grid media-stat-grid--summary">
-                                    <div class="media-stat-chip">电影库 {{ dashboardMediaStats.movie_libraries }}</div>
-                                    <div class="media-stat-chip">剧集库 {{ dashboardMediaStats.series_libraries }}</div>
-                                    <div class="media-stat-chip">用户 {{ dashboardMediaStats.user_count }}</div>
-                                    <div class="media-stat-chip">电视剧 {{ dashboardMediaStats.series_count }}</div>
-                                    <div class="media-stat-chip">剧集 {{ dashboardMediaStats.episode_count }}</div>
-                                    <div class="media-stat-chip">电影 {{ dashboardMediaStats.movie_count }}</div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-film"></i></span>
+                                        <span class="media-stat-chip-label">电影库</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.movie_libraries }}</strong>
+                                    </div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-tv"></i></span>
+                                        <span class="media-stat-chip-label">剧集库</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.series_libraries }}</strong>
+                                    </div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-users"></i></span>
+                                        <span class="media-stat-chip-label">用户</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.user_count }}</strong>
+                                    </div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-layer-group"></i></span>
+                                        <span class="media-stat-chip-label">电视剧</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.series_count }}</strong>
+                                    </div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-list-ol"></i></span>
+                                        <span class="media-stat-chip-label">剧集</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.episode_count }}</strong>
+                                    </div>
+                                    <div class="media-stat-chip">
+                                        <span class="media-stat-chip-icon"><i class="fa-solid fa-clapperboard"></i></span>
+                                        <span class="media-stat-chip-label">电影</span>
+                                        <strong class="media-stat-chip-value">{{ dashboardMediaStats.movie_count }}</strong>
+                                    </div>
                                 </div>
                                 <div v-if="dashboardMediaStats.libraries.length === 0" class="dashboard-empty-state">暂无媒体统计数据</div>
                                 <div v-else class="media-library-list" @scroll="onDashboardLazyScroll('libraries', $event)">
@@ -2635,14 +2659,8 @@
 
                     <div v-else-if="tab === 'media_organize_rules'" key="media_organize_rules" class="scroll-view">
                         <div class="content-shell shell-xxl media-rules-page">
-                            <div class="media-rules-header">
-                                <div class="media-rules-title">
-                                    <i class="fa-solid fa-folder-tree"></i>
-                                    <span>二级分类规则</span>
-                                </div>
-                            </div>
                             <div class="media-rules-body">
-                                    <div class="panel-section">
+                                    <div class="panel-section emby-sync-section">
                                         <div class="panel-section-head">
                                             <div class="panel-section-title">
                                                 <i class="fa-solid fa-server"></i>
@@ -2650,7 +2668,7 @@
                                             </div>
                                         </div>
                                         <div class="panel-section-body">
-                                            <div class="subclass-card">
+                                            <div class="subclass-card emby-sync-card">
                                                 <div class="emby-sync-head">
                                                     <div class="emby-sync-info">
                                                         <span class="emby-sync-title">开启后 STRM 同步时自动创建 Emby 媒体库</span>
@@ -2688,8 +2706,8 @@
                                     </div>
                                     <div class="media-rules-two-col">
                                         <template v-for="mtype in ['movie', 'tv']" :key="mtype">
-                                            <div class="card subclass-col-card">
-                                                <div class="card-header subclass-col-card-head">
+                                            <div class="subclass-card subclass-col-card">
+                                                <div class="subclass-col-card-head">
                                                     <div class="subclass-card-head-main">
                                                         <span class="subclass-card-title">{{ mtype === 'movie' ? '电影' : '剧集/动漫' }}</span>
                                                         <span class="subclass-card-subtitle">命中基础分类后，继续按你选择的维度追加子路径</span>
@@ -2700,24 +2718,12 @@
                                                     </label>
                                                 </div>
                                                 <div class="subclass-col-card-body">
-                                                    <div class="subclass-card">
-                                                        <div class="subclass-summary-row">
-                                                            <span class="subclass-summary-badge" :class="subClassify[mtype].enabled ? 'is-enabled' : 'is-disabled'">
-                                                                {{ subClassify[mtype].enabled ? '已启用' : '未启用' }}
-                                                            </span>
-                                                            <span class="subclass-summary-text">
-                                                                {{ subClassify[mtype].enabled
-                                                                    ? (subClassify[mtype].levels.length ? `当前追加 ${subClassify[mtype].levels.length} 个维度` : '已启用，但还没有选择维度')
-                                                                    : '开启后可按年代、评分、国家、类型继续拆分路径' }}
-                                                            </span>
-                                                        </div>
-
+                                                    <div class="subclass-col-card-content">
                                                         <template v-if="subClassify[mtype].enabled">
-                                                            <div class="subclass-editor-grid">
-                                                                <div class="subclass-editor-section">
-                                                                    <div class="subclass-editor-label">当前层级顺序</div>
-                                                                    <div class="subclass-editor-help">从左到右就是最终追加顺序，拖拽卡片可调整先后</div>
-                                                                    <div v-if="subClassify[mtype].levels.length" class="level-chip-list subclass-level-list">
+                                                            <div class="subclass-editor-grid subclass-path-builder">
+                                                                <div class="subclass-editor-section subclass-builder-section subclass-builder-current">
+                                                                    <div class="subclass-editor-label subclass-builder-label">层级</div>
+                                                                    <div v-if="subClassify[mtype].levels.length" class="level-chip-list subclass-level-list subclass-builder-list">
                                                                         <span v-for="(lv, li) in subClassify[mtype].levels" :key="lv"
                                                                             class="level-chip"
                                                                             draggable="true"
@@ -2725,23 +2731,25 @@
                                                                             @dragover.prevent="onLevelDragOver($event, mtype, li)"
                                                                             @drop.prevent="onLevelDrop($event, mtype, li)"
                                                                             @dragend="onLevelDragEnd">
-                                                                            <i class="fa-solid fa-grip-vertical level-chip-grip"></i>
+                                                                            <i class="fa-solid fa-grip-vertical level-chip-grip" aria-hidden="true"></i>
                                                                             <span class="level-chip-order">{{ li + 1 }}</span>
-                                                                            {{ subClassifyVars.find(x=>x.key===lv)?.label }}
-                                                                            <i class="fa-solid fa-xmark level-chip-remove" @click.stop="subClassifyToggleLevel(mtype, lv)"></i>
+                                                                            <span class="level-chip-text">{{ subClassifyVars.find(x=>x.key===lv)?.label }}</span>
+                                                                            <i class="fa-solid fa-xmark level-chip-remove" aria-hidden="true" @click.stop="subClassifyToggleLevel(mtype, lv)"></i>
                                                                         </span>
                                                                     </div>
                                                                     <div v-else class="subclass-empty-inline">还没有添加任何子分类维度</div>
                                                                 </div>
 
-                                                                <div class="subclass-editor-section">
-                                                                    <div class="subclass-editor-label">可添加维度</div>
-                                                                    <div class="level-chip-picker subclass-level-picker">
-                                                                        <span v-for="v in subClassifyVars.filter(v=>!subClassify[mtype].levels.includes(v.key))" :key="v.key"
+                                                                <div class="subclass-editor-section subclass-builder-section subclass-builder-actions">
+                                                                    <div class="subclass-editor-label subclass-builder-label">添加维度</div>
+                                                                    <div class="level-chip-picker subclass-level-picker subclass-builder-list">
+                                                                        <button v-for="v in subClassifyVars.filter(v=>!subClassify[mtype].levels.includes(v.key))" :key="v.key"
+                                                                            type="button"
                                                                             class="level-chip-add"
                                                                             @click="subClassifyToggleLevel(mtype, v.key)">
-                                                                            + {{ v.label }}
-                                                                        </span>
+                                                                            <i class="fa-solid fa-plus"></i>
+                                                                            <span>{{ v.label }}</span>
+                                                                        </button>
                                                                         <span v-if="subClassifyVars.filter(v=>!subClassify[mtype].levels.includes(v.key)).length === 0" class="subclass-empty-inline">所有维度都已加入</span>
                                                                     </div>
                                                                 </div>
@@ -2780,8 +2788,8 @@
 
                                     <div class="media-rules-two-col">
                                         <template v-for="mtype in ['movie', 'tv']" :key="mtype">
-                                            <div class="card media-rules-col-card">
-                                                <div class="card-header media-rules-col-card-head">
+                                            <div class="subclass-card media-rules-col-card">
+                                                <div class="media-rules-col-card-head">
                                                     <div class="media-rules-col-title">
                                                         <i :class="mtype === 'movie' ? 'fa-solid fa-film' : 'fa-solid fa-tv'"></i>
                                                         <span>{{ mtype === 'movie' ? '电影' : '剧集/动漫' }}</span>

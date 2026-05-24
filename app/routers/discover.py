@@ -2811,6 +2811,20 @@ def search_media(query: str = Query(..., min_length=1), type: str = Query("movie
     api_key = _get_tmdb_key()
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
+    normalized_type = "tv" if str(type or "").lower() in {"tv", "series"} else "movie"
+    normalized_query = str(query or "").strip()
+    if page == 1 and normalized_query.isdigit():
+        tmdb_id = int(normalized_query)
+        if normalized_type == "tv":
+            data = tmdb.get_tv_details(tmdb_id, api_key)
+        else:
+            data = tmdb.get_movie_details(tmdb_id, api_key)
+        if not data:
+            return {"items": [], "total_pages": 1, "page": page}
+        item = _normalize_tmdb_item(data)
+        item["media_type"] = normalized_type
+        _mark_library_exists_on_items([item])
+        return {"items": [item], "total_pages": 1, "page": page}
     data = tmdb.search_media_for_discover(query, api_key, item_type=type, page=page)
     if not data:
         return {"items": [], "total_pages": 0, "page": page}
