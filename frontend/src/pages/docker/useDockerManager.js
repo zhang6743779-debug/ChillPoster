@@ -23,6 +23,8 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         activeTab: 'containers',
         loading: false,
         actionLoading: '',
+        autoUpdateSaving: '',
+        scheduledRestartSaving: false,
         logsLoading: false,
         imagePulling: false,
         updateChecking: false,
@@ -62,6 +64,12 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
             visible: false,
             container: null,
             value: '',
+        },
+        scheduledRestartDialog: {
+            visible: false,
+            container: null,
+            enabled: true,
+            time: '04:00',
         },
     });
     const DOCKER_UPDATE_CACHE_KEY = 'chillposter-docker-update-cache';
@@ -563,6 +571,90 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         }
     };
 
+    const toggleDockerAutoUpdate = async (container) => {
+        const nextEnabled = !container.auto_update_enabled;
+        const image = (dockerManager.imageDrafts[container.id] || container.image || '').trim();
+        if (!image) return showToast('请先设置有效的镜像版本', 'warning');
+        if (nextEnabled) {
+            const ok = await showConfirm(
+                'Docker 自动更新',
+                `开启后，系统会定时检查「${container.name}」的镜像更新；发现更新时会自动拉取镜像并重建该容器。确定开启吗？`,
+                'warning'
+            );
+            if (!ok) return;
+        }
+        dockerManager.autoUpdateSaving = container.id;
+        try {
+            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/auto_update`, {
+                enabled: nextEnabled,
+                image,
+            });
+            showToast(res.data?.message || (nextEnabled ? '已开启自动更新' : '已关闭自动更新'), 'success');
+            await fetchDockerContainers({ skipAutoCheck: true });
+        } catch (e) {
+            showToast('自动更新设置失败: ' + (e.response?.data?.detail || e.message), 'error');
+        } finally {
+            dockerManager.autoUpdateSaving = '';
+        }
+    };
+
+    const openDockerScheduledRestartDialog = (container) => {
+        dockerManager.scheduledRestartDialog.visible = true;
+        dockerManager.scheduledRestartDialog.container = container;
+        dockerManager.scheduledRestartDialog.enabled = true;
+        dockerManager.scheduledRestartDialog.time = container.scheduled_restart_time || '04:00';
+    };
+
+    const closeDockerScheduledRestartDialog = () => {
+        dockerManager.scheduledRestartDialog.visible = false;
+        dockerManager.scheduledRestartDialog.container = null;
+        dockerManager.scheduledRestartDialog.enabled = true;
+        dockerManager.scheduledRestartDialog.time = '04:00';
+    };
+
+    const saveDockerScheduledRestartDialog = async () => {
+        const container = dockerManager.scheduledRestartDialog.container;
+        const time = String(dockerManager.scheduledRestartDialog.time || '').trim();
+        if (!container) return;
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+            showToast('请选择有效的定时重启时间', 'warning');
+            return;
+        }
+        dockerManager.scheduledRestartSaving = true;
+        try {
+            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/scheduled_restart`, {
+                enabled: true,
+                time,
+            });
+            closeDockerScheduledRestartDialog();
+            showToast(res.data?.message || `已设置 ${container.name} 定时重启`, 'success');
+            await fetchDockerContainers({ skipAutoCheck: true });
+        } catch (e) {
+            showToast('定时重启设置失败: ' + (e.response?.data?.detail || e.message), 'error');
+        } finally {
+            dockerManager.scheduledRestartSaving = false;
+        }
+    };
+
+    const disableDockerScheduledRestart = async (container) => {
+        const ok = await showConfirm('Docker 定时重启', `确定关闭「${container.name}」的定时重启吗？`, 'warning');
+        if (!ok) return;
+        dockerManager.actionLoading = `scheduled_restart:${container.id}`;
+        try {
+            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/scheduled_restart`, {
+                enabled: false,
+                time: '',
+            });
+            closeDockerScheduledRestartDialog();
+            showToast(res.data?.message || '已关闭定时重启', 'success');
+            await fetchDockerContainers({ skipAutoCheck: true });
+        } catch (e) {
+            showToast('关闭定时重启失败: ' + (e.response?.data?.detail || e.message), 'error');
+        } finally {
+            dockerManager.actionLoading = '';
+        }
+    };
+
     const openDockerLogs = async (container) => {
         dockerManager.selectedContainer = container;
         dockerManager.logs = '';
@@ -669,6 +761,11 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         stopDockerSilentRefresh,
         stopDockerUpdatePolling,
         runDockerContainerAction,
+        toggleDockerAutoUpdate,
+        openDockerScheduledRestartDialog,
+        closeDockerScheduledRestartDialog,
+        saveDockerScheduledRestartDialog,
+        disableDockerScheduledRestart,
         openDockerLogs,
         closeDockerLogs,
         pullDockerImage,

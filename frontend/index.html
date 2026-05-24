@@ -4636,21 +4636,19 @@
                                 <div v-else class="docker-container-grid">
                                     <div v-for="container in filteredDockerContainers" :key="container.id" class="docker-container-card" :class="{running: container.state === 'running', stopped: container.state !== 'running'}">
                                         <div class="docker-card-status-rail"></div>
-                                        <div v-if="dockerManager.updateMap[container.image]?.update_available" class="docker-update-corner">
-                                            <i class="fa-solid fa-arrow-up"></i><span>NEW</span>
-                                        </div>
                                         <div class="docker-card-head">
                                             <div class="docker-title-wrap">
                                                 <div class="docker-container-icon" :class="container.state === 'running' ? 'running' : 'stopped'">
                                                     <i class="fa-solid fa-cube"></i>
                                                 </div>
                                                 <div>
-                                                    <strong>{{ container.name }}</strong>
+                                                    <strong>{{ container.name }}<span v-if="dockerManager.updateMap[container.image]?.update_available" class="docker-update-corner"><i class="fa-solid fa-arrow-up"></i><span>NEW</span></span></strong>
                                                     <span>{{ container.short_id }}</span>
                                                 </div>
                                             </div>
                                             <div class="docker-card-badges">
                                                 <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
+                                                <span v-if="container.scheduled_restart_enabled && container.scheduled_restart_time" class="docker-schedule-pill"><i class="fa-solid fa-clock-rotate-left"></i> {{ container.scheduled_restart_time }}</span>
                                             </div>
                                         </div>
                                         <div class="docker-image-display" :class="{ changed: dockerManager.imageDrafts[container.id] && dockerManager.imageDrafts[container.id] !== container.image }">
@@ -4677,6 +4675,8 @@
                                             <button class="docker-action-btn" @click="runDockerContainerAction(container, 'restart')" title="重启"><i class="fa-solid fa-rotate-right"></i><span>重启</span></button>
                                             <button class="docker-action-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i><span>日志</span></button>
                                             <button class="docker-action-btn update" :class="{ hot: dockerManager.updateMap[container.image]?.update_available }" @click="runDockerContainerAction(container, 'update')" title="按当前卡片版本拉取并重建"><i class="fa-solid fa-cloud-arrow-down"></i><span>更新</span></button>
+                                            <button class="docker-action-btn auto-update" :class="{ active: container.auto_update_enabled }" :disabled="dockerManager.autoUpdateSaving === container.id" @click="toggleDockerAutoUpdate(container)" :title="container.auto_update_enabled ? '关闭自动更新' : '开启自动更新'"><i class="fa-solid" :class="dockerManager.autoUpdateSaving === container.id ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'"></i><span>自动</span></button>
+                                            <button class="docker-action-btn scheduled" :class="{ active: container.scheduled_restart_enabled }" @click="openDockerScheduledRestartDialog(container)" title="配置定时重启"><i class="fa-solid fa-clock-rotate-left"></i><span>定时</span></button>
                                             <button class="docker-action-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i><span>删除</span></button>
                                             <button class="docker-action-btn version" @click="openDockerVersionDialog(container)" title="修改版本"><i class="fa-solid fa-pen-to-square"></i><span>修改版本</span></button>
                                         </div>
@@ -5132,6 +5132,34 @@
                     <div class="docker-version-actions">
                         <button class="btn btn-secondary" @click="closeDockerVersionDialog">取消</button>
                         <button class="btn btn-primary" @click="saveDockerVersionDialog">保存版本</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <transition name="fade">
+            <div v-if="dockerManager.scheduledRestartDialog.visible" class="confirm-mask docker-version-mask">
+                <div class="docker-version-modal docker-scheduled-modal">
+                    <div class="docker-version-header">
+                        <div class="docker-version-title">
+                            <div class="docker-version-icon docker-scheduled-icon"><i class="fa-solid fa-clock-rotate-left"></i></div>
+                            <div>
+                                <strong>定时重启</strong>
+                                <span>{{ dockerManager.scheduledRestartDialog.container?.name || '' }}</span>
+                            </div>
+                        </div>
+                        <button class="settings-drawer-close" @click="closeDockerScheduledRestartDialog" title="关闭">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                    <label class="docker-version-field">
+                        <span>每日重启时间</span>
+                        <input type="time" v-model="dockerManager.scheduledRestartDialog.time" @keydown.enter="saveDockerScheduledRestartDialog">
+                    </label>
+                    <div class="docker-version-actions">
+                        <button v-if="dockerManager.scheduledRestartDialog.container?.scheduled_restart_enabled" class="btn btn-secondary danger-soft" @click="disableDockerScheduledRestart(dockerManager.scheduledRestartDialog.container)">关闭定时</button>
+                        <button class="btn btn-secondary" @click="closeDockerScheduledRestartDialog">取消</button>
+                        <button class="btn btn-primary" :disabled="dockerManager.scheduledRestartSaving" @click="saveDockerScheduledRestartDialog">{{ dockerManager.scheduledRestartSaving ? '保存中...' : '保存定时' }}</button>
                     </div>
                 </div>
             </div>

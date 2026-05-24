@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import time
@@ -7,6 +8,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -18,6 +21,15 @@ from core.logger import logger
 router = APIRouter(prefix="/api/docker", tags=["DockerManager"])
 _UPDATE_TASKS: dict[str, dict] = {}
 _UPDATE_TASK_LOCK = threading.Lock()
+_AUTO_UPDATE_CONFIG_PATH = os.path.join("config", "docker_auto_update.json")
+_AUTO_UPDATE_CONFIG_LOCK = threading.Lock()
+_AUTO_UPDATE_RUN_LOCK = threading.Lock()
+_AUTO_UPDATE_JOB_ID = "docker_auto_update"
+_AUTO_UPDATE_INTERVAL_MINUTES = 30
+_SCHEDULED_RESTART_CONFIG_PATH = os.path.join("config", "docker_scheduled_restart.json")
+_SCHEDULED_RESTART_CONFIG_LOCK = threading.Lock()
+_SCHEDULED_RESTART_JOB_PREFIX = "docker_scheduled_restart_"
+_DOCKER_SCHEDULER = None
 _DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 _DOCKER_HUB_CHALLENGE_HOST = "index.docker.io"
 _DOCKER_HUB_ACCELERATOR_HOSTS = [
@@ -52,6 +64,16 @@ class PullImagePayload(BaseModel):
 
 class CheckUpdatesPayload(BaseModel):
     images: list[str] = []
+
+
+class AutoUpdatePayload(BaseModel):
+    enabled: bool = False
+    image: str = ""
+
+
+class ScheduledRestartPayload(BaseModel):
+    enabled: bool = False
+    time: str = ""
 
 
 def _docker() -> DockerAPI:
@@ -158,6 +180,140 @@ def _normalize_container(row: dict, stats: dict | None = None) -> dict:
             "memory_percent": memory["percent"],
         })
     return item
+
+
+def _normalize_container_name(value: str) -> str:
+    return str(value or "").strip().strip("/")
+
+
+def _load_auto_update_config() -> dict:
+    with _AUTO_UPDATE_CONFIG_LOCK:
+        try:
+            if not os.path.exists(_AUTO_UPDATE_CONFIG_PATH):
+                return {"containers": {}}
+            with open(_AUTO_UPDATE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"containers": {}}
+            containers = data.get("containers")
+            if not isinstance(containers, dict):
+                data["containers"] = {}
+            return data
+        except Exception as e:
+            logger.warning(f"[DockerManager] 自动更新配置读取失败: {e}")
+            return {"containers": {}}
+
+
+def _save_auto_update_config(data: dict):
+    with _AUTO_UPDATE_CONFIG_LOCK:
+        os.makedirs(os.path.dirname(_AUTO_UPDATE_CONFIG_PATH), exist_ok=True)
+        tmp_path = f"{_AUTO_UPDATE_CONFIG_PATH}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _AUTO_UPDATE_CONFIG_PATH)
+
+
+def _auto_update_enabled_names() -> set[str]:
+    config = _load_auto_update_config()
+    enabled = set()
+    for name, item in (config.get("containers") or {}).items():
+        if isinstance(item, dict) and item.get("enabled"):
+            enabled.add(_normalize_container_name(name))
+    return enabled
+
+
+def _auto_update_setting_for(name: str) -> dict:
+    config = _load_auto_update_config()
+    item = (config.get("containers") or {}).get(_normalize_container_name(name)) or {}
+    return item if isinstance(item, dict) else {}
+
+
+def _save_auto_update_setting(name: str, setting: dict) -> dict:
+    config = _load_auto_update_config()
+    containers = config.setdefault("containers", {})
+    clean_name = _normalize_container_name(name)
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="无法识别容器名称")
+    item = containers.get(clean_name) if isinstance(containers.get(clean_name), dict) else {}
+    item.update(setting)
+    item["container_name"] = clean_name
+    item["updated_at"] = time.time()
+    containers[clean_name] = item
+    _save_auto_update_config(config)
+    return item
+
+
+def _mark_auto_update_check(name: str, **kwargs):
+    try:
+        _save_auto_update_setting(name, kwargs)
+    except Exception as e:
+        logger.warning(f"[DockerManager] 自动更新状态写入失败: {name} - {e}")
+
+
+def _load_scheduled_restart_config() -> dict:
+    with _SCHEDULED_RESTART_CONFIG_LOCK:
+        try:
+            if not os.path.exists(_SCHEDULED_RESTART_CONFIG_PATH):
+                return {"containers": {}}
+            with open(_SCHEDULED_RESTART_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"containers": {}}
+            containers = data.get("containers")
+            if not isinstance(containers, dict):
+                data["containers"] = {}
+            return data
+        except Exception as e:
+            logger.warning(f"[DockerManager] 定时重启配置读取失败: {e}")
+            return {"containers": {}}
+
+
+def _save_scheduled_restart_config(data: dict):
+    with _SCHEDULED_RESTART_CONFIG_LOCK:
+        os.makedirs(os.path.dirname(_SCHEDULED_RESTART_CONFIG_PATH), exist_ok=True)
+        tmp_path = f"{_SCHEDULED_RESTART_CONFIG_PATH}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _SCHEDULED_RESTART_CONFIG_PATH)
+
+
+def _scheduled_restart_setting_for(name: str) -> dict:
+    config = _load_scheduled_restart_config()
+    item = (config.get("containers") or {}).get(_normalize_container_name(name)) or {}
+    return item if isinstance(item, dict) else {}
+
+
+def _validate_restart_time(value: str) -> tuple[int, int, str]:
+    raw = str(value or "").strip()
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="定时重启时间格式应为 HH:mm")
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise HTTPException(status_code=400, detail="定时重启时间必须在 00:00 到 23:59 之间")
+    return hour, minute, f"{hour:02d}:{minute:02d}"
+
+
+def _save_scheduled_restart_setting(name: str, setting: dict) -> dict:
+    config = _load_scheduled_restart_config()
+    containers = config.setdefault("containers", {})
+    clean_name = _normalize_container_name(name)
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="无法识别容器名称")
+    item = containers.get(clean_name) if isinstance(containers.get(clean_name), dict) else {}
+    item.update(setting)
+    item["container_name"] = clean_name
+    item["updated_at"] = time.time()
+    containers[clean_name] = item
+    _save_scheduled_restart_config(config)
+    return item
+
+
+def _scheduled_restart_job_id(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in _normalize_container_name(name))
+    return f"{_SCHEDULED_RESTART_JOB_PREFIX}{safe}"
 
 
 def _normalize_image(row: dict) -> dict:
@@ -536,6 +692,201 @@ def _run_update_task(run_id: str, container_id: str, image: str):
         _task_log(run_id, str(e), "error")
 
 
+def _has_active_update_task(container_id: str = "", container_name: str = "") -> bool:
+    now = time.time()
+    with _UPDATE_TASK_LOCK:
+        for task in _UPDATE_TASKS.values():
+            status = task.get("status")
+            if status not in ("running", "restarting"):
+                continue
+            if container_id and task.get("container_id") == container_id:
+                return True
+            if container_name and task.get("container_name") == container_name:
+                return True
+            created_at = float(task.get("created_at") or task.get("updated_at") or 0)
+            if task.get("auto_update") and created_at and now - created_at < 2 * 60 * 60:
+                return True
+    return False
+
+
+def _start_auto_update_task(container_id: str, container_name: str, image: str) -> str:
+    run_id = f"docker_auto_update_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    _set_update_task(
+        run_id,
+        status="running",
+        percent=0,
+        step="queued",
+        step_no=0,
+        total_steps=6,
+        container_id=container_id,
+        container_name=container_name,
+        image=image,
+        auto_update=True,
+        logs=[],
+        created_at=time.time(),
+        message="自动更新任务已创建",
+    )
+    threading.Thread(target=_run_update_task, args=(run_id, container_id, image), daemon=True).start()
+    return run_id
+
+
+def run_docker_auto_update_once():
+    if not _AUTO_UPDATE_RUN_LOCK.acquire(blocking=False):
+        return
+    try:
+        if not os.path.exists("/var/run/docker.sock"):
+            return
+        config = _load_auto_update_config()
+        settings = config.get("containers") or {}
+        enabled_settings = {
+            _normalize_container_name(name): item
+            for name, item in settings.items()
+            if _normalize_container_name(name) and isinstance(item, dict) and item.get("enabled")
+        }
+        if not enabled_settings:
+            return
+
+        api = DockerAPI(timeout=120)
+        rows = api.list_containers(True) or []
+        containers_by_name = {}
+        for row in rows:
+            for raw_name in row.get("Names") or []:
+                name = _normalize_container_name(raw_name)
+                if name:
+                    containers_by_name[name] = row
+
+        for name, setting in enabled_settings.items():
+            row = containers_by_name.get(name)
+            if not row:
+                _mark_auto_update_check(name, last_checked_at=time.time(), last_error="容器不存在或已改名")
+                continue
+            container_id = str(row.get("Id") or "")
+            if _has_active_update_task(container_id=container_id, container_name=name):
+                continue
+
+            image = str(setting.get("image") or row.get("Image") or "").strip()
+            if not image or image.startswith("sha256:"):
+                _mark_auto_update_check(name, last_checked_at=time.time(), last_error="容器镜像无法用于自动更新")
+                continue
+
+            try:
+                info = _check_image_update(api, image)
+                _mark_auto_update_check(
+                    name,
+                    image=image,
+                    last_checked_at=time.time(),
+                    last_error=info.get("message") or "",
+                    update_available=bool(info.get("update_available")),
+                    remote_digest=info.get("remote_digest") or "",
+                )
+                if not info.get("update_available"):
+                    continue
+                run_id = _start_auto_update_task(container_id, name, image)
+                _mark_auto_update_check(name, last_update_run_id=run_id, last_update_at=time.time())
+                logger.info(f"[DockerManager] 自动更新已启动: {name} -> {image}, run_id={run_id}")
+                break
+            except Exception as e:
+                _mark_auto_update_check(name, last_checked_at=time.time(), last_error=str(e), update_available=False)
+                logger.warning(f"[DockerManager] 自动更新检查失败: {name} - {e}")
+    finally:
+        _AUTO_UPDATE_RUN_LOCK.release()
+
+
+def schedule_auto_update_job(scheduler):
+    global _DOCKER_SCHEDULER
+    _DOCKER_SCHEDULER = scheduler
+    try:
+        if scheduler.get_job(_AUTO_UPDATE_JOB_ID):
+            return
+        scheduler.add_job(
+            run_docker_auto_update_once,
+            IntervalTrigger(minutes=_AUTO_UPDATE_INTERVAL_MINUTES),
+            id=_AUTO_UPDATE_JOB_ID,
+            name="Docker 自动更新检查",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        logger.info(f"[DockerManager] 自动更新检查任务已加载，每 {_AUTO_UPDATE_INTERVAL_MINUTES} 分钟执行一次")
+    except Exception as e:
+        logger.warning(f"[DockerManager] 自动更新检查任务加载失败: {e}")
+
+
+def _resolve_container_id_by_name(api: DockerAPI, name: str) -> str:
+    target = _normalize_container_name(name)
+    for row in api.list_containers(True) or []:
+        names = {_normalize_container_name(item) for item in row.get("Names") or []}
+        if target in names:
+            return str(row.get("Id") or "")
+    return ""
+
+
+def run_scheduled_restart(container_name: str):
+    name = _normalize_container_name(container_name)
+    if not name:
+        return
+    setting = _scheduled_restart_setting_for(name)
+    if not setting.get("enabled"):
+        return
+    try:
+        api = DockerAPI(timeout=120)
+        container_id = _resolve_container_id_by_name(api, name)
+        if not container_id:
+            _save_scheduled_restart_setting(name, {"last_error": "容器不存在或已改名", "last_run_at": time.time()})
+            logger.warning(f"[DockerManager] 定时重启失败，容器不存在或已改名: {name}")
+            return
+        api.restart_container(container_id)
+        _save_scheduled_restart_setting(name, {"last_error": "", "last_run_at": time.time(), "container_id": container_id})
+        logger.info(f"[DockerManager] 定时重启完成: {name}")
+    except Exception as e:
+        _save_scheduled_restart_setting(name, {"last_error": str(e), "last_run_at": time.time()})
+        logger.warning(f"[DockerManager] 定时重启失败: {name} - {e}")
+
+
+def _register_scheduled_restart_job(name: str, setting: dict, scheduler=None):
+    target_scheduler = scheduler or _DOCKER_SCHEDULER
+    if not target_scheduler:
+        return
+    job_id = _scheduled_restart_job_id(name)
+    try:
+        if target_scheduler.get_job(job_id):
+            target_scheduler.remove_job(job_id)
+    except Exception:
+        pass
+    if not setting.get("enabled"):
+        return
+    hour, minute, clean_time = _validate_restart_time(setting.get("time") or "")
+    target_scheduler.add_job(
+        run_scheduled_restart,
+        CronTrigger(hour=hour, minute=minute),
+        args=[_normalize_container_name(name)],
+        id=job_id,
+        name=f"Docker 定时重启: {_normalize_container_name(name)} {clean_time}",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+
+def schedule_scheduled_restart_jobs(scheduler):
+    global _DOCKER_SCHEDULER
+    _DOCKER_SCHEDULER = scheduler
+    try:
+        config = _load_scheduled_restart_config()
+        count = 0
+        for name, setting in (config.get("containers") or {}).items():
+            if not isinstance(setting, dict) or not setting.get("enabled"):
+                continue
+            try:
+                _register_scheduled_restart_job(name, setting, scheduler=scheduler)
+                count += 1
+            except Exception as e:
+                logger.warning(f"[DockerManager] 定时重启任务加载失败: {name} - {e}")
+        logger.info(f"[DockerManager] 定时重启任务已加载: {count} 个")
+    except Exception as e:
+        logger.warning(f"[DockerManager] 定时重启任务加载失败: {e}")
+
+
 @router.get("/status")
 def docker_status():
     available = os.path.exists("/var/run/docker.sock")
@@ -565,6 +916,7 @@ def list_containers():
         api = _docker()
         rows = api.list_containers(True)
         containers = []
+        auto_enabled = _auto_update_enabled_names()
         for row in rows or []:
             stats = None
             if row.get("State") == "running":
@@ -572,7 +924,16 @@ def list_containers():
                     stats = api.container_stats(row.get("Id"))
                 except Exception:
                     stats = None
-            containers.append(_normalize_container(row, stats))
+            item = _normalize_container(row, stats)
+            item["auto_update_enabled"] = item["name"] in auto_enabled
+            auto_setting = _auto_update_setting_for(item["name"])
+            item["auto_update_image"] = auto_setting.get("image") or item["image"]
+            item["auto_update_last_error"] = auto_setting.get("last_error") or ""
+            restart_setting = _scheduled_restart_setting_for(item["name"])
+            item["scheduled_restart_enabled"] = bool(restart_setting.get("enabled"))
+            item["scheduled_restart_time"] = restart_setting.get("time") or ""
+            item["scheduled_restart_last_error"] = restart_setting.get("last_error") or ""
+            containers.append(item)
         return {"containers": containers}
     except Exception as e:
         _api_error(e)
@@ -624,6 +985,57 @@ def get_update_task(run_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="更新任务不存在")
     return task
+
+
+@router.post("/containers/{container_id}/auto_update")
+def set_container_auto_update(container_id: str, payload: AutoUpdatePayload):
+    try:
+        api = _docker()
+        info = api.inspect_container(container_id)
+        name = _normalize_container_name(info.get("Name") or container_id[:12])
+        image = _require_image_ref(payload.image or (info.get("Config") or {}).get("Image") or "")
+        setting = _save_auto_update_setting(name, {
+            "enabled": bool(payload.enabled),
+            "image": image,
+            "container_id": str(info.get("Id") or container_id),
+            "last_error": "",
+        })
+        return {
+            "status": "ok",
+            "container_name": name,
+            "enabled": bool(setting.get("enabled")),
+            "image": setting.get("image") or image,
+            "message": f"{'已开启' if setting.get('enabled') else '已关闭'}自动更新: {name}",
+        }
+    except Exception as e:
+        _api_error(e)
+
+
+@router.post("/containers/{container_id}/scheduled_restart")
+def set_container_scheduled_restart(container_id: str, payload: ScheduledRestartPayload):
+    try:
+        api = _docker()
+        info = api.inspect_container(container_id)
+        name = _normalize_container_name(info.get("Name") or container_id[:12])
+        clean_time = ""
+        if payload.enabled:
+            _, _, clean_time = _validate_restart_time(payload.time)
+        setting = _save_scheduled_restart_setting(name, {
+            "enabled": bool(payload.enabled),
+            "time": clean_time,
+            "container_id": str(info.get("Id") or container_id),
+            "last_error": "",
+        })
+        _register_scheduled_restart_job(name, setting)
+        return {
+            "status": "ok",
+            "container_name": name,
+            "enabled": bool(setting.get("enabled")),
+            "time": setting.get("time") or "",
+            "message": f"{'已设置' if setting.get('enabled') else '已关闭'}定时重启: {name}"
+        }
+    except Exception as e:
+        _api_error(e)
 
 
 @router.get("/containers/{container_id}/logs")

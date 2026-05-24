@@ -248,6 +248,8 @@ async def lifespan_ui(app: FastAPI):
     rss_service_instance.load_active_jobs()
     real_library_service_instance.load_active_jobs()
     hdhive_service.setup_scheduler(task_service_instance.scheduler)
+    docker_manager.schedule_auto_update_job(task_service_instance.scheduler)
+    docker_manager.schedule_scheduled_restart_jobs(task_service_instance.scheduler)
     drive115_upload_service.start()
     if telegram_notify_service.should_bot_poll():
         telegram_notify_service.start_polling()
