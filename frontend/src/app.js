@@ -13,6 +13,7 @@ import { useDockerManager } from './pages/docker/useDockerManager';
 import { useWebhookConfig } from './pages/webhook/useWebhookConfig';
 import { useRssTasks } from './pages/rss/useRssTasks';
 import { useRealLibrary } from './pages/realLibrary/useRealLibrary';
+import { useEmbyTasks } from './pages/embyTasks/useEmbyTasks';
 import { useResourceTransfer } from './pages/transfer/useResourceTransfer';
 import { useMoviePilotConfig } from './pages/moviepilot/useMoviePilotConfig';
 import { useHdhiveConfig } from './pages/hdhive/useHdhiveConfig';
@@ -217,6 +218,28 @@ createApp({
             isDockerImageUntagged,
             dockerImageTagLabel,
         } = useDockerManager({ tab, projectVersion, showToast, showConfirm });
+
+        const {
+            embyTasksState,
+            runningEmbyTasks,
+            hasEmbyTaskGroups,
+            fetchEmbyTasks,
+            refreshEmbyTasks,
+            runEmbyTask,
+            stopEmbyTask,
+            openEmbyTriggerDialog,
+            closeEmbyTriggerDialog,
+            addEmbyTriggerDraft,
+            removeEmbyTrigger,
+            saveEmbyTriggers,
+            toggleEmbyTaskNotify,
+            toggleEmbyTaskRunningDropdown,
+            startEmbyTaskPolling,
+            stopEmbyTaskPolling,
+            formatEmbyTaskProgress,
+            triggerTypeOptions,
+            weekDayOptions,
+        } = useEmbyTasks({ tab, showToast });
 
         const {
             consoleLogState,
@@ -942,6 +965,12 @@ createApp({
                 close115QrLogin();
             }
             if (val === 'rss') fetchRssData();
+            if (val === 'emby_tasks') {
+                fetchEmbyTasks();
+                startEmbyTaskPolling();
+            } else {
+                stopEmbyTaskPolling();
+            }
             if (val === 'real_library') fetchRealLibraryData();
             if (val === 'webhook') fetchWebhookConfig();
             if (val === 'library_preview') fetchLibraryCovers();
@@ -1039,7 +1068,7 @@ createApp({
         const pageTitle = computed(() => {
             const map = {
                 'dashboard': '仪表盘', 'manual':'手动设计', 'custom':'封面设计', 'auto':'自动封面',
-                'rss': 'RSS 真实库', 'real_library': '独立真实库', 'webhook': 'Webhook', 'config_302': '302 配置',
+                'rss': 'RSS 真实库', 'real_library': '独立真实库', 'emby_tasks': 'Emby任务中心', 'webhook': 'Webhook', 'config_302': '302 配置',
                 'server':'Emby 配置', 'fonts':'字体库', 'templates':'模板管理',
                 'library_preview':'封面备份', 'translations':'翻译配置', 'account':'账户管理',
                 'upgrade': '系统升级',
@@ -1125,6 +1154,10 @@ createApp({
             await fetchGlobalSettings();
             fetchFonts(); fetchLayouts(); fetchLayoutAndPresets(); fetchSuites(); fetchTranslations(); fetchTasks(); fetchDashboardStats();
             fetchWebhookConfig();
+            if (tab.value === 'emby_tasks') {
+                fetchEmbyTasks();
+                startEmbyTaskPolling();
+            }
             if (tab.value === 'real_library') fetchRealLibraryData();
             if (tab.value === 'organize_history') fetchOrganizeHistory();
             await fetch302Config();
@@ -1169,6 +1202,7 @@ createApp({
             stop115UploadPolling();
             stopDockerSilentRefresh();
             stopDockerUpdatePolling();
+            stopEmbyTaskPolling();
             stopConsoleLogStream();
             document.removeEventListener('keydown', handleKeydown);
             window.removeEventListener('resize', handleResize);
@@ -1898,6 +1932,11 @@ createApp({
             open115UploadBrowser, select115UploadDir, upload115Up, selectCurrent115UploadFolder,
             open115UploadLocalBrowser, select115UploadLocalDir, upload115LocalUp, selectCurrent115UploadLocalFolder,
             get115UploadTaskState, format115UploadSize, get115UploadStageLabel, get115UploadMethodLabel,
+            embyTasksState, runningEmbyTasks, hasEmbyTaskGroups,
+            fetchEmbyTasks, refreshEmbyTasks, runEmbyTask, stopEmbyTask,
+            openEmbyTriggerDialog, closeEmbyTriggerDialog, addEmbyTriggerDraft,
+            removeEmbyTrigger, saveEmbyTriggers, toggleEmbyTaskNotify,
+            toggleEmbyTaskRunningDropdown, formatEmbyTaskProgress, triggerTypeOptions, weekDayOptions,
 
             // [新增] 真实后台日志
             consoleLogState, logCategoryOptions, filteredLogs, logVirtualState, logContainerRef, onLogScroll, copyLogLine,

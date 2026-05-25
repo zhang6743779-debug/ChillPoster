@@ -280,6 +280,61 @@ class EmbyClient:
             pass
         return None
 
+    def get_scheduled_tasks(self):
+        """获取 Emby 计划任务列表，兼容部分版本对隐藏/禁用任务的过滤。"""
+        tasks = []
+        seen = set()
+        query_variants = (
+            None,
+            {"IsHidden": "true"},
+            {"IsHidden": "false"},
+            {"IsEnabled": "false"},
+        )
+        for params in query_variants:
+            try:
+                res = self._request("GET", "emby/ScheduledTasks", timeout=15, params=params or {})
+            except Exception:
+                if not tasks:
+                    raise
+                continue
+            if not isinstance(res, list):
+                continue
+            for item in res:
+                if not isinstance(item, dict):
+                    continue
+                task_id = item.get("Id") or item.get("Key") or item.get("Name")
+                if not task_id or task_id in seen:
+                    continue
+                seen.add(task_id)
+                tasks.append(item)
+        return tasks
+
+    def get_scheduled_task(self, task_id):
+        """获取单个 Emby 计划任务详情。"""
+        if not task_id:
+            raise ValueError("task_id is required")
+        return self._request("GET", f"emby/ScheduledTasks/{task_id}", timeout=15)
+
+    def update_scheduled_task_triggers(self, task_id, triggers):
+        """更新指定 Emby 计划任务的触发器。"""
+        if not task_id:
+            raise ValueError("task_id is required")
+        if not isinstance(triggers, list):
+            raise ValueError("triggers must be a list")
+        return self._request("POST", f"emby/ScheduledTasks/{task_id}/Triggers", json=triggers, timeout=15)
+
+    def run_scheduled_task(self, task_id):
+        """立即运行指定 Emby 计划任务。"""
+        if not task_id:
+            raise ValueError("task_id is required")
+        return self._request("POST", f"emby/ScheduledTasks/Running/{task_id}", timeout=15)
+
+    def stop_scheduled_task(self, task_id):
+        """停止正在运行的 Emby 计划任务。"""
+        if not task_id:
+            raise ValueError("task_id is required")
+        return self._request("DELETE", f"emby/ScheduledTasks/Running/{task_id}", timeout=15)
+
     def get_libraries(self, strict=False):
             """
             [优化版] 优先使用 Users/Views 获取用户设置的正确排序，

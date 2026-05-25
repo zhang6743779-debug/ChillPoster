@@ -22,6 +22,7 @@ export const coverItems = [
 ];
 
 export const toolboxItems = [
+    { id: 'emby_tasks', icon: 'fa-bolt-lightning', label: 'Emby任务中心', group: '工具箱' },
     { id: 'real_library', icon: 'fa-hard-drive', label: '独立真实库', group: '工具箱' },
     { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
     { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' },
@@ -63,6 +64,7 @@ export const allValidTabs = new Set([
     'fonts',
     'templates',
     'translations',
+    'emby_tasks',
     'real_library',
     'rss',
     'docker_manager',

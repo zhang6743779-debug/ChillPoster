@@ -61,6 +61,9 @@
                     <div class="nav-item" :class="{active: tab === 'translations'}" @click="tab = 'translations'">
                         <i class="fa-solid fa-language"></i> 翻译配置
                     </div>
+                    <div class="nav-item" :class="{active: tab === 'emby_tasks'}" @click="tab = 'emby_tasks'">
+                        <i class="fa-solid fa-bolt-lightning"></i> Emby任务中心
+                    </div>
                     <div class="nav-item" :class="{active: tab === 'real_library'}" @click="tab = 'real_library'">
                         <i class="fa-solid fa-hard-drive"></i> 独立真实库
                     </div>
@@ -720,6 +723,194 @@
 
                     </div>
                     
+                    <div v-else-if="tab === 'emby_tasks'" key="emby_tasks" class="scroll-view emby-task-page">
+                        <div class="emby-task-shell">
+                            <div class="emby-task-hero">
+                                <div class="emby-task-hero-left">
+                                    <div class="emby-task-hero-icon">
+                                        <i class="fa-solid fa-bolt-lightning"></i>
+                                    </div>
+                                    <div>
+                                        <h2>任务中心</h2>
+                                        <div class="emby-task-hero-sub"><i class="fa-solid fa-server"></i> 管理 Emby 计划任务与后台作业</div>
+                                    </div>
+                                </div>
+                                <div class="emby-task-actions">
+                                    <button type="button" class="emby-task-pill emby-task-notify" @click="toggleEmbyTaskNotify">
+                                        <span>任务通知</span>
+                                        <span class="emby-task-switch" :class="{ active: embyTasksState.notifyEnabled }">
+                                            <span></span>
+                                        </span>
+                                    </button>
+                                    <div class="emby-running-wrap">
+                                        <button type="button" class="emby-task-pill emby-running-trigger" :class="{ active: embyTasksState.dropdownOpen }" @click.stop="toggleEmbyTaskRunningDropdown">
+                                            <span class="emby-running-dot"></span>
+                                            <span>{{ embyTasksState.running_count || 0 }} 项运行中</span>
+                                            <i class="fa-solid" :class="embyTasksState.dropdownOpen ? 'fa-chevron-up' : 'fa-chevron-down'"></i>
+                                        </button>
+                                        <div v-if="embyTasksState.dropdownOpen" class="emby-running-popover" @click.stop>
+                                            <div class="emby-running-head">
+                                                <div><i class="fa-solid fa-gear"></i> 当前执行中</div>
+                                                <span>{{ embyTasksState.running_count || 0 }}</span>
+                                            </div>
+                                            <div v-if="runningEmbyTasks.length === 0" class="emby-running-empty">暂无正在运行的 Emby 任务</div>
+                                            <div v-for="task in runningEmbyTasks" :key="'running_' + task.id" class="emby-running-item">
+                                                <div class="emby-running-item-top">
+                                                    <strong>{{ task.name }}</strong>
+                                                    <button type="button" class="emby-force-stop" @click="stopEmbyTask(task)" :disabled="embyTasksState.actionLoading === 'stop:' + task.id">
+                                                        <i class="fa-solid fa-square"></i> 强止
+                                                    </button>
+                                                </div>
+                                                <div class="emby-running-desc">{{ task.description || 'Emby 后台任务正在执行' }}</div>
+                                                <div class="emby-running-meta">
+                                                    <span></span>
+                                                    <strong>{{ formatEmbyTaskProgress(task) }}</strong>
+                                                </div>
+                                                <div class="emby-task-progress">
+                                                    <span :style="{ width: Math.max(0, Math.min(100, Number(task.progress || 0))) + '%' }"></span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="emby-task-pill emby-refresh-btn" @click="refreshEmbyTasks" :disabled="embyTasksState.loading">
+                                        <i class="fa-solid" :class="embyTasksState.loading ? 'fa-spinner fa-spin' : 'fa-rotate-right'"></i>
+                                        刷新状态
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="embyTasksState.error" class="info-alert-box emby-task-alert">
+                                <i class="fa-solid fa-circle-exclamation"></i>
+                                <div class="info-content">{{ embyTasksState.error }}</div>
+                            </div>
+
+                            <div v-if="embyTasksState.loading && !hasEmbyTaskGroups" class="emby-task-loading">
+                                <i class="fa-solid fa-spinner fa-spin"></i>
+                                <span>正在读取 Emby 任务...</span>
+                            </div>
+
+                            <div v-for="group in embyTasksState.categories" :key="group.name" class="emby-task-section">
+                                <div class="emby-task-section-title">
+                                    <span></span>
+                                    <h3>{{ group.name }}</h3>
+                                    <em>{{ group.count }}</em>
+                                </div>
+                                <div class="emby-task-grid">
+                                    <div v-for="task in group.tasks" :key="task.id" class="emby-task-card" :class="{ running: task.is_running }">
+                                        <div class="emby-task-card-top">
+                                            <div>
+                                                <h4>{{ task.name }}</h4>
+                                                <p>{{ task.description || 'Emby 计划任务' }}</p>
+                                            </div>
+                                                <div class="emby-task-card-tools">
+	                                                <button v-if="task.is_running" type="button" class="emby-task-run-btn stop" @click="stopEmbyTask(task)" :disabled="embyTasksState.actionLoading === 'stop:' + task.id" title="停止任务">
+	                                                    <i class="fa-solid" :class="embyTasksState.actionLoading === 'stop:' + task.id ? 'fa-spinner fa-spin' : 'fa-square'"></i>
+	                                                </button>
+	                                                <button v-else type="button" class="emby-task-run-btn" @click="runEmbyTask(task)" :disabled="embyTasksState.actionLoading === 'run:' + task.id" title="立即运行">
+	                                                    <i class="fa-solid" :class="embyTasksState.actionLoading === 'run:' + task.id ? 'fa-spinner fa-spin' : 'fa-play'"></i>
+	                                                </button>
+                                                    <div class="emby-task-plan-control">
+                                                        <div class="emby-trigger-summary" :title="task.trigger_summary || '未设置计划'">
+                                                            <span>{{ task.trigger_summary || '未设置计划' }}</span>
+                                                        </div>
+	                                                    <button type="button" class="emby-task-run-btn calendar" @click="openEmbyTriggerDialog(task)" title="设置触发器">
+	                                                        <i class="fa-solid fa-calendar-days"></i>
+	                                                    </button>
+                                                    </div>
+                                                </div>
+	                                        </div>
+	                                        <div class="emby-task-divider"></div>
+                                        <div class="emby-task-card-foot">
+                                            <div class="emby-task-status" :class="'status-' + task.status_type">
+                                                <span></span>
+                                                <strong>{{ task.is_running ? '运行中 ' + formatEmbyTaskProgress(task) : task.status_label }}</strong>
+                                            </div>
+                                            <div class="emby-task-time">{{ task.last_run_time || '从未执行过' }}</div>
+                                        </div>
+                                        <div v-if="task.is_running" class="emby-task-card-progress">
+                                            <span :style="{ width: Math.max(0, Math.min(100, Number(task.progress || 0))) + '%' }"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+	                            <div v-if="!embyTasksState.loading && !hasEmbyTaskGroups" class="empty-state-card emby-task-empty">
+	                                暂未读取到 Emby 计划任务，请确认 Emby 地址和接口密钥已配置。
+	                            </div>
+	                        </div>
+                            <div v-if="embyTasksState.triggerDialog.visible" class="emby-trigger-modal-mask" @click.self="closeEmbyTriggerDialog">
+                                <div class="emby-trigger-modal">
+                                    <div class="emby-trigger-modal-head">
+                                        <div>
+                                            <h3>{{ embyTasksState.triggerDialog.task?.name || '触发器设置' }}</h3>
+                                            <p>配置这个 Emby 计划任务的自动运行规则</p>
+                                        </div>
+                                        <button type="button" class="emby-trigger-close" @click="closeEmbyTriggerDialog" :disabled="embyTasksState.triggerDialog.saving">
+                                            <i class="fa-solid fa-xmark"></i>
+                                        </button>
+                                    </div>
+
+                                    <div v-if="embyTasksState.triggerDialog.loading" class="emby-trigger-loading">
+                                        <i class="fa-solid fa-spinner fa-spin"></i>
+                                        正在读取触发器...
+                                    </div>
+                                    <template v-else>
+                                        <div class="emby-trigger-list">
+                                            <div v-if="embyTasksState.triggerDialog.triggers.length === 0" class="emby-trigger-empty">当前没有自动触发计划</div>
+                                            <div v-for="(trigger, index) in embyTasksState.triggerDialog.triggers" :key="'trigger_' + index" class="emby-trigger-row">
+                                                <div>
+                                                    <strong>{{ trigger.summary || trigger.type_label || '触发器' }}</strong>
+                                                    <span>{{ trigger.type_label || trigger.type }}</span>
+                                                </div>
+                                                <button type="button" @click="removeEmbyTrigger(index)" :disabled="embyTasksState.triggerDialog.saving" title="删除">
+                                                    <i class="fa-solid fa-trash-can"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div class="emby-trigger-form">
+                                            <div class="emby-trigger-field">
+                                                <label>触发类型</label>
+                                                <select v-model="embyTasksState.triggerDialog.draft.type">
+                                                    <option v-for="item in triggerTypeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+                                                </select>
+                                            </div>
+                                            <div v-if="embyTasksState.triggerDialog.draft.type === 'WeeklyTrigger'" class="emby-trigger-field">
+                                                <label>星期</label>
+                                                <select v-model="embyTasksState.triggerDialog.draft.day_of_week">
+                                                    <option v-for="item in weekDayOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+                                                </select>
+                                            </div>
+                                            <div v-if="['DailyTrigger','WeeklyTrigger'].includes(embyTasksState.triggerDialog.draft.type)" class="emby-trigger-field">
+                                                <label>时间</label>
+                                                <input type="time" v-model="embyTasksState.triggerDialog.draft.time">
+                                            </div>
+                                            <div v-if="embyTasksState.triggerDialog.draft.type === 'IntervalTrigger'" class="emby-trigger-field">
+                                                <label>间隔小时</label>
+                                                <input type="number" min="0.1" step="0.1" v-model="embyTasksState.triggerDialog.draft.interval_hours">
+                                            </div>
+                                            <div v-if="embyTasksState.triggerDialog.draft.type !== 'StartupTrigger'" class="emby-trigger-field">
+                                                <label>时间限制（小时）</label>
+                                                <input type="number" min="0" step="0.5" placeholder="可留空" v-model="embyTasksState.triggerDialog.draft.max_runtime_hours">
+                                            </div>
+                                            <button type="button" class="emby-trigger-add" @click="addEmbyTriggerDraft">
+                                                <i class="fa-solid fa-plus"></i>
+                                                添加
+                                            </button>
+                                        </div>
+                                    </template>
+
+                                    <div class="emby-trigger-modal-actions">
+                                        <button type="button" class="emby-trigger-secondary" @click="closeEmbyTriggerDialog" :disabled="embyTasksState.triggerDialog.saving">取消</button>
+                                        <button type="button" class="emby-trigger-primary" @click="saveEmbyTriggers" :disabled="embyTasksState.triggerDialog.loading || embyTasksState.triggerDialog.saving">
+                                            <i class="fa-solid" :class="embyTasksState.triggerDialog.saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'"></i>
+                                            保存
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+	                    </div>
+
                     <div v-else-if="tab === 'real_library'" key="real_library" class="scroll-view">
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
@@ -6133,6 +6324,7 @@
                     <div class="mobile-more-section">
                         <div class="mobile-more-section-title">网盘与自动化</div>
                         <div class="mobile-more-grid">
+                            <button class="mobile-more-item" :class="{active: tab === 'emby_tasks'}" @click="selectMobileTab('emby_tasks')"><i class="fa-solid fa-bolt-lightning"></i><span>任务</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'real_library'}" @click="selectMobileTab('real_library')"><i class="fa-solid fa-hard-drive"></i><span>真实库</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'rss'}" @click="selectMobileTab('rss')"><i class="fa-solid fa-rss"></i><span>RSS</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'docker_manager'}" @click="selectMobileTab('docker_manager')"><i class="fa-solid fa-cubes"></i><span>Docker</span></button>
