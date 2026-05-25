@@ -2595,6 +2595,13 @@
                                             </span>
                                             <span class="organize-toggle-label">全量ffprobe整理</span>
                                         </button>
+                                        <div class="organize-toggle-item organize-scraper-toggle">
+                                            <label class="ios-switch">
+                                                <input type="checkbox" :checked="mediaOrganizeConfig.emby_scrapers_enabled" @change="toggleEmbyScrapers($event)">
+                                                <span class="ios-slider"></span>
+                                            </label>
+                                            <span class="organize-toggle-label">emby刮削器</span>
+                                        </div>
                                         <div class="organize-run-actions">
                                             <button class="btn btn-green" @click="runOrganize" :disabled="organizeLoading">
                                                 <i class="fa-solid" :class="organizeLoading ? 'fa-spinner fa-spin' : 'fa-arrows-up-down-left-right'"></i>
@@ -3696,6 +3703,10 @@
                                             <button class="btn btn-ghost btn-sm" @click="open115QrLogin(config302.drives[0], 0)" :disabled="config302.drives[0].qr_loading">
                                                 <i class="fa-solid" :class="config302.drives[0].qr_loading ? 'fa-spinner fa-spin' : 'fa-qrcode'"></i>
                                                 扫码登录
+                                            </button>
+                                            <button class="btn btn-ghost btn-sm" @click="openManual115CookieDialog(config302.drives[0], 0)" :disabled="config302.drives[0].testing || config302.drives[0].qr_loading">
+                                                <i class="fa-solid fa-cookie-bite"></i>
+                                                手动填写CK
                                             </button>
                                             <button class="btn btn-primary btn-sm" @click="test115Cookie(config302.drives[0])" :disabled="config302.drives[0].testing || config302.drives[0].qr_loading">
                                                 <i class="fa-solid" :class="config302.drives[0].testing ? 'fa-spinner fa-spin' : 'fa-bolt'"></i>
@@ -5222,10 +5233,35 @@
             </div>
         </div>
 
+        <div v-if="manual115CookieState.visible" class="modal-mask modal-mask-elevated" @click.self="closeManual115CookieDialog">
+            <div class="modal-container manual-ck-modal">
+                <div class="modal-header manual-ck-modal-header">
+                    <span class="modal-title-text"><i class="fa-solid fa-cookie-bite"></i> 手动填写 115 CK</span>
+                    <button class="btn btn-ghost btn-sm" @click="closeManual115CookieDialog" :disabled="manual115CookieState.saving"><i class="fa-solid fa-times"></i></button>
+                </div>
+                <div class="modal-body manual-ck-modal-body">
+                    <label>115 Cookie</label>
+                    <textarea v-model="manual115CookieState.value" rows="8" class="manual-ck-textarea" placeholder="粘贴完整的 115 Cookie"></textarea>
+                    <div class="input-tip">填写后会保存到当前 115 主账号，并自动测试连接。</div>
+                    <div v-if="manual115CookieState.error" class="qr115-status-error">{{ manual115CookieState.error }}</div>
+                </div>
+                <div class="modal-footer manual-ck-modal-footer">
+                    <button class="btn btn-ghost" @click="closeManual115CookieDialog" :disabled="manual115CookieState.saving">取消</button>
+                    <button class="btn btn-primary" @click="saveManual115Cookie" :disabled="manual115CookieState.saving">
+                        <i class="fa-solid" :class="manual115CookieState.saving ? 'fa-spinner fa-spin' : 'fa-save'"></i>
+                        {{ manual115CookieState.saving ? '保存中...' : '保存并测试' }}
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <div v-if="qrcode115State.visible" class="modal-mask modal-mask-elevated">
             <div class="modal-container qr115-modal">
                 <div class="modal-header qr115-modal-header">
-                    <span class="modal-title-text"><i class="fa-solid fa-qrcode"></i> 115 扫码登录</span>
+                    <span class="modal-title-text">
+                        <i class="fa-solid fa-qrcode"></i>
+                        {{ qrcode115State.mode === 'tool' ? '扫码获取 115 CK' : '115 扫码登录' }}
+                    </span>
                     <button class="btn btn-ghost btn-sm" @click="close115QrLogin"><i class="fa-solid fa-times"></i></button>
                 </div>
                 <div class="modal-body qr115-modal-body">
@@ -5244,7 +5280,12 @@
                     </div>
 
                     <div class="qr115-hint">
-                        建议优先使用 115 网盘 Android/iOS 端；如果网页端提示 IP 登录异常，请切换其他客户端。
+                        <template v-if="qrcode115State.mode === 'tool'">
+                            扫码确认后会在这里显示 CK，不会自动写入 115 配置。
+                        </template>
+                        <template v-else>
+                            建议优先使用 115 网盘 Android/iOS 端；如果网页端提示 IP 登录异常，请切换其他客户端。
+                        </template>
                     </div>
 
                     <div class="qr115-status-card" :class="'state-' + qrcode115State.status">
@@ -5256,10 +5297,25 @@
                         <img v-if="qrcode115State.qrcode" :src="qrcode115State.qrcode" alt="115 登录二维码" class="qr115-qrcode-image">
                         <div v-else class="qr115-qrcode-empty">二维码将在这里显示</div>
                     </div>
+
+                    <div v-if="qrcode115State.fetchedCookie" class="qr115-cookie-result">
+                        <div class="qr115-cookie-result-head">
+                            <span>已获取 CK</span>
+                            <button class="btn btn-ghost btn-sm" @click="copy115FetchedCookie">
+                                <i class="fa-solid" :class="qrcode115State.copied ? 'fa-check' : 'fa-copy'"></i>
+                                {{ qrcode115State.copied ? '已复制' : '复制CK' }}
+                            </button>
+                        </div>
+                        <textarea class="manual-ck-textarea qr115-cookie-textarea" readonly :value="qrcode115State.fetchedCookie"></textarea>
+                    </div>
                 </div>
                 <div class="modal-footer qr115-modal-footer">
                     <button class="btn btn-ghost" @click="create115QrCode" :disabled="qrcode115State.loading">刷新二维码</button>
-                    <button class="btn btn-primary" @click="close115QrLogin">关闭</button>
+                    <button v-if="qrcode115State.fetchedCookie" class="btn btn-primary" @click="copy115FetchedCookie">
+                        <i class="fa-solid" :class="qrcode115State.copied ? 'fa-check' : 'fa-copy'"></i>
+                        {{ qrcode115State.copied ? '已复制' : '复制CK' }}
+                    </button>
+                    <button class="btn" :class="qrcode115State.fetchedCookie ? 'btn-ghost' : 'btn-primary'" @click="close115QrLogin">关闭</button>
                 </div>
             </div>
         </div>
@@ -6093,7 +6149,7 @@
                 <div class="settings-drawer-grid">
                     <div class="settings-drawer-item" v-for="item in toolboxItems" :key="item.id"
                          :class="{ active: focusedPanel === item.id }"
-                         @click="openFromSettings(item.id)">
+                         @click="openToolboxItem(item)">
                         <div class="settings-drawer-item-icon">
                             <i class="fa-solid" :class="item.icon"></i>
                         </div>

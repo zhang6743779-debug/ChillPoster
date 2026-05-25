@@ -22,6 +22,7 @@ export const coverItems = [
 ];
 
 export const toolboxItems = [
+    { id: 'drive115_ck_tool', icon: 'fa-qrcode', label: '扫码获取115CK', group: '工具箱', action: 'open115CkTool' },
     { id: 'emby_tasks', icon: 'fa-bolt-lightning', label: 'Emby任务中心', group: '工具箱' },
     { id: 'real_library', icon: 'fa-hard-drive', label: '独立真实库', group: '工具箱' },
     { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
@@ -51,7 +52,7 @@ export const allSearchItems = [
     ...dockItems,
     ...storageItems,
     ...coverItems,
-    ...toolboxItems,
+    ...toolboxItems.filter(item => !item.action),
     ...settingsItems,
 ];
 

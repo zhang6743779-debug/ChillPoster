@@ -99,7 +99,19 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             error: '',
             autoTest: true,
             pollTimer: null,
-            resultFetching: false
+            resultFetching: false,
+            mode: 'config',
+            fetchedCookie: '',
+            copied: false
+        });
+
+        const manual115CookieState = reactive({
+            visible: false,
+            driveIndex: -1,
+            driveRef: null,
+            value: '',
+            saving: false,
+            error: ''
         });
 
         const defaultEmby302 = {
@@ -195,6 +207,9 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             qrcode115State.error = '';
             qrcode115State.autoTest = true;
             qrcode115State.resultFetching = false;
+            qrcode115State.mode = 'config';
+            qrcode115State.fetchedCookie = '';
+            qrcode115State.copied = false;
         };
 
         const mark115QrDriveLoading = (loading) => {
@@ -213,7 +228,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         };
 
         const fetch115QrResult = async () => {
-            if (!qrcode115State.visible || !qrcode115State.driveRef || !qrcode115State.token?.uid || qrcode115State.resultFetching) return;
+            if (!qrcode115State.visible || !qrcode115State.token?.uid || qrcode115State.resultFetching) return;
             qrcode115State.resultFetching = true;
             qrcode115State.loading = true;
             qrcode115State.polling = false;
@@ -232,6 +247,16 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
                     qrcode115State.statusText = '获取 Cookie 失败';
                     qrcode115State.error = res.data.message || '未能提取 Cookie';
                     showToast(qrcode115State.error, 'error');
+                    return;
+                }
+
+                if (qrcode115State.mode === 'tool' || !qrcode115State.driveRef) {
+                    qrcode115State.fetchedCookie = res.data.cookie;
+                    qrcode115State.copied = false;
+                    qrcode115State.status = 'success';
+                    qrcode115State.statusText = '扫码成功，CK 已获取';
+                    qrcode115State.polling = false;
+                    showToast('扫码成功，CK 已获取', 'success');
                     return;
                 }
 
@@ -312,7 +337,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         };
 
         const create115QrCode = async () => {
-            if (!qrcode115State.visible || !qrcode115State.driveRef) return;
+            if (!qrcode115State.visible) return;
             qrcode115State.loading = true;
             qrcode115State.error = '';
             qrcode115State.status = 'loading';
@@ -320,6 +345,8 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             qrcode115State.qrcode = '';
             qrcode115State.qrcodeUrl = '';
             qrcode115State.token = null;
+            qrcode115State.fetchedCookie = '';
+            qrcode115State.copied = false;
             clear115QrPollTimer();
             mark115QrDriveLoading(true);
 
@@ -354,8 +381,80 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             qrcode115State.visible = true;
             qrcode115State.driveRef = drive;
             qrcode115State.driveIndex = idx;
+            qrcode115State.mode = 'config';
             qrcode115State.app = '115android';
             drive.qr_loading = false;
+        };
+
+        const open115CkTool = () => {
+            reset115QrState();
+            qrcode115State.visible = true;
+            qrcode115State.driveRef = null;
+            qrcode115State.driveIndex = -1;
+            qrcode115State.mode = 'tool';
+            qrcode115State.app = '115android';
+            qrcode115State.statusText = '选择客户端后生成二维码，扫码确认即可获取 CK';
+        };
+
+        const copy115FetchedCookie = async () => {
+            const cookie = String(qrcode115State.fetchedCookie || '');
+            if (!cookie) return;
+            try {
+                await navigator.clipboard.writeText(cookie);
+                qrcode115State.copied = true;
+                showToast('CK 已复制', 'success');
+            } catch (e) {
+                showToast('复制失败，请手动选择 CK', 'error');
+            }
+        };
+
+        const openManual115CookieDialog = (drive, idx) => {
+            manual115CookieState.visible = true;
+            manual115CookieState.driveRef = drive;
+            manual115CookieState.driveIndex = idx;
+            manual115CookieState.value = drive?.cookie || '';
+            manual115CookieState.error = '';
+            manual115CookieState.saving = false;
+        };
+
+        const closeManual115CookieDialog = () => {
+            if (manual115CookieState.saving) return;
+            manual115CookieState.visible = false;
+            manual115CookieState.driveRef = null;
+            manual115CookieState.driveIndex = -1;
+            manual115CookieState.value = '';
+            manual115CookieState.error = '';
+        };
+
+        const saveManual115Cookie = async () => {
+            const drive = manual115CookieState.driveRef;
+            const cookie = String(manual115CookieState.value || '').trim().replace(/;+$/, '');
+            if (!drive) return;
+            if (!cookie) {
+                manual115CookieState.error = '请粘贴 115 Cookie';
+                showToast('请粘贴 115 Cookie', 'warning');
+                return;
+            }
+
+            manual115CookieState.saving = true;
+            manual115CookieState.error = '';
+            drive.cookie = cookie;
+            drive.status = 'unknown';
+            drive.login_app = '';
+            drive.login_app_label = '';
+
+            try {
+                await axios.post('/api/config_302/save', build302Payload());
+                showToast('Cookie 已写入后台配置', 'success');
+                manual115CookieState.saving = false;
+                closeManual115CookieDialog();
+                await test115Cookie(drive);
+            } catch (e) {
+                manual115CookieState.error = e.response?.data?.detail || e.response?.data?.message || e.message;
+                showToast('保存 Cookie 失败: ' + manual115CookieState.error, 'error');
+            } finally {
+                manual115CookieState.saving = false;
+            }
         };
 
         // 手动清理 115 目录和回收站
@@ -552,6 +651,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         open115ConfigPanel,
         notify115SetupRequired,
         qrcode115State,
+        manual115CookieState,
         add302Drive,
         remove302Drive,
         add302Emby,
@@ -560,6 +660,11 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         close115QrLogin,
         create115QrCode,
         open115QrLogin,
+        open115CkTool,
+        copy115FetchedCookie,
+        openManual115CookieDialog,
+        closeManual115CookieDialog,
+        saveManual115Cookie,
         manualCleanup115,
         build302Payload,
         fetch302Config,

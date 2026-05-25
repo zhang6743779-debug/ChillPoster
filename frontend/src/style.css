@@ -5281,16 +5281,39 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px
     max-height: 90vh;
 }
 
+.manual-ck-modal {
+    width: min(620px, 92vw);
+    height: auto;
+    max-height: 90vh;
+}
+
+.manual-ck-modal-header .modal-title-text,
 .qr115-modal-header .modal-title-text {
     display: flex;
     align-items: center;
     gap: 10px;
 }
 
+.manual-ck-modal-body,
 .qr115-modal-body {
     display: flex;
     flex-direction: column;
     gap: 16px;
+}
+
+.manual-ck-modal-body label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--color-text-main);
+}
+
+.manual-ck-textarea {
+    width: 100%;
+    min-height: 180px;
+    resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.6;
 }
 
 .qr115-form-row {
@@ -5382,8 +5405,35 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px
     font-size: 14px;
 }
 
+.qr115-cookie-result {
+    border: 1px solid var(--color-border);
+    border-radius: 16px;
+    padding: 14px;
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.qr115-cookie-result-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--color-text-main);
+}
+
+.qr115-cookie-textarea {
+    min-height: 120px;
+    max-height: 220px;
+}
+
 .qr115-modal-footer {
     justify-content: space-between;
+}
+
+.manual-ck-modal-footer {
+    justify-content: flex-end;
 }
 
 /* === 控制台日志弹窗样式 === */
@@ -16964,6 +17014,11 @@ html[data-theme="light"] .network-connectivity-skeleton {
     .media-organize-page .organize-toggle-item:has(input:checked) {
         border-color: rgba(52, 211, 153, 0.24) !important;
         background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(16, 185, 129, 0.045)) !important;
+    }
+
+    .media-organize-page .organize-scraper-toggle {
+        order: 3;
+        grid-column: 1 / -1;
     }
 
     .media-organize-page .organize-mode-card {

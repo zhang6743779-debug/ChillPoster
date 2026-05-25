@@ -38,6 +38,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             life_monitor_enabled: true,
             monitor_dirs: [],
             auto_sync_strm: true,
+            emby_scrapers_enabled: false,
             wash_enabled: true,
             wash_by_equivalent_size: true,
             wash_tolerance_ratio: 0,
@@ -779,6 +780,14 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             }
         };
 
+        const toggleEmbyScrapers = (event) => {
+            const nextChecked = !!event?.target?.checked;
+            mediaOrganizeConfig.emby_scrapers_enabled = nextChecked;
+            if (nextChecked) {
+                showToast('建议关闭，你会更快乐~', 'warning');
+            }
+        };
+
         const toggleFilenameOnlyMode = () => {
             const mode = mediaOrganizeConfig.organize_parse_mode;
 
@@ -1313,6 +1322,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         saveMonitorDirs,
         restoreRunningOrganizeTask,
         toggleAutoSyncStrm,
+        toggleEmbyScrapers,
         toggleFilenameOnlyMode,
         toggleFfprobeMode,
         toggleFullFfprobeMode,

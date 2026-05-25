@@ -563,6 +563,7 @@ createApp({
             open115ConfigPanel,
             notify115SetupRequired,
             qrcode115State,
+            manual115CookieState,
             add302Drive,
             remove302Drive,
             add302Emby,
@@ -571,6 +572,11 @@ createApp({
             close115QrLogin,
             create115QrCode,
             open115QrLogin,
+            open115CkTool,
+            copy115FetchedCookie,
+            openManual115CookieDialog,
+            closeManual115CookieDialog,
+            saveManual115Cookie,
             manualCleanup115,
             build302Payload,
             fetch302Config,
@@ -590,6 +596,15 @@ createApp({
                 fetchStrmConfig();
             },
         });
+
+        const openToolboxItem = (item) => {
+            if (item?.action === 'open115CkTool' || item?.id === 'drive115_ck_tool') {
+                closeDockDrawers();
+                open115CkTool();
+                return;
+            }
+            openFromSettings(item.id);
+        };
 
         const {
             transferInput,
@@ -699,6 +714,7 @@ createApp({
             saveMonitorDirs,
             restoreRunningOrganizeTask,
             toggleAutoSyncStrm,
+            toggleEmbyScrapers,
             toggleFilenameOnlyMode,
             toggleFfprobeMode,
             toggleFullFfprobeMode,
@@ -1963,7 +1979,9 @@ createApp({
             config302, save302Config, saveEmbyConfig, toggle302Switch, importEmbyInfo, add302Drive, remove302Drive,
             add302Emby, remove302Emby,
             test115Cookie, manualCleanup115,
-            qrcode115State, open115QrLogin, close115QrLogin, create115QrCode,
+            qrcode115State, manual115CookieState, open115QrLogin, close115QrLogin, create115QrCode,
+            open115CkTool, copy115FetchedCookie, openToolboxItem,
+            openManual115CookieDialog, closeManual115CookieDialog, saveManual115Cookie,
             hasPrimary115Cookie, needs115Setup, standardTopologyEnabled, open115ConfigPanel,
 
             // [修复] 全局变量及方法
@@ -2084,7 +2102,7 @@ createApp({
             addCondition, removeCondition, resetCategoryRules,
             onRuleDragStart, onRuleDragOver, onRuleDrop, onRuleDragEnd,
             orgSourceBrowser, orgTargetBrowser, orgFailedBrowser, monitorDirBrowser, monitorDirsSaving,
-            fetchMediaOrganizeConfig, saveMediaOrganizeConfig, saveMonitorDirs, toggleAutoSyncStrm, toggleFilenameOnlyMode, toggleFfprobeMode, toggleFullFfprobeMode, toggleWashByEquivalentSize,
+            fetchMediaOrganizeConfig, saveMediaOrganizeConfig, saveMonitorDirs, toggleAutoSyncStrm, toggleEmbyScrapers, toggleFilenameOnlyMode, toggleFfprobeMode, toggleFullFfprobeMode, toggleWashByEquivalentSize,
             browseOrganizeSource, selectOrgSourceDir, orgSourceUp, applyOrgSourcePath,
             browseOrganizeTarget, selectOrgTargetDir, orgTargetUp, applyOrgTargetPath,
             browseOrganizeFailed, selectOrgFailedDir, orgFailedUp, applyOrgFailedPath,

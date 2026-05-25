@@ -12,6 +12,7 @@ from core.configs import EMBY_DISCOVER_INDEX_FILE
 from core.cache_db import cache_db
 from core.emby_client import EmbyClient
 from app.routers.config_302 import get_emby_config_by_index_sync
+from app.services.media_organize_state import CONFIG_FILE as MEDIA_ORGANIZE_CONFIG_FILE
 from app.services.realtime_events import publish_realtime_event
 
 logger = logging.getLogger("EmbyLibCache")
@@ -132,6 +133,13 @@ def _extract_settings_snapshot(sc: Optional[dict]) -> dict:
         "emby_server_idx": int(sc.get("emby_server_idx", 0) or 0),
         "emby_library_level": sc.get("emby_library_level", "level3") or "level3",
     }
+
+
+def _emby_scrapers_enabled() -> bool:
+    config = _read_json_file(MEDIA_ORGANIZE_CONFIG_FILE, {})
+    if not isinstance(config, dict):
+        return False
+    return bool(config.get("emby_scrapers_enabled", False))
 
 
 def _build_desired_libraries(rules: dict) -> dict:
@@ -695,7 +703,7 @@ def _create_library(server_idx: int, lib_key: str, lib_name: str, local_path: st
             name=lib_name,
             path=local_path,
             collection_type=collection_type,
-            enable_scrapers=True,
+            enable_scrapers=_emby_scrapers_enabled(),
         )
         if lib_id and is_new:
             client.refresh_library(lib_id)

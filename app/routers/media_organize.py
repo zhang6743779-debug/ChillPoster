@@ -80,6 +80,7 @@ class MediaOrganizeConfig(BaseModel):
     life_monitor_enabled: bool = True
     monitor_dirs: List[MonitorDirectory] = Field(default_factory=list)
     auto_sync_strm: bool = True
+    emby_scrapers_enabled: bool = False
     wash_enabled: bool = True
     wash_by_equivalent_size: bool = True
     wash_tolerance_ratio: float = 0.0
@@ -116,6 +117,7 @@ class OrganizeRequest(BaseModel):
 
 
 _DEFAULT_SCRAPE_FIELDS = {
+    "emby_scrapers_enabled": False,
     "scrape_enabled": True,
     "emby_local_scrape": True,
     "scrape_nfo": True,
