@@ -6,7 +6,7 @@ import asyncio
 import threading
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr
 from typing import Optional, List
 from core.logger import logger
 from app.dependencies import get_recent_interrupted_task, remove_task_progress, update_task_progress
@@ -40,6 +40,16 @@ router = APIRouter(prefix="/api/media_organize", tags=["media_organize"])
 # 数据模型
 # ==========================================
 
+class MonitorDirectory(BaseModel):
+    cid: str = ''
+    name: str = ''
+    path: str = ''
+    enabled: bool = True
+
+    class Config:
+        extra = "ignore"
+
+
 class MediaOrganizeConfig(BaseModel):
     drive_index: int = 0
     source_cid: str = '0'
@@ -67,6 +77,7 @@ class MediaOrganizeConfig(BaseModel):
     policy_season_poster: str = 'missing_only'
     policy_episode_thumb: str = 'missing_only'
     life_monitor_enabled: bool = True
+    monitor_dirs: List[MonitorDirectory] = Field(default_factory=list)
     auto_sync_strm: bool = True
     wash_enabled: bool = True
     wash_by_equivalent_size: bool = True
@@ -98,6 +109,8 @@ class OrganizeRequest(BaseModel):
     is_bluray: bool = False
     drive_index: int = 0
     overwrite: bool = False
+    source_cid: str = ''
+    source_name: str = ''
     _prefetched_source_tree_entries: Optional[list[dict]] = PrivateAttr(default=None)
 
 
@@ -127,6 +140,49 @@ def _apply_default_scrape_fields(data: dict) -> dict:
     for key, value in _DEFAULT_SCRAPE_FIELDS.items():
         data.setdefault(key, value)
     return data
+
+
+def _normalize_monitor_dirs(raw_dirs, *, source_cid: str = "", target_cid: str = "") -> list[dict]:
+    if not isinstance(raw_dirs, list):
+        return []
+    source_cid = str(source_cid or "")
+    target_cid = str(target_cid or "")
+    normalized = []
+    seen = set()
+    for raw in raw_dirs:
+        if not isinstance(raw, dict):
+            continue
+        cid = str(raw.get("cid", "") or "").strip()
+        path = str(raw.get("path", "") or raw.get("name", "") or "").strip()
+        name = str(raw.get("name", "") or "").strip()
+        enabled = raw.get("enabled", True) is not False
+        if not cid or cid == "0":
+            continue
+        if cid in seen or cid == source_cid or cid == target_cid:
+            continue
+        seen.add(cid)
+        if path in ("", "/", "根目录"):
+            continue
+        if not name:
+            name = path.split("/").pop() or path
+        normalized.append({
+            "cid": cid,
+            "name": name,
+            "path": path,
+            "enabled": enabled,
+        })
+    return normalized
+
+
+def _active_monitor_dirs_from_config(config_data: dict) -> list[dict]:
+    return [
+        item for item in _normalize_monitor_dirs(
+            config_data.get("monitor_dirs", []),
+            source_cid=str(config_data.get("source_cid", "") or ""),
+            target_cid=str(config_data.get("target_cid", "") or ""),
+        )
+        if item.get("enabled", True)
+    ]
 
 
 class Browse115Payload(BaseModel):
@@ -481,6 +537,11 @@ async def save_config(config: MediaOrganizeConfig):
             merged_data["failed_cid"] = str(topology.get("failed_dir_cid", merged_data.get("failed_cid", config.failed_cid)) or "0")
 
         merged_data["drive_index"] = 0
+        merged_data["monitor_dirs"] = _normalize_monitor_dirs(
+            merged_data.get("monitor_dirs", []),
+            source_cid=str(merged_data.get("source_cid", "") or ""),
+            target_cid=str(merged_data.get("target_cid", "") or ""),
+        )
         normalized_config = MediaOrganizeConfig(**merged_data)
         merged_data.update(normalized_config.dict())
 
@@ -494,6 +555,11 @@ async def save_config(config: MediaOrganizeConfig):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 reloaded_data = json.load(f)
             if isinstance(reloaded_data, dict):
+                reloaded_data["monitor_dirs"] = _normalize_monitor_dirs(
+                    reloaded_data.get("monitor_dirs", []),
+                    source_cid=str(reloaded_data.get("source_cid", "") or ""),
+                    target_cid=str(reloaded_data.get("target_cid", "") or ""),
+                )
                 normalized_config = MediaOrganizeConfig(**reloaded_data)
                 merged_data = reloaded_data
         except Exception as e:
@@ -502,7 +568,7 @@ async def save_config(config: MediaOrganizeConfig):
         logger.info(f"[MediaOrganize] 配置已保存")
 
         new_enabled = normalized_config.life_monitor_enabled
-        monitor_fields = ("source_name", "target_name", "source_cid", "target_cid")
+        monitor_fields = ("source_name", "target_name", "source_cid", "target_cid", "monitor_dirs")
         monitor_dirs_changed = any(
             str(old_data.get(field, "") or "") != str(merged_data.get(field, "") or "")
             for field in monitor_fields
@@ -556,6 +622,7 @@ async def _toggle_life_monitor(enabled: bool, config: MediaOrganizeConfig, force
                 target_dir,
                 str(config.source_cid),
                 str(config.target_cid),
+                monitor_dirs=[item.dict() for item in config.monitor_dirs],
             )
             monitor = create_monitor(
                 client=client,
@@ -563,6 +630,10 @@ async def _toggle_life_monitor(enabled: bool, config: MediaOrganizeConfig, force
                 target_dir=target_dir,
                 callback=callback,
                 start_mode="latest",
+                extra_source_dirs=[
+                    item.dict() for item in config.monitor_dirs
+                    if item.enabled and item.path and item.cid
+                ],
             )
             if monitor.start():
                 logger.trace("[MediaOrganize] 115 Life 事件监控已启动")
@@ -574,6 +645,68 @@ async def _toggle_life_monitor(enabled: bool, config: MediaOrganizeConfig, force
                 logger.info("[MediaOrganize] 115 Life 事件监控已停止")
     except Exception as e:
         logger.error(f"[MediaOrganize] 切换 Life 监控失败: {e}")
+
+
+@router.get("/monitor_dirs")
+async def get_monitor_dirs():
+    """读取额外整理监控目录。"""
+    data = await get_config()
+    monitor_dirs = _normalize_monitor_dirs(
+        data.get("monitor_dirs", []),
+        source_cid=str(data.get("source_cid", "") or ""),
+        target_cid=str(data.get("target_cid", "") or ""),
+    )
+    return {
+        "status": "success",
+        "life_monitor_enabled": data.get("life_monitor_enabled", True),
+        "source_cid": str(data.get("source_cid", "0") or "0"),
+        "source_name": data.get("source_name", ""),
+        "target_cid": str(data.get("target_cid", "0") or "0"),
+        "target_name": data.get("target_name", ""),
+        "monitor_dirs": monitor_dirs,
+    }
+
+
+@router.post("/monitor_dirs")
+async def save_monitor_dirs(payload: dict):
+    """保存额外整理监控目录，并按需热重启 Life 监控。"""
+    try:
+        old_data = {}
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    loaded_data = json.load(f)
+                if isinstance(loaded_data, dict):
+                    old_data = loaded_data
+            except Exception:
+                old_data = {}
+
+        merged_data = dict(MediaOrganizeConfig().dict())
+        if isinstance(old_data, dict):
+            merged_data.update(old_data)
+        merged_data["monitor_dirs"] = _normalize_monitor_dirs(
+            payload.get("monitor_dirs", []) if isinstance(payload, dict) else [],
+            source_cid=str(merged_data.get("source_cid", "") or ""),
+            target_cid=str(merged_data.get("target_cid", "") or ""),
+        )
+        merged_data["drive_index"] = 0
+        normalized_config = MediaOrganizeConfig(**merged_data)
+        merged_data.update(normalized_config.dict())
+
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(merged_data, f, ensure_ascii=False, indent=4)
+
+        if normalized_config.life_monitor_enabled:
+            await _toggle_life_monitor(True, normalized_config, force_restart=True)
+
+        return {
+            "status": "success",
+            "message": "监控目录已保存",
+            "monitor_dirs": merged_data.get("monitor_dirs", []),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"保存监控目录失败: {str(e)}")
 
 
 # ==========================================
@@ -929,6 +1062,13 @@ async def organize_media(req: OrganizeRequest):
         logger.warning(f"[MediaOrganize] 一条龙目录绑定检查失败: {e}")
 
     config_data = await _load_config_data()
+    override_source_cid = str(req.source_cid or "").strip()
+    override_source_name = str(req.source_name or "").strip()
+    if override_source_cid and override_source_cid != "0":
+        config_data = dict(config_data)
+        config_data["source_cid"] = override_source_cid
+        if override_source_name:
+            config_data["source_name"] = override_source_name
     try:
         from app.routers.config_302 import is_media_organize_source_suspicious
         if is_media_organize_source_suspicious(config_data):

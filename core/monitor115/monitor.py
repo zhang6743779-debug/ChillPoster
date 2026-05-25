@@ -26,8 +26,16 @@ class LifeEventMonitor:
         start_mode: str = "latest",
         state_file: Optional[str] = None,
         poll_interval: float = 20,
+        extra_source_dirs: Optional[list[dict]] = None,
     ):
-        monitor_dirs = [d for d in [source_dir, target_dir] if d]
+        extra_dirs = []
+        for item in extra_source_dirs or []:
+            if not isinstance(item, dict) or item.get("enabled", True) is False:
+                continue
+            path = str(item.get("path", "") or item.get("name", "") or "").strip()
+            if path:
+                extra_dirs.append(path)
+        monitor_dirs = [d for d in [source_dir, target_dir, *extra_dirs] if d]
 
         if state_file is None:
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +46,7 @@ class LifeEventMonitor:
         self._life_client = LifeClient(client, monitor_dirs, path_map_file=path_map_file)
         self._source_dir = source_dir
         self._target_dir = target_dir
+        self._extra_source_dirs = extra_dirs
         self._callback = callback
         self._start_mode = start_mode
         self._poll_interval = poll_interval
@@ -88,7 +97,8 @@ class LifeEventMonitor:
             self._guard_thread = threading.Thread(target=self._guard_loop, name="115-life-guard", daemon=True)
             self._guard_thread.start()
 
-            logger.info(f"[115Life] 监控已启动: 整理目录={self._source_dir}, 媒体库目录={self._target_dir}")
+            extra_text = f", 额外监控目录={len(self._extra_source_dirs)}个" if self._extra_source_dirs else ""
+            logger.info(f"[115Life] 监控已启动: 整理目录={self._source_dir}, 媒体库目录={self._target_dir}{extra_text}")
             return True
 
     def stop(self) -> None:

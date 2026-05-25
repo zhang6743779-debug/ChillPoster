@@ -36,6 +36,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             policy_episode_thumb: 'missing_only',
             auto_detect_bluray: true,
             life_monitor_enabled: true,
+            monitor_dirs: [],
             auto_sync_strm: true,
             wash_enabled: true,
             wash_by_equivalent_size: true,
@@ -684,6 +685,16 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             opened: false
         });
 
+        const monitorDirBrowser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: []
+        });
+        const monitorDirsSaving = ref(false);
+
         const normalizeOrganizeParseMode = () => {
             const mode = (mediaOrganizeConfig.organize_parse_mode || '').toLowerCase();
             if (mode === 'filename' || mode === 'ffprobe' || mode === 'ffprobe_full' || mode === '') {
@@ -719,6 +730,9 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                 const res = await axios.get('/api/media_organize/get');
                 if (res.data) {
                     Object.assign(mediaOrganizeConfig, res.data);
+                    if (!Array.isArray(mediaOrganizeConfig.monitor_dirs)) {
+                        mediaOrganizeConfig.monitor_dirs = [];
+                    }
                     mediaOrganizeConfig.drive_index = 0;
                 }
             } catch (e) { /* first load, use defaults */ }
@@ -1019,6 +1033,96 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             orgFailedBrowser.opened = false;
         };
 
+        const loadMonitorDir = async (cid = '0', path = '/') => {
+            monitorDirBrowser.loading = true;
+            try {
+                const res = await axios.post('/api/media_organize/browse115', { cid, drive_index: 0 });
+                if (res.data?.status !== 'ok') throw new Error(res.data?.message || '读取目录失败');
+                monitorDirBrowser.currentCid = String(cid || '0');
+                monitorDirBrowser.currentPath = path || '/';
+                monitorDirBrowser.dirs = res.data.dirs || [];
+            } catch (e) {
+                showToast('浏览失败: ' + (e.message || e), 'error');
+                monitorDirBrowser.dirs = [];
+            } finally {
+                monitorDirBrowser.loading = false;
+            }
+        };
+
+        const openMonitorDirBrowser = () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return;
+            }
+            if (monitorDirBrowser.visible) {
+                monitorDirBrowser.visible = false;
+                return;
+            }
+            monitorDirBrowser.visible = true;
+            monitorDirBrowser.history.splice(0);
+            loadMonitorDir('0', '/');
+        };
+
+        const selectMonitorDir = (dir) => {
+            monitorDirBrowser.history.push({
+                cid: monitorDirBrowser.currentCid,
+                path: monitorDirBrowser.currentPath,
+            });
+            const nextPath = monitorDirBrowser.currentPath === '/' ? `/${dir.name}` : `${monitorDirBrowser.currentPath}/${dir.name}`;
+            loadMonitorDir(dir.cid, nextPath);
+        };
+
+        const monitorDirUp = () => {
+            const prev = monitorDirBrowser.history.pop();
+            if (!prev) return;
+            loadMonitorDir(prev.cid, prev.path);
+        };
+
+        const addCurrentMonitorDir = () => {
+            const cid = String(monitorDirBrowser.currentCid || '');
+            if (!cid || cid === '0') return showToast('不能选择根目录', 'error');
+            if (cid === String(mediaOrganizeConfig.source_cid || '')) return showToast('主整理目录已自动监控，无需重复添加', 'info');
+            if (cid === String(mediaOrganizeConfig.target_cid || '')) return showToast('媒体库目录不能作为整理监控目录', 'error');
+            if ((mediaOrganizeConfig.monitor_dirs || []).some(item => String(item.cid) === cid)) return showToast('该目录已添加', 'info');
+            const path = monitorDirBrowser.currentPath || cid;
+            const name = path.split('/').filter(Boolean).pop() || path;
+            mediaOrganizeConfig.monitor_dirs.push({ cid, name, path, enabled: true });
+            monitorDirBrowser.visible = false;
+            showToast('已添加监控目录', 'success');
+        };
+
+        const removeMonitorDir = (cid) => {
+            const idx = (mediaOrganizeConfig.monitor_dirs || []).findIndex(item => String(item.cid) === String(cid));
+            if (idx >= 0) mediaOrganizeConfig.monitor_dirs.splice(idx, 1);
+        };
+
+        const saveMonitorDirs = async () => {
+            if (needs115Setup.value) {
+                notify115SetupRequired();
+                return false;
+            }
+            monitorDirsSaving.value = true;
+            try {
+                const payload = {
+                    monitor_dirs: (mediaOrganizeConfig.monitor_dirs || []).map(item => ({
+                        cid: String(item.cid || ''),
+                        name: item.name || '',
+                        path: item.path || item.name || '',
+                        enabled: item.enabled !== false,
+                    })),
+                };
+                const res = await axios.post('/api/media_organize/monitor_dirs', payload);
+                mediaOrganizeConfig.monitor_dirs = res.data?.monitor_dirs || payload.monitor_dirs;
+                showToast('监控目录已保存', 'success');
+                return true;
+            } catch (e) {
+                showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return false;
+            } finally {
+                monitorDirsSaving.value = false;
+            }
+        };
+
         // 执行整理
         const runOrganize = async () => {
             if (needs115Setup.value) {
@@ -1154,6 +1258,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                 fetchMediaOrganizeConfig();
                 restoreRunningOrganizeTask();
             }
+            if (v === 'organize_monitor_dirs') fetchMediaOrganizeConfig();
             if (v === 'media_organize_rules') fetchCategoryRules();
         });
 
@@ -1201,8 +1306,11 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         orgSourceBrowser,
         orgTargetBrowser,
         orgFailedBrowser,
+        monitorDirBrowser,
+        monitorDirsSaving,
         fetchMediaOrganizeConfig,
         saveMediaOrganizeConfig,
+        saveMonitorDirs,
         restoreRunningOrganizeTask,
         toggleAutoSyncStrm,
         toggleFilenameOnlyMode,
@@ -1221,6 +1329,11 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         selectOrgFailedDir,
         orgFailedUp,
         applyOrgFailedPath,
+        openMonitorDirBrowser,
+        selectMonitorDir,
+        monitorDirUp,
+        addCurrentMonitorDir,
+        removeMonitorDir,
         movieFormatRef,
         movieFolderFormatRef,
         tvFolderFormatRef,

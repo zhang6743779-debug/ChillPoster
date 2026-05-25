@@ -669,8 +669,11 @@ createApp({
             orgSourceBrowser,
             orgTargetBrowser,
             orgFailedBrowser,
+            monitorDirBrowser,
+            monitorDirsSaving,
             fetchMediaOrganizeConfig,
             saveMediaOrganizeConfig,
+            saveMonitorDirs,
             restoreRunningOrganizeTask,
             toggleAutoSyncStrm,
             toggleFilenameOnlyMode,
@@ -689,6 +692,11 @@ createApp({
             selectOrgFailedDir,
             orgFailedUp,
             applyOrgFailedPath,
+            openMonitorDirBrowser,
+            selectMonitorDir,
+            monitorDirUp,
+            addCurrentMonitorDir,
+            removeMonitorDir,
             movieFormatRef,
             movieFolderFormatRef,
             tvFolderFormatRef,
@@ -1040,6 +1048,7 @@ createApp({
                 'media_organize': '一条龙菜单', 'organize_history': '整理记录', 'media_organize_rules': '二级分类规则',
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
+                'organize_monitor_dirs': '整理监控目录',
                 'forward_hdhive': 'Forward模块',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
                 'telegram_monitor': 'Telegram 监听',
@@ -1188,6 +1197,9 @@ createApp({
                 start115UploadPolling();
             } else if (oldVal === 'drive115_upload') {
                 stop115UploadPolling();
+            }
+            if (newVal === 'organize_monitor_dirs') {
+                fetchMediaOrganizeConfig();
             }
             if (newVal === 'dashboard') {
                 startDashboardDeviceMetricsPolling();
@@ -2032,11 +2044,12 @@ createApp({
             fetchCategoryRules, saveCategoryRules, saveSubClassify, addRule, removeRule,
             addCondition, removeCondition, resetCategoryRules,
             onRuleDragStart, onRuleDragOver, onRuleDrop, onRuleDragEnd,
-            orgSourceBrowser, orgTargetBrowser, orgFailedBrowser,
-            fetchMediaOrganizeConfig, saveMediaOrganizeConfig, toggleAutoSyncStrm, toggleFilenameOnlyMode, toggleFfprobeMode, toggleFullFfprobeMode, toggleWashByEquivalentSize,
+            orgSourceBrowser, orgTargetBrowser, orgFailedBrowser, monitorDirBrowser, monitorDirsSaving,
+            fetchMediaOrganizeConfig, saveMediaOrganizeConfig, saveMonitorDirs, toggleAutoSyncStrm, toggleFilenameOnlyMode, toggleFfprobeMode, toggleFullFfprobeMode, toggleWashByEquivalentSize,
             browseOrganizeSource, selectOrgSourceDir, orgSourceUp, applyOrgSourcePath,
             browseOrganizeTarget, selectOrgTargetDir, orgTargetUp, applyOrgTargetPath,
             browseOrganizeFailed, selectOrgFailedDir, orgFailedUp, applyOrgFailedPath,
+            openMonitorDirBrowser, selectMonitorDir, monitorDirUp, addCurrentMonitorDir, removeMonitorDir,
             // 重命名模板编辑器
             movieFormatRef, movieFolderFormatRef, tvFolderFormatRef, tvEpisodeFormatRef,
             movieFolderFormatDisplay, tvFolderFormatDisplay, movieFormatDisplay, tvEpisodeFormatDisplay,

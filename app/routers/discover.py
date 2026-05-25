@@ -1573,6 +1573,11 @@ def _empty_missing_episode_summary() -> dict:
     }
 
 
+def _is_missing_episode_active_status(status: str) -> bool:
+    normalized = str(status or "").strip().lower()
+    return normalized in {"returning series", "in production", "planned", "pilot"}
+
+
 def _build_missing_episode_season_brief(seasons: list[dict]) -> str:
     missing_seasons = [season for season in seasons if int(season.get("missing") or 0) > 0]
     parts = []
@@ -1647,8 +1652,7 @@ def _classify_missing_episode_item(tmdb_status: str, seasons: list[dict], missin
     if normalized_status == "ended":
         return "ended_missing", "已完结但缺集"
 
-    active_statuses = {"returning series", "in production", "planned", "pilot"}
-    if normalized_status in active_statuses:
+    if _is_missing_episode_active_status(normalized_status):
         numbered_seasons = [s for s in seasons if int(s.get("total") or 0) > 0]
         if numbered_seasons:
             latest = max(numbered_seasons, key=lambda s: int(s.get("seasonNumber") or 0))
@@ -1811,21 +1815,40 @@ def _build_missing_episode_stat(entry: dict, api_key: str) -> dict:
                 })
         if not seasons:
             raise ValueError("TMDB 无有效季集信息")
-        total_episodes = sum(season["total"] for season in seasons)
-        present_episodes = sum(season["present"] for season in seasons)
-        missing_episodes = sum(season["missing"] for season in seasons)
         tmdb_status = detail.get("status") or normalized.get("status") or ""
-        missing_category, category_label = _classify_missing_episode_item(tmdb_status, seasons, missing_episodes)
+        is_active_series = _is_missing_episode_active_status(tmdb_status)
+        raw_total_episodes = sum(season["total"] for season in seasons)
+        present_episodes = sum(season["present"] for season in seasons)
+        raw_missing_episodes = sum(season["missing"] for season in seasons)
         aired_missing_episodes = 0
-        normalized_status = str(tmdb_status or "").strip().lower()
-        if normalized_status in {"returning series", "in production", "planned", "pilot"} and missing_episodes > 0:
+        if is_active_series and raw_missing_episodes > 0:
             aired_missing_sets = _build_aired_missing_episode_sets(int(tmdb_id), seasons, api_key)
             for season in seasons:
                 season_number = int(season.get("seasonNumber") or 0)
+                raw_missing = sorted({int(ep) for ep in season.get("missingEpisodes") or []})
                 aired_missing = sorted(aired_missing_sets.get(season_number, set()))
+                unaired_missing = sorted(set(raw_missing) - set(aired_missing))
+                season["rawTotal"] = int(season.get("total") or 0)
+                season["rawMissing"] = int(season.get("missing") or 0)
+                season["rawMissingEpisodes"] = raw_missing
+                season["unairedMissingEpisodes"] = unaired_missing
+                season["missingEpisodes"] = aired_missing
+                season["missing"] = len(aired_missing)
                 season["airedMissingEpisodes"] = aired_missing
                 season["airedMissing"] = len(aired_missing)
                 aired_missing_episodes += len(aired_missing)
+        else:
+            for season in seasons:
+                raw_missing = sorted({int(ep) for ep in season.get("missingEpisodes") or []})
+                season["rawTotal"] = int(season.get("total") or 0)
+                season["rawMissing"] = int(season.get("missing") or 0)
+                season["rawMissingEpisodes"] = raw_missing
+                season["unairedMissingEpisodes"] = []
+                season["airedMissingEpisodes"] = []
+                season["airedMissing"] = 0
+        missing_episodes = sum(season["missing"] for season in seasons)
+        total_episodes = present_episodes + missing_episodes
+        missing_category, category_label = _classify_missing_episode_item(tmdb_status, seasons, missing_episodes)
         if extra_local_episodes > 0:
             status = "error"
             label = f"异常入库 +{extra_local_episodes} 集"
@@ -1872,6 +1895,8 @@ def _build_missing_episode_stat(entry: dict, api_key: str) -> dict:
             "presentEpisodes": present_episodes,
             "totalEpisodes": total_episodes,
             "missingEpisodes": missing_episodes,
+            "rawTotalEpisodes": raw_total_episodes,
+            "rawMissingEpisodes": raw_missing_episodes,
             "airedMissingEpisodes": aired_missing_episodes,
             "extraLocalEpisodes": extra_local_episodes,
             "extraLocalSeasons": extra_local_seasons,
@@ -1916,25 +1941,25 @@ def _accumulate_missing_episode_summary(summary: dict, item: dict) -> None:
         summary["errorCount"] += 1
     elif status == "error":
         summary["errorCount"] += 1
+    missing_episodes = int(item.get("missingEpisodes") or 0)
+    if missing_episodes > 0:
+        summary["missingCount"] += 1
     category = item.get("missingCategory")
     normalized_tmdb_status = str(item.get("tmdbStatus") or "").strip().lower()
-    active_statuses = {"returning series", "in production", "planned", "pilot"}
     aired_missing_episodes = int(item.get("airedMissingEpisodes") or 0)
-    is_active_series = normalized_tmdb_status in active_statuses
+    is_active_series = _is_missing_episode_active_status(normalized_tmdb_status)
     if is_active_series and aired_missing_episodes > 0:
         summary["airingAiredMissingCount"] += 1
     if category == "airing_recent_missing" and is_active_series and aired_missing_episodes <= 0:
         summary["airingRecentMissingCount"] += 1
     elif category == "ended_missing":
         summary["endedMissingCount"] += 1
-        summary["actionableMissingEpisodes"] += int(item.get("missingEpisodes") or 0)
     elif category == "partial_missing":
         summary["otherMissingCount"] += 1
-    if is_active_series:
-        summary["actionableMissingEpisodes"] += aired_missing_episodes
+    summary["actionableMissingEpisodes"] += missing_episodes
     summary["presentEpisodes"] += int(item.get("presentEpisodes") or 0)
     summary["totalEpisodes"] += int(item.get("totalEpisodes") or 0)
-    summary["missingEpisodes"] += int(item.get("missingEpisodes") or 0)
+    summary["missingEpisodes"] += missing_episodes
     summary["extraLocalEpisodes"] += int(item.get("extraLocalEpisodes") or 0)
 
 
@@ -2024,8 +2049,8 @@ _missing_episode_stats_lock = threading.RLock()
 _missing_episode_cache_db_lock = threading.RLock()
 _missing_episode_cache_db_ready = False
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
-MISSING_EPISODE_STATS_CACHE_VERSION = 13
-MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 5
+MISSING_EPISODE_STATS_CACHE_VERSION = 14
+MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 6
 MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT = 48
 _missing_episode_stats_state: dict = {
     "cache_key": "",

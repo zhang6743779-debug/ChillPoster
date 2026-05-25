@@ -1196,7 +1196,12 @@ async def _wait_source_tree_stable(drive_index: int, source_cid: str, label: str
         await asyncio.sleep(5)
 
 
-async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries: Optional[list[dict]] = None) -> tuple[str, str]:
+async def _trigger_auto_organize_and_wait(
+    drive_index: int,
+    source_tree_entries: Optional[list[dict]] = None,
+    source_cid: str = "",
+    source_name: str = "",
+) -> tuple[str, str]:
     from app.routers.media_organize import organize_media, OrganizeRequest
 
     while True:
@@ -1210,7 +1215,11 @@ async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries:
             logger.info("[115Life] 整理任务已在运行，跳过事件补跑，等待整理后源目录复查")
             return "", "organize_running"
 
-        organize_req = OrganizeRequest(drive_index=drive_index)
+        organize_req = OrganizeRequest(
+            drive_index=drive_index,
+            source_cid=str(source_cid or ""),
+            source_name=str(source_name or ""),
+        )
         if source_tree_entries is not None:
             organize_req._prefetched_source_tree_entries = list(source_tree_entries or [])
         result = await organize_media(organize_req)
@@ -1232,7 +1241,7 @@ async def _trigger_auto_organize_and_wait(drive_index: int, source_tree_entries:
             await asyncio.sleep(1)
 
 
-async def _run_post_organize_followup(drive_index: int, source_cid: str):
+async def _run_post_organize_followup(drive_index: int, source_cid: str, source_name: str = ""):
     try:
         snapshot = await _scan_source_poll_snapshot(drive_index, source_cid)
         source_tree_entries = list(snapshot.get("tree_entries", []) or [])
@@ -1244,7 +1253,12 @@ async def _run_post_organize_followup(drive_index: int, source_cid: str):
         )
         if remaining_video_count > 0:
             logger.info(f"[MediaOrganize] 源目录仍有视频残留，继续整理: 视频 {remaining_video_count} 个，条目 {entry_count} 个")
-            run_id, status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
+            run_id, status = await _trigger_auto_organize_and_wait(
+                drive_index,
+                source_tree_entries,
+                source_cid=str(source_cid),
+                source_name=str(source_name or ""),
+            )
             if run_id:
                 logger.info(f"[MediaOrganize] 残留视频补跑完成: run_id={run_id} 状态={status}")
             elif status == "organize_running":
@@ -1260,7 +1274,7 @@ async def _run_post_organize_followup(drive_index: int, source_cid: str):
         logger.warning(f"[MediaOrganize] 整理结束收尾失败: {e}", exc_info=True)
 
 
-def _schedule_post_organize_followup(drive_index: int, source_cid: str):
+def _schedule_post_organize_followup(drive_index: int, source_cid: str, source_name: str = ""):
     main_loop = _state._main_event_loop
     done_event = _state._organize_done_event
 
@@ -1268,13 +1282,13 @@ def _schedule_post_organize_followup(drive_index: int, source_cid: str):
         if done_event:
             await done_event.wait()
         await asyncio.sleep(0.5)
-        await _run_post_organize_followup(drive_index, str(source_cid))
+        await _run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""))
 
     if main_loop and not main_loop.is_closed() and main_loop.is_running():
         asyncio.run_coroutine_threadsafe(_runner(), main_loop)
     else:
         threading.Thread(
-            target=lambda: asyncio.run(_run_post_organize_followup(drive_index, str(source_cid))),
+            target=lambda: asyncio.run(_run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""))),
             daemon=True,
         ).start()
 
@@ -1328,7 +1342,7 @@ def _schedule_or_refresh_source_poll(drive_index: int, source_dir: str, target_d
     now = _time.time()
     desired_phase = "post_run" if str(phase or "") == "post_run" else "pre_run"
     if desired_phase == "post_run":
-        _schedule_post_organize_followup(drive_index, str(source_cid))
+        _schedule_post_organize_followup(drive_index, str(source_cid), str(source_dir or ""))
         return
     with _organize_trigger_lock:
         organize_running = bool(_state._organize_running)
@@ -1403,6 +1417,7 @@ async def _run_source_poll_loop():
 
                 drive_index = int(current.get("drive_index", 0) or 0)
                 source_cid = str(current.get("source_cid", "") or "")
+                source_dir = str(current.get("source_dir", "") or "")
                 if not source_cid:
                     with _source_poll_lock:
                         _state._source_poll_sessions.pop(session_key, None)
@@ -1420,7 +1435,11 @@ async def _run_source_poll_loop():
                         )
                         await asyncio.sleep(wait_seconds)
                     logger.info(f"[115Life] 源目录事件触发自动整理: key={session_key} reason=pre_run_event")
-                    run_id, run_status = await _trigger_auto_organize_and_wait(drive_index)
+                    run_id, run_status = await _trigger_auto_organize_and_wait(
+                        drive_index,
+                        source_cid=source_cid,
+                        source_name=source_dir,
+                    )
                     if run_id:
                         current["active_run_id"] = run_id
                         current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
@@ -1471,7 +1490,12 @@ async def _run_source_poll_loop():
                         logger.warning(f"[115Life] 源目录自动补跑达到上限，停止: key={session_key} reason=max_runs_exceeded 条目={entry_count}")
                         continue
                     logger.info(f"[115Life] 源目录仍有残留条目，继续自动补跑: key={session_key} reason=source_still_has_entries 残留条目数={entry_count}")
-                    run_id, run_status = await _trigger_auto_organize_and_wait(drive_index, source_tree_entries)
+                    run_id, run_status = await _trigger_auto_organize_and_wait(
+                        drive_index,
+                        source_tree_entries,
+                        source_cid=source_cid,
+                        source_name=source_dir,
+                    )
                 if run_id:
                     current["active_run_id"] = run_id
                     current["organize_runs"] = int(current.get("organize_runs", 0) or 0) + 1
@@ -1647,7 +1671,11 @@ async def _run_organize_async(run_id: str, req):
             except Exception as e:
                 logger.warning(f"[Wash] 统一移动洗版未通过文件失败: {e}")
 
-            _schedule_post_organize_followup(drive_index, str(source_cid))
+            _schedule_post_organize_followup(
+                drive_index,
+                str(source_cid),
+                str(config_data.get("source_name", "") or ""),
+            )
 
             try:
                 from app.services.emby_library_cache import schedule_discover_index_refresh
@@ -1659,6 +1687,17 @@ async def _run_organize_async(run_id: str, req):
 
     try:
         config_data = await _load_config_data()
+        req_source_cid = str(getattr(req, "source_cid", "") or "").strip()
+        req_source_name = str(getattr(req, "source_name", "") or "").strip()
+        if req_source_cid and req_source_cid != "0":
+            config_data = dict(config_data)
+            config_data["source_cid"] = req_source_cid
+            if req_source_name:
+                config_data["source_name"] = req_source_name
+            logger.info(
+                f"[MediaOrganize] 本次整理使用事件监控源目录: "
+                f"source_cid={req_source_cid}, source_name={req_source_name or '-'}"
+            )
         drive_index = req.drive_index or config_data.get("drive_index", 0)
         target_cid = config_data.get("target_cid", "0")
         source_cid = config_data.get("source_cid", "0")
@@ -3078,7 +3117,11 @@ async def _run_organize_async(run_id: str, req):
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
-            _schedule_post_organize_followup(drive_index, str(source_cid))
+            _schedule_post_organize_followup(
+                drive_index,
+                str(source_cid),
+                str(config_data.get("source_name", "") or ""),
+            )
             _clear_streaming_progress_throttle(run_id)
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
             return
@@ -4443,6 +4486,7 @@ def create_life_event_callback(
     target_dir: str = "",
     source_cid: str = "",
     target_cid: str = "",
+    monitor_dirs: Optional[List[dict]] = None,
 ) -> Callable:
     """创建带防抖和自动整理功能的 Life 事件回调
 
@@ -4458,6 +4502,49 @@ def create_life_event_callback(
     """
     source_cid_str = str(source_cid or "")
     target_cid_str = str(target_cid or "")
+    source_entries: list[dict] = []
+
+    def _add_source_entry(path: str, cid: str, name: str = ""):
+        normalized_path = _normalize_remote_path(path)
+        cid_str = str(cid or "").strip()
+        if not normalized_path or not cid_str or cid_str == "0":
+            return
+        if any(item.get("cid") == cid_str or item.get("path") == normalized_path for item in source_entries):
+            return
+        source_entries.append({
+            "path": normalized_path,
+            "cid": cid_str,
+            "name": str(name or os.path.basename(normalized_path) or normalized_path),
+        })
+
+    _add_source_entry(source_dir, source_cid_str, os.path.basename(_normalize_remote_path(source_dir)))
+    for monitor_dir in monitor_dirs or []:
+        if not isinstance(monitor_dir, dict) or monitor_dir.get("enabled", True) is False:
+            continue
+        _add_source_entry(
+            str(monitor_dir.get("path", "") or monitor_dir.get("name", "") or ""),
+            str(monitor_dir.get("cid", "") or ""),
+            str(monitor_dir.get("name", "") or ""),
+        )
+
+    def _path_in_source(path: str, entry: dict) -> bool:
+        source_path = str(entry.get("path", "") or "").rstrip("/")
+        normalized_path = _normalize_remote_path(path).rstrip("/")
+        return bool(source_path and normalized_path and (
+            normalized_path == source_path or normalized_path.startswith(source_path + "/")
+        ))
+
+    def _match_source(path: str = "", cid: str = "", parent_path: str = "") -> Optional[dict]:
+        cid = str(cid or "")
+        normalized_sources = sorted(source_entries, key=lambda item: len(str(item.get("path", ""))), reverse=True)
+        for entry in normalized_sources:
+            if cid and str(entry.get("cid", "")) == cid:
+                return entry
+        for candidate_path in (path, parent_path):
+            for entry in normalized_sources:
+                if _path_in_source(candidate_path, entry):
+                    return entry
+        return None
 
     def callback(
         file_path: str,
@@ -4474,9 +4561,13 @@ def create_life_event_callback(
         current_cid = str(file_cid or "")
         raw = raw_event or {}
 
-        path_in_source = bool(source_dir and (file_path == source_dir or file_path.startswith(source_dir + "/")))
+        source_match = _match_source(file_path, current_cid)
+        event_source_dir = str((source_match or {}).get("path", "") or source_dir)
+        event_source_cid = str((source_match or {}).get("cid", "") or source_cid_str)
+
+        path_in_source = bool(source_match and _path_in_source(file_path, source_match))
         path_in_target = bool(target_dir and (file_path == target_dir or file_path.startswith(target_dir + "/")))
-        cid_in_source = bool(source_cid_str and current_cid and current_cid == source_cid_str)
+        cid_in_source = bool(source_match and current_cid and current_cid == str(source_match.get("cid", "")))
         cid_in_target = bool(target_cid_str and current_cid and current_cid == target_cid_str)
 
         is_move_event = event_name in ("move_file", "move_image_file")
@@ -4487,24 +4578,30 @@ def create_life_event_callback(
         current_parent_path = ""
 
         if is_move_event:
+            parent_source = source_match or (source_entries[0] if source_entries else {})
             current_parent_path = _resolve_parent_path_for_move(
                 current_cid,
                 library_task_key,
-                source_dir,
+                str(parent_source.get("path", "") or source_dir),
                 target_dir,
-                source_cid_str,
+                str(parent_source.get("cid", "") or source_cid_str),
                 target_cid_str,
             )
             current_path_for_move = _join_remote_path(current_parent_path, file_name) if current_parent_path and file_name else ""
+            moved_source_match = _match_source(current_path_for_move or file_path, current_cid, current_parent_path)
+            if moved_source_match:
+                source_match = moved_source_match
+                event_source_dir = str(moved_source_match.get("path", "") or event_source_dir)
+                event_source_cid = str(moved_source_match.get("cid", "") or event_source_cid)
+                path_in_source = _path_in_source(file_path, moved_source_match) or _path_in_source(current_path_for_move, moved_source_match)
+                cid_in_source = bool(current_cid and current_cid == str(moved_source_match.get("cid", "")))
             current_in_target = bool(
                 current_parent_path and target_dir and (current_parent_path == target_dir or current_parent_path.startswith(target_dir + "/"))
             ) or cid_in_target
-            current_in_source = bool(
-                current_parent_path and source_dir and (current_parent_path == source_dir or current_parent_path.startswith(source_dir + "/"))
-            ) or cid_in_source or (not current_in_target and path_in_source)
+            current_in_source = bool(moved_source_match) or cid_in_source or (not current_in_target and path_in_source)
         else:
             current_path_for_move = str(file_path or "")
-            current_in_source = path_in_source
+            current_in_source = path_in_source or cid_in_source
             current_in_target = path_in_target
 
         is_source_organize_event = event_name in target_add_events and (
@@ -4795,9 +4892,9 @@ def create_life_event_callback(
 
         _schedule_or_refresh_source_poll(
             drive_index=drive_index,
-            source_dir=source_dir,
+            source_dir=event_source_dir,
             target_dir=target_dir,
-            source_cid=source_cid_str,
+            source_cid=event_source_cid,
         )
 
     return callback

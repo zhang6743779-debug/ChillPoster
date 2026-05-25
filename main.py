@@ -309,14 +309,16 @@ async def lifespan_ui(app: FastAPI):
                     logger.warning(f"[启动] 媒体整理源目录安全检查失败: {e}")
                 if not skip_life_monitor:
                     # 使用工厂函数创建回调（带防抖和自动整理）
-                    from app.routers.media_organize import create_life_event_callback
+                    from app.routers.media_organize import create_life_event_callback, _active_monitor_dirs_from_config
                     drive_idx = organize_cfg.get("drive_index", 0)
+                    monitor_dirs = _active_monitor_dirs_from_config(organize_cfg)
                     life_event_callback = create_life_event_callback(
                         source_dir,
                         drive_idx,
                         target_dir,
                         str(organize_cfg.get("source_cid", "")),
                         str(organize_cfg.get("target_cid", "")),
+                        monitor_dirs=monitor_dirs,
                     )
 
                     client, _ = await drive115_service.get_client(0)
@@ -327,6 +329,7 @@ async def lifespan_ui(app: FastAPI):
                             target_dir=target_dir,
                             callback=life_event_callback,
                             start_mode="latest",
+                            extra_source_dirs=monitor_dirs,
                         )
                         monitor.start()
                         logger.trace("[启动] 115 Life 事件监控已启动")

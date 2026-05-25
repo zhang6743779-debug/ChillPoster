@@ -1371,6 +1371,83 @@
                         </div>
                     </div>
 
+                    <div v-else-if="tab === 'organize_monitor_dirs'" key="organize_monitor_dirs" class="scroll-view">
+                        <div class="content-shell shell-lg">
+                            <div class="server-toolbar mb-20">
+                                <h2>整理监控目录</h2>
+                                <div class="server-toolbar-actions">
+                                    <button v-if="needs115Setup" class="btn btn-primary btn-sm" @click="open115ConfigPanel"><i class="fa-solid fa-cloud"></i> 配置 115</button>
+                                    <button class="btn btn-ghost btn-sm" @click="openMonitorDirBrowser" :disabled="needs115Setup">
+                                        <i class="fa-solid" :class="monitorDirBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                        {{ monitorDirBrowser.visible ? '关闭浏览' : '添加目录' }}
+                                    </button>
+                                    <button class="btn btn-primary btn-sm" @click="saveMonitorDirs" :disabled="needs115Setup || monitorDirsSaving">
+                                        <i class="fa-solid fa-save"></i> {{ monitorDirsSaving ? '保存中...' : '保存' }}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="needs115Setup" class="empty-state-card mb-20">
+                                请先完成 115 配置，再添加整理监控目录。
+                            </div>
+
+                            <template v-else>
+                                <div class="module-card mb-20">
+                                    <div class="mc-header">
+                                        <div class="mc-title"><i class="fa-solid fa-folder-tree"></i> 当前自动监控</div>
+                                        <label class="ios-switch" title="115事件监控">
+                                            <input type="checkbox" v-model="mediaOrganizeConfig.life_monitor_enabled" @change="saveMediaOrganizeConfig">
+                                            <span class="ios-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="mc-body mc-body-compact">
+                                        <div class="cleanup-folder-list">
+                                            <div class="cleanup-folder-chip">
+                                                <div>
+                                                    <strong>{{ mediaOrganizeConfig.source_name || '主整理目录未配置' }}</strong>
+                                                    <span>CID: {{ mediaOrganizeConfig.source_cid || '0' }}</span>
+                                                </div>
+                                                <span class="status-badge"><span class="dot ok"></span>主整理目录</span>
+                                            </div>
+                                            <div v-for="item in mediaOrganizeConfig.monitor_dirs" :key="item.cid" class="cleanup-folder-chip">
+                                                <div>
+                                                    <strong>{{ item.path || item.name }}</strong>
+                                                    <span>CID: {{ item.cid }}</span>
+                                                </div>
+                                                <div class="module-card-actions-compact">
+                                                    <label class="ios-switch" title="启停目录">
+                                                        <input type="checkbox" v-model="item.enabled">
+                                                        <span class="ios-slider"></span>
+                                                    </label>
+                                                    <button class="icon-btn danger" @click="removeMonitorDir(item.cid)" title="移除"><i class="fa-solid fa-xmark"></i></button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div v-if="!mediaOrganizeConfig.monitor_dirs.length" class="empty-state-card cleanup-empty mt-15">暂无额外监控目录</div>
+                                    </div>
+                                </div>
+
+                                <div v-if="monitorDirBrowser.visible" class="cleanup-browser mt-15">
+                                    <div class="cleanup-browser-header">
+                                        <button class="btn btn-ghost btn-sm" @click="monitorDirUp" :disabled="monitorDirBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                        <span>{{ monitorDirBrowser.currentPath }}</span>
+                                        <button class="btn btn-primary btn-sm" @click="addCurrentMonitorDir" :disabled="monitorDirBrowser.currentCid === '0'">选择当前目录</button>
+                                        <button class="btn btn-ghost btn-sm" @click="monitorDirBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                    </div>
+                                    <div class="cleanup-browser-list">
+                                        <div v-if="monitorDirBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                        <div v-else-if="monitorDirBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                        <div v-else v-for="dir in monitorDirBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectMonitorDir(dir)">
+                                            <i class="fa-solid fa-folder"></i>
+                                            <span>{{ dir.name }}</span>
+                                            <i class="fa-solid fa-chevron-right"></i>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
                     <div v-else-if="tab === 'webhook'" key="webhook" class="scroll-view">
                         <div class="content-shell shell-md">
 
@@ -6063,6 +6140,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'resource_transfer'}" @click="selectMobileTab('resource_transfer')"><i class="fa-solid fa-cloud-arrow-down"></i><span>转存</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'organize_history'}" @click="selectMobileTab('organize_history')"><i class="fa-solid fa-clock-rotate-left"></i><span>记录</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'organize_monitor_dirs'}" @click="selectMobileTab('organize_monitor_dirs')"><i class="fa-solid fa-folder-plus"></i><span>监控</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
