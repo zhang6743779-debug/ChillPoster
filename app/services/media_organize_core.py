@@ -61,6 +61,7 @@ from app.dependencies import ACTIVE_TASKS, set_task_detail, update_task_progress
 from core.logger import logger
 from core.media_library_cache import build_task_key, get_task_index, get_task_item_by_id, remove_items_by_path_prefix, remove_task_item_by_id, update_items_path_prefix, update_task_item_fields, upsert_task_item, upsert_dir_item, merge_task_items
 from core.meta.mediainfo import extract_wash_fields
+from core.season_naming import format_season_dir_name
 
 
 class _OrganizeCancelledError(Exception):
@@ -871,7 +872,7 @@ async def _evaluate_library_replacement(config_data: dict, drive_index: int,
         expected_name = _render_template(rename_format, variables) + ext
     else:
         season_num = season_number if season_number is not None else 1
-        candidate_dir = _join_remote_path(target_base, expected_folder, f"Season {season_num:02d}")
+        candidate_dir = _join_remote_path(target_base, expected_folder, format_season_dir_name(season_num))
         rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
         expected_name = _render_template(rename_format, variables) + ext
 
@@ -3951,7 +3952,7 @@ def _resolve_tv_target_names(variables: dict, config_data: dict, req) -> tuple[s
     folder_format = config_data.get("tv_folder_format", "{title} ({year}) [tmdbid-{tmdb_id}]")
     folder_name = _render_template(folder_format, variables)
     season_num = req.season_number if req.season_number is not None else 1
-    season_dir_name = f"Season {season_num:02d}"
+    season_dir_name = format_season_dir_name(season_num)
     return folder_name, season_num, season_dir_name
 
 

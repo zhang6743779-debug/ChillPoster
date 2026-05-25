@@ -280,6 +280,12 @@ async def lifespan_ui(app: FastAPI):
     except Exception as e:
         logger.warning(f"[启动] 发现页扩展源预热失败: {e}")
 
+    try:
+        from app.services.webhook_queue import start_webhook_queue_worker
+        start_webhook_queue_worker(webhook.process_webhook_payload)
+    except Exception as e:
+        logger.warning(f"[启动] Webhook 持久化队列 worker 启动失败: {e}")
+
     # [新增] 启动 115 生活事件监控
     try:
         from core.monitor115.monitor import create_monitor
@@ -341,6 +347,11 @@ async def lifespan_ui(app: FastAPI):
 
     yield
     # --- 关闭逻辑 ---
+    try:
+        from app.services.webhook_queue import stop_webhook_queue_worker
+        stop_webhook_queue_worker()
+    except Exception:
+        pass
     # 停止 115 Life 事件监控
     try:
         from core.monitor115.monitor import life_event_monitor

@@ -418,26 +418,65 @@ from core.configs import DEVICE_ID_FILE
 # Webhook 防抖管理器
 class WebhookDebouncer:
     def __init__(self, delay=20):
-        self.delay = delay 
+        self.delay = delay
         self.timers = {}
+        self.deadlines = {}
+        self.payloads = {}
+        self.running = set()
+        self.dirty = set()
         self.lock = threading.Lock()
 
     def schedule(self, library_id, func, *args, display_name=None, **kwargs):
+        now = time.time()
+        lib_text = display_name or library_id
         with self.lock:
-            if library_id in self.timers:
-                self.timers[library_id].cancel()
+            self.payloads[library_id] = (func, args, kwargs, lib_text)
+            self.deadlines[library_id] = now + self.delay
 
-            timer = Timer(self.delay, self._run, args=(library_id, func, args, kwargs))
+            if library_id in self.running:
+                self.dirty.add(library_id)
+                return
+
+            if library_id in self.timers:
+                return
+
+            timer = Timer(self.delay, self._run, args=(library_id,))
             self.timers[library_id] = timer
             timer.start()
-            lib_text = display_name or library_id
             logger.info(f"[Webhook] 已安排刷新封面 媒体库: {lib_text} ({self.delay}s后)")
 
-    def _run(self, library_id, func, args, kwargs):
+    def _run(self, library_id):
         with self.lock:
-            if library_id in self.timers:
-                del self.timers[library_id]
-        func(*args[0], **kwargs)
+            remaining = self.deadlines.get(library_id, time.time()) - time.time()
+            if remaining > 0.05:
+                timer = Timer(remaining, self._run, args=(library_id,))
+                self.timers[library_id] = timer
+                timer.start()
+                return
+
+            self.timers.pop(library_id, None)
+            payload = self.payloads.get(library_id)
+            if not payload:
+                self.deadlines.pop(library_id, None)
+                return
+            self.running.add(library_id)
+
+        func, args, kwargs, lib_text = payload
+        try:
+            func(*args[0], **kwargs)
+        finally:
+            with self.lock:
+                self.running.discard(library_id)
+                if library_id in self.dirty:
+                    self.dirty.discard(library_id)
+                    self.deadlines[library_id] = time.time() + self.delay
+                    timer = Timer(self.delay, self._run, args=(library_id,))
+                    self.timers[library_id] = timer
+                    timer.start()
+                    logger.info(f"[Webhook] 已安排补充刷新封面 媒体库: {lib_text} ({self.delay}s后)")
+                else:
+                    self.deadlines.pop(library_id, None)
+                    self.payloads.pop(library_id, None)
 
 # 全局防抖实例
 webhook_debouncer = WebhookDebouncer(delay=20)

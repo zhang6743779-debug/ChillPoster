@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 
 from core.logger import logger
+from core.season_naming import format_season_dir_name
 from app.services import media_organize_state as _state
 from app.services.media_organize_state import (
     _target_event_lock,
@@ -241,7 +242,7 @@ def _scrape_to_strm_local(tmdb_data, media_type, target_name, target_folder,
         dest_dir = os.path.join(matched_local, category_path or "", target_folder or "")
         series_dir = dest_dir
         if media_type in ("episode", "season") and season_number is not None:
-            dest_dir = os.path.join(dest_dir, f"Season {season_number:02d}")
+            dest_dir = os.path.join(dest_dir, format_season_dir_name(season_number))
         os.makedirs(dest_dir, exist_ok=True)
 
         organizer = MediaOrganizer(

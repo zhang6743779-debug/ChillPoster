@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, PrivateAttr
 from typing import Optional, List
 from core.logger import logger
+from core.season_naming import format_season_dir_name
 from app.dependencies import get_recent_interrupted_task, remove_task_progress, update_task_progress
 
 # Re-export from service modules for backward compatibility (main.py imports these)
@@ -360,7 +361,7 @@ def _build_identify_preview(tmdb_data: dict, parsed: dict, search_result: dict,
         folder_format = config_data.get("tv_folder_format", "{title} ({year}) {tmdb-{tmdb_id}}")
         rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
         folder_name = _render_template(folder_format, variables)
-        season_folder = f"Season {int(season_num or 1):02d}"
+        season_folder = format_season_dir_name(int(season_num or 1))
         file_name = (_render_template(rename_format, variables) + ext) if ext else ""
 
     folder_path = f"{target_base}/{folder_name}" if target_base and folder_name else (folder_name or target_base)

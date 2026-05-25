@@ -8,6 +8,7 @@ from app.schemas import WebhookConfigModel
 from app.dependencies import webhook_debouncer
 from app.routers.config_302 import get_emby_configs_sync
 from app.services.task_service import execute_task_logic
+from app.services.webhook_queue import enqueue_webhook_payload, get_webhook_queue_stats
 from app.services.wechat_service import wechat_notify_service
 from core.configs import WEBHOOK_CONFIG_FILE
 from core.emby_client import EmbyClient
@@ -222,6 +223,37 @@ async def emby_webhook_trigger(request: Request):
     except Exception as e:
         return {"status": "error", "reason": f"Payload Error: {e}"}
 
+    event_type = data.get("Event", "")
+    item_data = data.get("Item", {}) if isinstance(data.get("Item", {}), dict) else {}
+    target_item_id = item_data.get("Id")
+
+    if _is_emby_test_notification(data):
+        logger.info(
+            "[Webhook] webhook接收到emby测试通知: "
+            f"event={event_type or 'unknown'} title={data.get('Title', '')} "
+            f"description={str(data.get('Description', ''))[:120]}"
+        )
+        return {"status": "ok", "action": "emby_test_notification"}
+
+    allowed_events = ["library.new", "item.added", "library.scan_complete"]
+    delete_events = ["item.removed", "library.deleted", "deep.delete"]
+    if event_type not in allowed_events and event_type not in delete_events:
+        return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
+
+    try:
+        job_id = enqueue_webhook_payload(data, event_type=event_type, item_id=str(target_item_id or ""))
+        return {"status": "queued", "job_id": job_id}
+    except Exception as e:
+        logger.error(f"[WebhookQueue] Webhook 入队失败: {e}", exc_info=True)
+        return {"status": "error", "reason": f"Queue Error: {e}"}
+
+
+@router.get("/api/webhook/queue")
+def get_webhook_queue():
+    return get_webhook_queue_stats()
+
+
+def process_webhook_payload(data: dict):
     event_type = data.get("Event", "")
 
     if _is_emby_test_notification(data):

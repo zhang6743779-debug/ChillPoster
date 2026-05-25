@@ -27,6 +27,8 @@ from time import perf_counter
 
 import logging
 
+from core.season_naming import format_season_dir_name
+
 logger = logging.getLogger("ChillPoster.organizer")
 
 
@@ -508,8 +510,9 @@ class MediaOrganizer:
     ) -> OrganizeResult:
         series_name = tmdb_data.get("name", "Unknown")
 
-        # 目标季目录: SeriesDir/Season XX/
-        season_dir = series_dir / f"Season {season_number:02d}"
+        # 目标季目录: SeriesDir/Season 01/ 或 SeriesDir/Season 1/
+        season_dir_name = format_season_dir_name(season_number)
+        season_dir = series_dir / season_dir_name
         season_dir.mkdir(parents=True, exist_ok=True)
 
         # 规范化文件名: SeriesName SxxExx.ext
@@ -520,7 +523,7 @@ class MediaOrganizer:
 
         # 1. 转移视频
         self.transfer_media(str(src_video), str(dest_video))
-        logger.info(f"[Organizer] 单集已转移: {src_video.name} -> {series_name}/Season {season_number:02d}/{ep_filename}")
+        logger.info(f"[Organizer] 单集已转移: {src_video.name} -> {series_name}/{season_dir_name}/{ep_filename}")
 
         # 2. 生成单集元数据 (NFO 与视频同名 stem.nfo，参考 _handle_tv_episode_file)
         ep_stem = dest_video.stem  # "SeriesName S01E01"
@@ -546,12 +549,13 @@ class MediaOrganizer:
         season_number: int,
         overwrite: bool,
     ) -> OrganizeResult:
-        season_dir = series_dir / f"Season {season_number:02d}"
+        season_dir_name = format_season_dir_name(season_number)
+        season_dir = series_dir / season_dir_name
         season_dir.mkdir(parents=True, exist_ok=True)
 
         meta_files = self._scrape_season_dir(season_dir, tmdb_data, season_number, overwrite)
 
-        logger.info(f"[Organizer] 季元数据已生成: Season {season_number:02d}")
+        logger.info(f"[Organizer] 季元数据已生成: {season_dir_name}")
         return OrganizeResult(True, MediaType.SEASON, str(season_dir), metadata_files=meta_files)
 
     # ==========================================
