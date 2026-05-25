@@ -173,6 +173,25 @@ def _build_scraping_config(config_data: dict) -> "ScrapingConfig":
             policy_key = "fanart" if meta_type == "backdrop" else meta_type
             config.set_policy(media_type, policy_key, policy)
 
+    def apply_specific_policy(
+        media_type: str,
+        metadata_type: str,
+        policy_key: str,
+        enabled_key: str,
+        fallback_policy_key: str,
+        fallback_enabled_key: str,
+    ):
+        raw = config_data.get(policy_key, config_data.get(fallback_policy_key, 'missing_only'))
+        policy = policy_map.get(raw, ScrapingPolicy.MISSING_ONLY)
+        enabled = config_data.get(enabled_key, config_data.get(fallback_enabled_key, True))
+        if not enabled:
+            policy = ScrapingPolicy.SKIP
+        config.set_policy(media_type, metadata_type, policy)
+
+    # 专用配置项覆盖通用配置，主要用于 STRM 全量同步的“补齐缺失 TMDb 元数据”。
+    apply_specific_policy('season', 'poster', 'policy_season_poster', 'scrape_season_poster', 'policy_poster', 'scrape_poster')
+    apply_specific_policy('episode', 'thumb', 'policy_episode_thumb', 'scrape_episode_thumb', 'policy_thumb', 'scrape_thumb')
+
     return config
 
 

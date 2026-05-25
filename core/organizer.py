@@ -672,15 +672,17 @@ class MediaOrganizer:
             key = f"S{season_number}E{episode_number}"
             ep_data = episodes.get(key, {})
 
+        still_path = ep_data.get("still_path") if ep_data else None
+        thumb_filename = f"{ep_stem}-thumb.jpg" if still_path else ""
+
         # NFO: 与视频同名 stem.nfo (参考 _handle_tv_episode_file -> _get_target_fileitem_and_path)
         nfo_path = season_dir / f"{ep_stem}.nfo"
         if self.config.should_scrape(MediaType.EPISODE, MetadataType.NFO, nfo_path.exists()) or overwrite:
-            nfo_content = self._build_episode_nfo(tmdb_data, ep_data, season_number, episode_number)
+            nfo_content = self._build_episode_nfo(tmdb_data, ep_data, season_number, episode_number, thumb_filename)
             self.save_nfo(str(nfo_path), nfo_content)
             meta_files.append(str(nfo_path))
 
         # thumb: 与视频同名 stem-thumb.jpg (参考 EPISODE thumb 命名规则)
-        still_path = ep_data.get("still_path") if ep_data else None
         if still_path:
             thumb_path = season_dir / f"{ep_stem}-thumb.jpg"
             if self.config.should_scrape(MediaType.EPISODE, MetadataType.THUMB, thumb_path.exists()) or overwrite:
@@ -822,11 +824,12 @@ class MediaOrganizer:
         if "series_details" in tmdb_data:
             source = tmdb_data["series_details"]
 
-        # 顶层字段
+        # 顶层字段。thumb.jpg 没有独立 TMDb 字段，沿用 backdrop 作为横版缩略图。
         if media_type in (MediaType.MOVIE, MediaType.TV):
             for field_name, file_key, default_name in [
                 ("poster_path", "poster_path", "poster.jpg"),
                 ("backdrop_path", "backdrop_path", "fanart.jpg"),
+                ("backdrop_path", "backdrop_path", "thumb.jpg"),
             ]:
                 path = source.get(file_key)
                 if path:
@@ -927,7 +930,8 @@ class MediaOrganizer:
                 episodes = tmdb_data.get("episodes_details", {})
                 key = f"S{season_number}E{episode_number}"
                 ep_data = episodes.get(key, {})
-            content = self._build_episode_nfo(tmdb_data, ep_data or {}, season_number, episode_number)
+            thumb_filename = f"{stem or target_dir.stem}-thumb.jpg" if (ep_data or {}).get("still_path") else ""
+            content = self._build_episode_nfo(tmdb_data, ep_data or {}, season_number, episode_number, thumb_filename)
         else:
             return None
 
@@ -1062,6 +1066,7 @@ class MediaOrganizer:
         ep_data: Dict[str, Any],
         season_number: int,
         episode_number: int,
+        thumb_filename: str = "",
     ) -> str:
         """构建单集 episode.nfo XML 内容"""
         series_name = self._xml_escape(series_data.get("name", ""))
@@ -1075,6 +1080,7 @@ class MediaOrganizer:
 
         credits = ep_data.get("credits", {})
         cast_xml = self._build_cast_xml(credits.get("cast", [])[:10])
+        thumb_xml = f"  <thumb>{self._xml_escape(thumb_filename)}</thumb>\n" if thumb_filename else ""
 
         return f"""<?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <episodedetails>
@@ -1087,7 +1093,7 @@ class MediaOrganizer:
   <rating>{rating}</rating>
   <votes>{votes}</votes>
   <runtime>{runtime}</runtime>
-  <tmdbid>{tmdb_id}</tmdbid>
+{thumb_xml}  <tmdbid>{tmdb_id}</tmdbid>
 {cast_xml}</episodedetails>"""
 
     # ==========================================
