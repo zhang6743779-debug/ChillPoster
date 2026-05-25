@@ -239,9 +239,10 @@ def _normalize_identify_input(raw_input: str = "", folder_name: str = "", file_n
         base_name = os.path.basename(file_value.replace("\\", "/")) if file_value else ""
         folder_base = os.path.basename(folder.replace("\\", "/")) if folder else ""
         ext = os.path.splitext(base_name)[1].lower()
-        is_file = bool(base_name and ext and ext in VIDEO_EXTS)
-        if is_file:
-            file_path = f"/识别测试/{folder_base}/{base_name}" if folder_base else f"/识别测试/{base_name}"
+        is_video_file = bool(base_name and ext and ext in VIDEO_EXTS)
+        if base_name:
+            path_name = base_name if is_video_file else f"{base_name}.mkv"
+            file_path = f"/识别测试/{folder_base}/{path_name}" if folder_base else f"/识别测试/{path_name}"
             return {
                 "input": raw,
                 "folder_name": folder_base,
@@ -250,7 +251,7 @@ def _normalize_identify_input(raw_input: str = "", folder_name: str = "", file_n
                 "kind": "file",
                 "filename": base_name,
                 "file_path": file_path,
-                "ext": ext,
+                "ext": ext if is_video_file else "",
             }
 
         folder_title = folder_base or base_name

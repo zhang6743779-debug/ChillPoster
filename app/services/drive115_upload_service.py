@@ -646,7 +646,7 @@ class Drive115UploadService:
                 try:
                     self._process_upload(job)
                 except Exception as e:
-                    logger.error(f"[Drive115Upload] 上传失败 {job.get('path')}: {e}")
+                    logger.exception(f"[Drive115Upload] 上传失败 {job.get('path')}: {e}")
                     self._mark_failed(job, str(e))
                 finally:
                     self._finish_active_job(job)
@@ -703,17 +703,37 @@ class Drive115UploadService:
         upload_cid = self._resolve_upload_target_cid(client, job)
         job["upload_target_cid"] = str(upload_cid)
         self._update_active(job, "checking", 10, "正在尝试秒传")
-        result = P115MultipartUpload.from_path(
-            path,
-            pid=int(upload_cid),
-            filename=filename,
-            user_id=client.user_id,
-            user_key=client.user_key,
-            async_=False,
-        )
+        try:
+            result = P115MultipartUpload.from_path(
+                path,
+                pid=int(upload_cid),
+                filename=filename,
+                user_id=client.user_id,
+                user_key=client.user_key,
+                async_=False,
+            )
+        except Exception as e:
+            if not self._should_fallback_without_rapid(e):
+                raise
+            logger.warning(
+                f"[Drive115Upload] 秒传初始化异常，改用普通上传: "
+                f"{job.get('relative_path') or filename}: {e}",
+                exc_info=True,
+            )
+            self._upload_without_rapid(client, job, upload_cid, filename, e)
+            return
         if isinstance(result, dict):
             if result.get("state") is False:
-                raise RuntimeError(result.get("error") or result.get("message") or "秒传初始化失败")
+                error = result.get("error") or result.get("message") or "秒传初始化失败"
+                rapid_error = RuntimeError(error)
+                if self._should_fallback_without_rapid(rapid_error):
+                    logger.warning(
+                        f"[Drive115Upload] 秒传初始化返回异常，改用普通上传: "
+                        f"{job.get('relative_path') or filename}: {error}"
+                    )
+                    self._upload_without_rapid(client, job, upload_cid, filename, rapid_error)
+                    return
+                raise rapid_error
             file_id = self._extract_file_id(result)
             _check_and_move(client, file_id, upload_cid, filename, reused=True)
             self._mark_success(job, method="rapid", message="秒传成功")
@@ -745,6 +765,34 @@ class Drive115UploadService:
         _check_and_move(client, file_id, upload_cid, filename, reused=False)
         self._mark_success(job, method="multipart", message="真实上传成功")
         logger.info(f"[Drive115Upload] 真实上传成功: {job.get('relative_path') or filename} -> cid={upload_cid}")
+
+    def _should_fallback_without_rapid(self, error: Exception) -> bool:
+        message = str(error or "").lower()
+        return (
+            "index out of bounds" in message
+            or "out of bounds on dimension" in message
+            or "sign_check" in message
+        )
+
+    def _upload_without_rapid(self, client, job: dict[str, Any], upload_cid: str, filename: str, rapid_error: Exception) -> None:
+        path = str(job.get("path") or "")
+        self._update_active(job, "uploading", 15, "秒传校验异常，改用普通上传", uploaded=0)
+        result = client.upload_file_sample(
+            path,
+            pid=int(upload_cid),
+            filename=filename,
+            async_=False,
+        )
+        if not isinstance(result, dict) or result.get("state") is False:
+            error = "普通上传无响应"
+            if isinstance(result, dict):
+                error = result.get("error") or result.get("message") or error
+            raise RuntimeError(f"秒传校验异常且普通上传失败: {error}") from rapid_error
+        self._update_active(job, "uploading", 99, "正在完成上传", uploaded=int(job.get("size") or 0))
+        file_id = self._extract_file_id(result)
+        _check_and_move(client, file_id, upload_cid, filename, reused=False)
+        self._mark_success(job, method="multipart", message="秒传校验异常，已改用普通上传成功")
+        logger.info(f"[Drive115Upload] 普通上传兜底成功: {job.get('relative_path') or filename} -> cid={upload_cid}")
 
     def _resolve_upload_target_cid(self, client, job: dict[str, Any]) -> str:
         target_cid = str(job.get("target_cid") or "")
