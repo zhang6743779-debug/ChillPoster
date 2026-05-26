@@ -39,9 +39,24 @@ export function useStrmConfig({ needs115Setup, notify115SetupRequired, showToast
             downloaded: 0,
             downloaded_dirs: 0,
             download_failed: 0,
+            strm_generated: 0,
+            subtitle_downloaded: 0,
+            aux_downloaded: 0,
+            subtitle_download_failed: 0,
+            aux_download_failed: 0,
+            strm_skipped: 0,
+            subtitle_skipped: 0,
+            aux_skipped: 0,
+            video_min_size_skipped: 0,
+            out_of_scope_skipped: 0,
+            other_skipped: 0,
+            tmdb_generated: 0,
+            tmdb_skipped: 0,
+            tmdb_failed: 0,
             skipped: 0,
             skip_reasons: {},
             failed: 0,
+            last_status: '',
             last_result: ''
         });
 
@@ -149,18 +164,9 @@ export function useStrmConfig({ needs115Setup, notify115SetupRequired, showToast
                     strmProgress.running = true;
                     strmProgress.run_id = res.data.run_id;
                     strmProgress.percent = 0;
-                    strmProgress.status_text = mode === 'full' ? '全量同步中...' : '增量同步中...';
-                    strmProgress.scanned = 0;
-                    strmProgress.scanned_dirs = 0;
-                    strmProgress.scanned_files = 0;
-                    strmProgress.generated = 0;
-                    strmProgress.generated_dirs = 0;
-                    strmProgress.downloaded = 0;
-                    strmProgress.downloaded_dirs = 0;
-                    strmProgress.download_failed = 0;
-                    strmProgress.skipped = 0;
-                    strmProgress.skip_reasons = {};
-                    strmProgress.failed = 0;
+                    strmProgress.status_text = mode === 'full' ? '运行同步中...' : '增量事件处理中...';
+                    resetStrmProgressStats();
+                    strmProgress.last_status = '';
                     strmProgress.last_result = '';
                     showToast(res.data.message, 'success');
                     startStrmPolling();
@@ -183,6 +189,71 @@ export function useStrmConfig({ needs115Setup, notify115SetupRequired, showToast
             }
         };
 
+        const resetStrmProgressStats = () => {
+            Object.assign(strmProgress, {
+                scanned: 0,
+                scanned_dirs: 0,
+                scanned_files: 0,
+                generated: 0,
+                generated_dirs: 0,
+                downloaded: 0,
+                downloaded_dirs: 0,
+                download_failed: 0,
+                strm_generated: 0,
+                subtitle_downloaded: 0,
+                aux_downloaded: 0,
+                subtitle_download_failed: 0,
+                aux_download_failed: 0,
+                strm_skipped: 0,
+                subtitle_skipped: 0,
+                aux_skipped: 0,
+                video_min_size_skipped: 0,
+                out_of_scope_skipped: 0,
+                other_skipped: 0,
+                tmdb_generated: 0,
+                tmdb_skipped: 0,
+                tmdb_failed: 0,
+                skipped: 0,
+                skip_reasons: {},
+                failed: 0,
+            });
+        };
+
+        const applyStrmProgressDetail = (detail = {}) => {
+            strmProgress.scanned = detail.scanned || 0;
+            strmProgress.scanned_dirs = detail.scanned_dirs || 0;
+            strmProgress.scanned_files = detail.scanned_files || 0;
+            strmProgress.generated = detail.generated || 0;
+            strmProgress.generated_dirs = detail.generated_dirs || 0;
+            strmProgress.downloaded = detail.downloaded || 0;
+            strmProgress.downloaded_dirs = detail.downloaded_dirs || 0;
+            strmProgress.download_failed = detail.download_failed || 0;
+            strmProgress.strm_generated = detail.strm_generated ?? detail.generated ?? 0;
+            strmProgress.subtitle_downloaded = detail.subtitle_downloaded || 0;
+            strmProgress.aux_downloaded = detail.aux_downloaded || 0;
+            strmProgress.subtitle_download_failed = detail.subtitle_download_failed || 0;
+            strmProgress.aux_download_failed = detail.aux_download_failed || 0;
+            strmProgress.strm_skipped = detail.strm_skipped || 0;
+            strmProgress.subtitle_skipped = detail.subtitle_skipped || 0;
+            strmProgress.aux_skipped = detail.aux_skipped || 0;
+            strmProgress.video_min_size_skipped = detail.video_min_size_skipped || 0;
+            strmProgress.out_of_scope_skipped = detail.out_of_scope_skipped || 0;
+            strmProgress.other_skipped = detail.other_skipped || 0;
+            strmProgress.tmdb_generated = detail.tmdb_generated || 0;
+            strmProgress.tmdb_skipped = detail.tmdb_skipped || 0;
+            strmProgress.tmdb_failed = detail.tmdb_failed || 0;
+            strmProgress.skipped = detail.skipped || 0;
+            strmProgress.skip_reasons = detail.skip_reasons || {};
+            strmProgress.failed = detail.failed || 0;
+        };
+
+        const getStrmResultTitle = (status) => {
+            if (status === 'finished') return '同步完成';
+            if (status === 'stopped') return '同步已取消';
+            if (status === 'error') return '同步异常';
+            return '同步任务已结束';
+        };
+
         const startStrmPolling = () => {
             stopStrmPolling();
             strmPollTimer = setInterval(async () => {
@@ -198,22 +269,13 @@ export function useStrmConfig({ needs115Setup, notify115SetupRequired, showToast
                             const detail = task.detail || {};
                             strmProgress.percent = Math.round(task.percent || 0);
                             strmProgress.status_text = task.cancel_requested ? '正在取消...' : (task.name || '');
-                            strmProgress.scanned = detail.scanned || 0;
-                            strmProgress.scanned_dirs = detail.scanned_dirs || 0;
-                            strmProgress.scanned_files = detail.scanned_files || 0;
-                            strmProgress.generated = detail.generated || 0;
-                            strmProgress.generated_dirs = detail.generated_dirs || 0;
-                            strmProgress.downloaded = detail.downloaded || 0;
-                            strmProgress.downloaded_dirs = detail.downloaded_dirs || 0;
-                            strmProgress.download_failed = detail.download_failed || 0;
-                            strmProgress.skipped = detail.skipped || 0;
-                            strmProgress.skip_reasons = detail.skip_reasons || {};
-                            strmProgress.failed = detail.failed || 0;
+                            applyStrmProgressDetail(detail);
 
                             if (task.status === 'finished' || task.status === 'error' || task.status === 'stopped') {
                                 strmProgress.running = false;
-                                const label = task.status === 'finished' ? '完成' : (task.status === 'stopped' ? '已取消' : '异常');
-                                strmProgress.last_result = `同步${label}: 扫描 ${strmProgress.scanned} | 生成 ${strmProgress.generated} | 下载 ${strmProgress.downloaded} | 失败 ${strmProgress.failed}`;
+                                strmProgress.last_status = task.status;
+                                if (task.status === 'finished') strmProgress.percent = 100;
+                                strmProgress.last_result = getStrmResultTitle(task.status);
                                 stopStrmPolling();
                             }
                             break;
@@ -223,6 +285,8 @@ export function useStrmConfig({ needs115Setup, notify115SetupRequired, showToast
                     if (!found && strmProgress.running) {
                         // 任务已从活动列表消失
                         strmProgress.running = false;
+                        strmProgress.last_status = 'finished';
+                        strmProgress.percent = 100;
                         strmProgress.last_result = '同步任务已完成';
                         stopStrmPolling();
                     }

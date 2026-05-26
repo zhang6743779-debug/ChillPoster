@@ -2621,16 +2621,30 @@
                                             <span>{{ organizeProgress.status_text }}</span>
                                             <span>{{ organizeProgress.percent }}%</span>
                                         </div>
-                                        <div v-if="organizeProgress.detail" class="organize-progress-detail">
-                                            <span>总计 {{ organizeProgress.detail.total || 0 }}</span>
-                                            <span class="transfer-status-success">成功 {{ organizeProgress.detail.success || 0 }}</span>
-                                            <span class="transfer-status-error">失败 {{ organizeProgress.detail.failed || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.sha1_duplicate_skipped" class="transfer-status-info">SHA1重复 {{ organizeProgress.detail.sha1_duplicate_skipped || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.wash_rejected_skipped" class="transfer-status-info">洗版未通过 {{ organizeProgress.detail.wash_rejected_skipped || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.same_batch_duplicate_skipped" class="transfer-status-info">同批次重复 {{ organizeProgress.detail.same_batch_duplicate_skipped || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.trailer_skipped" class="transfer-status-info">预告片 {{ organizeProgress.detail.trailer_skipped || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.other_skipped" class="transfer-status-info">其他跳过 {{ organizeProgress.detail.other_skipped || 0 }}</span>
-                                            <span v-if="organizeProgress.detail.strm" class="transfer-status-info">STRM {{ organizeProgress.detail.strm || 0 }}</span>
+                                        <div v-if="organizeProgress.detail" class="organize-progress-summary-grid">
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">处理</span>
+                                                <span>总数 <b>{{ organizeProgress.detail.total || 0 }}</b></span>
+                                                <span>已处理 <b class="info">{{ organizeProgress.detail.processed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">结果</span>
+                                                <span>成功 <b class="ok">{{ organizeProgress.detail.success || 0 }}</b></span>
+                                                <span>失败 <b class="danger">{{ organizeProgress.detail.failed || 0 }}</b></span>
+                                                <span>跳过 <b class="warn">{{ organizeProgress.detail.skipped || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">跳过原因</span>
+                                                <span>SHA1重复 <b class="warn">{{ organizeProgress.detail.sha1_duplicate_skipped || 0 }}</b></span>
+                                                <span>洗版未通过 <b class="warn">{{ organizeProgress.detail.wash_rejected_skipped || 0 }}</b></span>
+                                                <span>同批次重复 <b class="warn">{{ organizeProgress.detail.same_batch_duplicate_skipped || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">附加</span>
+                                                <span>预告片 <b class="warn">{{ organizeProgress.detail.trailer_skipped || 0 }}</b></span>
+                                                <span>其他跳过 <b class="warn">{{ organizeProgress.detail.other_skipped || 0 }}</b></span>
+                                                <span>STRM <b class="info">{{ organizeProgress.detail.strm || 0 }}</b></span>
+                                            </div>
                                         </div>
                                     </div>
 
@@ -2638,6 +2652,31 @@
                                         <div class="organize-result-row">
                                             <i class="fa-solid" :class="organizeResult.status === 'success' ? 'fa-circle-check transfer-status-success' : (organizeResult.status === 'error' ? 'fa-circle-xmark transfer-status-error' : 'fa-circle-exclamation transfer-status-warning')"></i>
                                             <span class="organize-result-message">{{ organizeResult.message }}</span>
+                                        </div>
+                                        <div v-if="organizeResult.detail" class="organize-progress-summary-grid organize-progress-summary-grid-result">
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">处理</span>
+                                                <span>总数 <b>{{ organizeResult.detail.total || 0 }}</b></span>
+                                                <span>已处理 <b class="info">{{ organizeResult.detail.processed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">结果</span>
+                                                <span>成功 <b class="ok">{{ organizeResult.detail.success || 0 }}</b></span>
+                                                <span>失败 <b class="danger">{{ organizeResult.detail.failed || 0 }}</b></span>
+                                                <span>跳过 <b class="warn">{{ organizeResult.detail.skipped || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">跳过原因</span>
+                                                <span>SHA1重复 <b class="warn">{{ organizeResult.detail.sha1_duplicate_skipped || 0 }}</b></span>
+                                                <span>洗版未通过 <b class="warn">{{ organizeResult.detail.wash_rejected_skipped || 0 }}</b></span>
+                                                <span>同批次重复 <b class="warn">{{ organizeResult.detail.same_batch_duplicate_skipped || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">附加</span>
+                                                <span>预告片 <b class="warn">{{ organizeResult.detail.trailer_skipped || 0 }}</b></span>
+                                                <span>其他跳过 <b class="warn">{{ organizeResult.detail.other_skipped || 0 }}</b></span>
+                                                <span>STRM <b class="info">{{ organizeResult.detail.strm || 0 }}</b></span>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -2731,17 +2770,17 @@
                                         </template>
 
                                         <div class="strm-overwrite-row">
-                                            <span class="strm-overwrite-label">strm文件本地存在时</span>
+                                            <span class="strm-overwrite-label">运行模式</span>
                                             <div class="strm-overwrite-segmented">
-                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite === 'overwrite' }" @click="task.overwrite = 'overwrite'">覆盖生成</button>
-                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite !== 'overwrite' }" @click="task.overwrite = 'skip'">直接跳过</button>
+                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite === 'overwrite' }" @click="task.overwrite = 'overwrite'">全量模式</button>
+                                                <button type="button" class="strm-overwrite-option" :class="{ active: task.overwrite !== 'overwrite' }" @click="task.overwrite = 'skip'">增量模式</button>
                                             </div>
                                         </div>
 
                                         <div class="strm-task-actions">
                                             <div class="strm-task-actions-left">
                                                 <button class="btn btn-primary btn-sm" @click="startStrmSync(idx, 'full')" :disabled="strmProgress.running">
-                                                    <i class="fa-solid fa-play"></i> 全量同步
+                                                    <i class="fa-solid fa-play"></i> 运行同步
                                                 </button>
                                             </div>
                                             <div class="strm-task-actions-right">
@@ -2776,18 +2815,43 @@
                                                 <div class="strm-progress-fill" :style="{width: strmProgress.percent + '%'}"></div>
                                             </div>
                                         </div>
-                                        <div class="strm-progress-stats">
-                                            <span>已扫描: <b>{{ strmProgress.scanned }}</b></span>
-                                            <span>文件夹数量: <b>{{ strmProgress.scanned_dirs }}</b></span>
-                                            <span>已生成: <b class="ok">{{ strmProgress.generated }}</b></span>
-                                            <span>已下载: <b class="info">{{ strmProgress.downloaded }}</b></span>
-                                            <span>下载失败: <b class="danger">{{ strmProgress.download_failed }}</b></span>
-                                            <span>已跳过: <b class="warn">{{ strmProgress.skipped }}</b></span>
-                                            <span>失败: <b class="danger">{{ strmProgress.failed }}</b></span>
-                                        </div>
-                                        <div v-if="Object.keys(strmProgress.skip_reasons || {}).length > 0" class="strm-progress-stats">
-                                            <span>跳过明细:</span>
-                                            <span v-for="(count, reason) in strmProgress.skip_reasons" :key="reason">{{ reason }} <b class="warn">{{ count }}</b></span>
+                                        <div class="strm-progress-summary-grid">
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">扫描</span>
+                                                <span>总数 <b>{{ strmProgress.scanned }}</b></span>
+                                                <span>文件夹 <b>{{ strmProgress.scanned_dirs }}</b></span>
+                                                <span>文件 <b>{{ strmProgress.scanned_files }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">STRM</span>
+                                                <span>生成 <b class="ok">{{ strmProgress.strm_generated }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.strm_skipped }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">字幕</span>
+                                                <span>下载 <b class="info">{{ strmProgress.subtitle_downloaded }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.subtitle_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.subtitle_download_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">附属</span>
+                                                <span>下载 <b class="info">{{ strmProgress.aux_downloaded }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.aux_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.aux_download_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">TMDb</span>
+                                                <span>补齐 <b class="ok">{{ strmProgress.tmdb_generated }}</b></span>
+                                                <span>跳过 <b class="warn">{{ strmProgress.tmdb_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.tmdb_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">汇总</span>
+                                                <span>文件跳过 <b class="warn">{{ strmProgress.skipped }}</b></span>
+                                                <span>任务失败 <b class="danger">{{ strmProgress.failed }}</b></span>
+                                                <span v-if="strmProgress.out_of_scope_skipped">不同步 <b class="warn">{{ strmProgress.out_of_scope_skipped }}</b></span>
+                                                <span v-if="strmProgress.other_skipped">其他 <b class="warn">{{ strmProgress.other_skipped }}</b></span>
+                                            </div>
                                         </div>
                                         <div class="strm-progress-actions">
                                             <button class="btn btn-danger btn-sm" @click="stopStrmSync">
@@ -2796,7 +2860,52 @@
                                         </div>
                                     </div>
                                     <div v-else-if="strmProgress.last_result" class="strm-progress-result">
-                                        <span>{{ strmProgress.last_result }}</span>
+                                        <div class="strm-progress-result-head">
+                                            <span>
+                                                <i class="fa-solid"
+                                                   :class="strmProgress.last_status === 'error' ? 'fa-circle-xmark danger' : (strmProgress.last_status === 'stopped' ? 'fa-circle-stop warn' : 'fa-circle-check ok')"></i>
+                                                {{ strmProgress.last_result }}
+                                            </span>
+                                            <span>{{ strmProgress.percent }}%</span>
+                                        </div>
+                                        <div class="strm-progress-summary-grid strm-progress-summary-grid-result">
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">扫描</span>
+                                                <span>总数 <b>{{ strmProgress.scanned }}</b></span>
+                                                <span>文件夹 <b>{{ strmProgress.scanned_dirs }}</b></span>
+                                                <span>文件 <b>{{ strmProgress.scanned_files }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">STRM</span>
+                                                <span>生成 <b class="ok">{{ strmProgress.strm_generated }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.strm_skipped }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">字幕</span>
+                                                <span>下载 <b class="info">{{ strmProgress.subtitle_downloaded }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.subtitle_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.subtitle_download_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">附属</span>
+                                                <span>下载 <b class="info">{{ strmProgress.aux_downloaded }}</b></span>
+                                                <span>已存在 <b class="warn">{{ strmProgress.aux_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.aux_download_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">TMDb</span>
+                                                <span>补齐 <b class="ok">{{ strmProgress.tmdb_generated }}</b></span>
+                                                <span>跳过 <b class="warn">{{ strmProgress.tmdb_skipped }}</b></span>
+                                                <span>失败 <b class="danger">{{ strmProgress.tmdb_failed }}</b></span>
+                                            </div>
+                                            <div class="strm-progress-summary-group">
+                                                <span class="strm-progress-summary-title">汇总</span>
+                                                <span>文件跳过 <b class="warn">{{ strmProgress.skipped }}</b></span>
+                                                <span>任务失败 <b class="danger">{{ strmProgress.failed }}</b></span>
+                                                <span v-if="strmProgress.out_of_scope_skipped">不同步 <b class="warn">{{ strmProgress.out_of_scope_skipped }}</b></span>
+                                                <span v-if="strmProgress.other_skipped">其他 <b class="warn">{{ strmProgress.other_skipped }}</b></span>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

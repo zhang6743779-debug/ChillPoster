@@ -76,31 +76,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             if (task.status === 'interrupted') {
                 return task.resume_message || task.name || '整理已中断';
             }
-            const detail = task.detail || {};
-            const total = Number(detail.total || 0);
-            const success = Number(detail.success || 0);
-            const failed = Number(detail.failed || 0);
-            const skipped = Number(detail.skipped || 0);
-            const processed = Number(detail.processed ?? (success + failed + skipped));
-            const parts = [];
-            if (total || processed) parts.push(`已处理 ${processed}/${total || processed}`);
-            parts.push(`成功 ${success}`);
-            parts.push(`失败 ${failed}`);
-            if (Number(detail.wash_rejected_skipped || 0)) parts.push(`洗版未通过 ${detail.wash_rejected_skipped}`);
-            if (Number(detail.sha1_duplicate_skipped || 0)) parts.push(`SHA1重复 ${detail.sha1_duplicate_skipped}`);
-            if (Number(detail.same_batch_duplicate_skipped || 0)) parts.push(`同批次重复 ${detail.same_batch_duplicate_skipped}`);
-            if (Number(detail.trailer_skipped || 0)) parts.push(`预告片 ${detail.trailer_skipped}`);
-            if (Number(detail.other_skipped || 0)) parts.push(`其他跳过 ${detail.other_skipped}`);
-            if (
-                skipped
-                && !detail.wash_rejected_skipped
-                && !detail.sha1_duplicate_skipped
-                && !detail.same_batch_duplicate_skipped
-                && !detail.trailer_skipped
-                && !detail.other_skipped
-            ) parts.push(`跳过 ${skipped}`);
-            if (Number(detail.strm || 0)) parts.push(`STRM ${detail.strm}`);
-            return `整理${label}: ${parts.join(' | ')}`;
+            return `整理${label}`;
         };
 
         const syncOrganizeTaskFromTaskMap = (tasks, { adoptRunning = false } = {}) => {

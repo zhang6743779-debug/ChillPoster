@@ -3972,6 +3972,39 @@ html[data-theme="light"] .transfer-history-row:hover {
 .organize-progress { margin-top: 15px; }
 .organize-progress-meta { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: #94a3b8; margin-top: 4px; }
 .organize-progress-detail { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: #94a3b8; margin-top: 2px; }
+.organize-progress-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+.organize-progress-summary-grid-result {
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+}
+.organize-progress-summary-group {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.16);
+    color: #94a3b8;
+    font-size: 12px;
+}
+.organize-progress-summary-title {
+    color: var(--color-text-main);
+    font-size: 13px;
+    font-weight: 800;
+}
+.organize-progress-summary-group b {
+    color: var(--color-text-main);
+}
+.organize-progress-summary-group .ok { color: #22c55e; }
+.organize-progress-summary-group .info { color: #3b82f6; }
+.organize-progress-summary-group .warn { color: #f59e0b; }
+.organize-progress-summary-group .danger { color: #ef4444; }
 .organize-result { margin-top: 15px; background: rgba(0,0,0,0.2); border-radius: 8px; padding: 12px; }
 .organize-result-row { display: flex; align-items: center; gap: 8px; }
 .organize-result-message { font-size: 14px; font-weight: 600; color: #e2e8f0; }
@@ -4707,12 +4740,73 @@ html[data-theme="light"] .media-rules-page .subclass-preview-card {
 .strm-progress-stats .info { color: #3b82f6; }
 .strm-progress-stats .warn { color: #f59e0b; }
 .strm-progress-stats .danger { color: #ef4444; }
+.strm-progress-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+.strm-progress-summary-group {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.16);
+    color: #94a3b8;
+    font-size: 12px;
+}
+.strm-progress-summary-title {
+    color: var(--color-text-main);
+    font-size: 13px;
+    font-weight: 800;
+}
+.strm-progress-summary-group b {
+    color: var(--color-text-main);
+}
+.strm-progress-summary-group .ok { color: #22c55e; }
+.strm-progress-summary-group .info { color: #3b82f6; }
+.strm-progress-summary-group .warn { color: #f59e0b; }
+.strm-progress-summary-group .danger { color: #ef4444; }
 .strm-progress-actions {
     margin-top: 10px;
 }
 .strm-progress-result {
     font-size: 13px;
     color: #94a3b8;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+}
+.strm-progress-result-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    color: var(--color-text-main);
+    font-size: 14px;
+    font-weight: 800;
+}
+.strm-progress-result-head span:first-child {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 7px;
+}
+.strm-progress-result-head span:last-child {
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+    font-size: 12px;
+    font-weight: 800;
+}
+.strm-progress-result-head .ok { color: #22c55e; }
+.strm-progress-result-head .warn { color: #f59e0b; }
+.strm-progress-result-head .danger { color: #ef4444; }
+.strm-progress-summary-grid-result {
+    margin-top: 0;
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
 }
 
 /* === 302 配置页 === */

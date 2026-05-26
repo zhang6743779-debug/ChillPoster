@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import threading
+from copy import deepcopy
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -18,6 +19,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("EmbyClient")
+
+DEFAULT_LIBRARY_LOCALE_OPTIONS = {
+    "PreferredMetadataLanguage": "zh",
+    "MetadataCountryCode": "CN",
+    "PreferredImageLanguage": "zh",
+}
 
 class EmbyClient:
     """
@@ -727,6 +734,7 @@ class EmbyClient:
         
         if enable_scrapers:
             lib_options = {
+                **DEFAULT_LIBRARY_LOCALE_OPTIONS,
                 "EnableArchiveMediaFiles": False,
                 "EnablePhotos": False,
                 "EnableRealtimeMonitor": True,
@@ -747,6 +755,7 @@ class EmbyClient:
             }
         else:
             lib_options = {
+                **DEFAULT_LIBRARY_LOCALE_OPTIONS,
                 "EnableArchiveMediaFiles": False,
                 "EnablePhotos": False,
                 "EnableRealtimeMonitor": True,
@@ -785,6 +794,105 @@ class EmbyClient:
         except Exception as e:
             logger.error(f"创建媒体库失败: {e}")
         return None, False
+
+    def fix_library_locale_defaults(self, overwrite=False):
+        """
+        一次性修复已有媒体库的语言/地区设置。
+        overwrite=False 时只填充空白值，避免覆盖用户手动设置。
+        """
+        results = []
+        updated_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        try:
+            data = self._request("GET", "emby/Library/VirtualFolders/Query")
+        except Exception:
+            data = self._request("GET", "emby/Library/VirtualFolders")
+
+        if isinstance(data, dict):
+            folders = data.get("Items") or []
+        else:
+            folders = data
+        if not isinstance(folders, list):
+            return {
+                "updated": 0,
+                "skipped": 0,
+                "failed": 0,
+                "items": results,
+            }
+
+        for folder in folders:
+            if not isinstance(folder, dict):
+                continue
+
+            lib_id = str(folder.get("ItemId") or folder.get("Id") or "").strip()
+            lib_name = str(folder.get("Name") or "").strip() or lib_id
+            options = folder.get("LibraryOptions")
+
+            if not lib_id or not isinstance(options, dict):
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "missing_library_options",
+                })
+                continue
+
+            next_options = deepcopy(options)
+            changed_fields = []
+            for key, value in DEFAULT_LIBRARY_LOCALE_OPTIONS.items():
+                current = next_options.get(key)
+                if overwrite or current is None or str(current).strip() == "":
+                    if current != value:
+                        next_options[key] = value
+                        changed_fields.append(key)
+
+            if not changed_fields:
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "already_set",
+                })
+                continue
+
+            try:
+                self._request(
+                    "POST",
+                    "emby/Library/VirtualFolders/LibraryOptions",
+                    json={
+                        "Id": lib_id,
+                        "LibraryOptions": next_options,
+                    },
+                )
+                updated_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "updated",
+                    "changed_fields": changed_fields,
+                })
+                logger.info(f"已修复媒体库语言/地区设置: {lib_name} ({lib_id})")
+            except Exception as e:
+                failed_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "failed",
+                    "message": str(e),
+                    "changed_fields": changed_fields,
+                })
+                logger.warning(f"修复媒体库语言/地区设置失败: {lib_name} ({lib_id}) -> {e}")
+
+        return {
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "failed": failed_count,
+            "items": results,
+        }
     
     def delete_library(self, library_id):
         """

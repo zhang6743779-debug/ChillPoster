@@ -399,7 +399,7 @@ createApp({
 
         const dashboardTaskCategoryConfig = [
             { key: 'media_organize', title: '媒体整理', desc: '扫描整理媒体目录', icon: 'fa-folder-tree', action: '手动整理' },
-            { key: 'strm', title: 'STRM 同步', desc: '全量同步 STRM 文件', icon: 'fa-file-code', action: '全量同步' },
+            { key: 'strm', title: 'STRM 同步', desc: '运行 STRM 同步任务', icon: 'fa-file-code', action: '运行同步' },
             { key: 'cover', title: '封面任务', desc: '封面生成、应用与备份', icon: 'fa-images', action: '运行任务' },
             { key: 'rss', title: 'RSS 同步', desc: '订阅任务同步记录', icon: 'fa-rss', action: '查看' },
             { key: 'real_library', title: '独立真实库', desc: '独立 RSS 真实库同步记录', icon: 'fa-hard-drive', action: '查看' },

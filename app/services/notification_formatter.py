@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 18
+TEMPLATE_VERSION = 22
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -80,16 +80,29 @@ DEFAULT_TEMPLATES = {
                 "{% if already_count %}\n🔄 已签：{{ already_count }}{% endif %}"
                 "{% if failed %}\n❌ 失败：{{ failed }}{% endif %}"
                 "{% endif %}"
+                "{% if is_strm_task %}"
+                "{% if scanned %}\n📦 扫描：{{ scanned }}{% endif %}"
+                "{% if scanned_dirs %}\n📁 文件夹：{{ scanned_dirs }}{% endif %}"
+                "\n🎞️ STRM：生成 {{ strm_generated }} / 已存在 {{ strm_skipped }}"
+                "\n💬 字幕：下载 {{ subtitle_downloaded }} / 已存在 {{ subtitle_skipped }} / 失败 {{ subtitle_download_failed }}"
+                "\n🧾 附属：下载 {{ aux_downloaded }} / 已存在 {{ aux_skipped }} / 失败 {{ aux_download_failed }}"
+                "{% if out_of_scope_skipped %}\n🚫 不在同步范围：{{ out_of_scope_skipped }}{% endif %}"
+                "{% if other_skipped %}\n⏭️ 其他跳过：{{ other_skipped }}{% endif %}"
+                "\n🧩 TMDb补齐：{{ tmdb_generated }}"
+                "\n⏭️ TMDb跳过：{{ tmdb_skipped }}"
+                "\n❌ TMDb失败：{{ tmdb_failed }}"
+                "\n⏭️ 同步文件跳过合计：{{ skipped }}"
+                "{% if deleted %}\n🧹 删除：{{ deleted }}{% endif %}"
+                "\n🔁 重试：成功 {{ retry_success }} / 失败 {{ retry_failed }}"
+                "{% else %}"
                 "{% if scanned %}\n📦 扫描：{{ scanned }}{% endif %}"
                 "{% if scanned_dirs %}\n📁 文件夹：{{ scanned_dirs }}{% endif %}"
                 "{% if generated %}\n🎞️ 生成：{{ generated }}{% endif %}"
                 "{% if downloaded %}\n⬇️ 下载：{{ downloaded }}{% endif %}"
-                "{% if tmdb_generated %}\n🧩 TMDb补齐：{{ tmdb_generated }}{% endif %}"
-                "{% if tmdb_skipped %}\n⏭️ TMDb跳过：{{ tmdb_skipped }}{% endif %}"
-                "{% if tmdb_failed %}\n❌ TMDb失败：{{ tmdb_failed }}{% endif %}"
+                "{% if download_failed %}\n❌ 下载失败：{{ download_failed }}{% endif %}"
                 "{% if skipped %}\n⏭️ 跳过：{{ skipped }}{% endif %}"
                 "{% if deleted %}\n🧹 删除：{{ deleted }}{% endif %}"
-                "{% if retry_success or retry_failed %}\n🔁 重试：成功 {{ retry_success }} / 失败 {{ retry_failed }}{% endif %}"
+                "{% endif %}"
                 "{% if posters_count %}\n🖼️ 处理数量：{{ posters_count }}{% endif %}"
                 "{% if detail %}\n📝 详情：{{ detail }}{% endif %}"
                 "{% if accounts_text and task_category != 'signin' %}\n\n{{ accounts_text }}{% endif %}"

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
@@ -23,7 +24,6 @@ from app.services.media_organize_scrape import (
     set_bulk_mode,
 )
 from app.services.media_organize_tmdb import (
-    _parse_filename,
     _fetch_tmdb_data_sync,
     _load_config_data,
     _build_scraping_config,
@@ -54,9 +54,11 @@ CACHE_FLUSH_SECONDS = 10
 TMDB_FALLBACK_CACHE_TTL_SECONDS = 15
 TMDB_FALLBACK_WORKERS = 16
 TMDB_FALLBACK_SCRAPE_WORKERS = 40
-TMDB_FALLBACK_BATCH_SIZE = 2000
+TMDB_FALLBACK_BATCH_SIZE = 6000
 AUX_DOWNLOAD_WORKERS = 15
 CDN_AUX_RETRY_DELAYS = (0.5, 1.5)
+TMDB_SCAN_STATUS_COMPLETE = "complete"
+TMDB_SCAN_STATUS_NEED_SCAN = "need_scan"
 
 # 处理结果
 ProcessResult = namedtuple("ProcessResult", ["status", "path", "message", "data"])
@@ -65,6 +67,8 @@ _tmdb_fallback_cache_lock = Lock()
 _tmdb_fallback_cache: dict[tuple, tuple[float, dict | None]] = {}
 _tmdb_long_term_missing_lock = Lock()
 _tmdb_long_term_missing_schema_ready = False
+_tmdb_metadata_scan_state_lock = Lock()
+_tmdb_metadata_scan_state_schema_ready = False
 
 
 def _build_folder_counter() -> dict:
@@ -79,6 +83,61 @@ def _snapshot_folder_counter(counter: dict) -> dict:
         "generated_dirs": len(counter.get("strm", set())),
         "downloaded_dirs": len(counter.get("aux", set())),
     }
+
+
+def _init_strm_detail_stats(stats: dict) -> None:
+    for key in (
+        "strm_generated",
+        "subtitle_downloaded",
+        "aux_downloaded",
+        "subtitle_download_failed",
+        "aux_download_failed",
+        "strm_skipped",
+        "subtitle_skipped",
+        "aux_skipped",
+        "video_min_size_skipped",
+        "out_of_scope_skipped",
+        "other_skipped",
+    ):
+        stats.setdefault(key, 0)
+
+
+def _apply_skip_reason_stats(stats: dict, reason: str, count: int = 1) -> None:
+    _init_strm_detail_stats(stats)
+    reason = str(reason or "")
+    count = int(count or 0)
+    if count <= 0:
+        return
+    if reason == "STRM已存在":
+        stats["strm_skipped"] += count
+    elif reason == "字幕文件已存在":
+        stats["subtitle_skipped"] += count
+    elif reason == "附属文件已存在":
+        stats["aux_skipped"] += count
+    elif reason == "视频小于最小体积限制":
+        stats["video_min_size_skipped"] += count
+    elif reason == "不在同步范围":
+        stats["out_of_scope_skipped"] += count
+    else:
+        stats["other_skipped"] += count
+
+
+def _apply_download_class_stats(stats: dict, file_class: str, success: bool, count: int = 1) -> None:
+    _init_strm_detail_stats(stats)
+    count = int(count or 0)
+    if count <= 0:
+        return
+    if str(file_class or "") == "subtitle":
+        key = "subtitle_downloaded" if success else "subtitle_download_failed"
+    else:
+        key = "aux_downloaded" if success else "aux_download_failed"
+    stats[key] += count
+
+
+def _apply_download_detail_stats(stats: dict, detail: dict) -> None:
+    _init_strm_detail_stats(stats)
+    for key in ("subtitle_downloaded", "aux_downloaded", "subtitle_download_failed", "aux_download_failed"):
+        stats[key] += int((detail or {}).get(key, 0) or 0)
 
 
 def _remote_to_local_dir(remote_root: str, local_root: str, remote_dir_path: str) -> str:
@@ -226,6 +285,126 @@ def _build_tmdb_scrape_group_key(local_file_path: str, media_type: str) -> str:
     return parent
 
 
+def _extract_tmdb_id_from_text(text: str) -> int:
+    match = re.search(r"\{tmdb-(\d+)\}", str(text or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _extract_season_episode_from_name(filename: str) -> tuple[Optional[int], Optional[int]]:
+    stem = os.path.splitext(str(filename or ""))[0]
+    match = re.search(r"(?i)(?:^|[.\s_\-])S(\d{1,2})E(\d{1,3})(?:\D|$)", stem)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(?i)(?:^|[.\s_\-])S(\d{1,2})[.\s_\-]*EP?(\d{1,3})(?:\D|$)", stem)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    match = re.search(r"(?i)(?:^|[.\s_\-])(\d{1,2})x(\d{1,3})(?:\D|$)", stem)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None, None
+
+
+def _build_tmdb_identity_from_plan(plan: dict) -> Optional[dict]:
+    if not isinstance(plan, dict):
+        return None
+
+    remote_file_path = str(plan.get("remote_file_path", "") or "")
+    local_file_path = str(plan.get("local_file_path", "") or "")
+    filename = str(plan.get("filename", "") or "")
+    local_parent = os.path.basename(os.path.dirname(local_file_path))
+    remote_parent = os.path.basename(os.path.dirname(remote_file_path))
+    is_tv = _is_strm_season_dir_name(local_parent) or _is_strm_season_dir_name(remote_parent)
+    media_type = "tv" if is_tv else "movie"
+
+    if media_type == "tv":
+        group_path = os.path.dirname(os.path.dirname(local_file_path))
+        tmdb_source_text = os.path.basename(group_path) or os.path.basename(os.path.dirname(os.path.dirname(remote_file_path)))
+    else:
+        group_path = os.path.dirname(local_file_path)
+        tmdb_source_text = os.path.basename(group_path) or os.path.basename(os.path.dirname(remote_file_path))
+
+    tmdb_id = _extract_tmdb_id_from_text(tmdb_source_text)
+    if not tmdb_id and remote_file_path:
+        parts = [part for part in remote_file_path.split("/") if part]
+        if media_type == "tv" and len(parts) >= 3:
+            tmdb_id = _extract_tmdb_id_from_text(parts[-3])
+        elif len(parts) >= 2:
+            tmdb_id = _extract_tmdb_id_from_text(parts[-2])
+
+    if not tmdb_id or not group_path:
+        return None
+
+    season, episode = _extract_season_episode_from_name(filename)
+    parsed = {
+        "tmdb_id_direct": tmdb_id,
+        "media_type": media_type,
+        "season": season,
+        "episode": episode,
+        "title_source": "directory_tmdb_id",
+    }
+    plan["_tmdb_parsed"] = parsed
+    plan["_tmdb_id"] = tmdb_id
+    plan["_tmdb_media_type"] = media_type
+    plan["_tmdb_scan_group_path"] = os.path.normpath(group_path)
+    return {
+        "title_key": (media_type, tmdb_id),
+        "scan_key": (plan["_tmdb_scan_group_path"], media_type, tmdb_id),
+    }
+
+
+def _annotate_tmdb_plan_identity(plan: dict) -> Optional[dict]:
+    return _build_tmdb_identity_from_plan(plan)
+
+
+def _filter_tmdb_plans_for_full_scan_state(plans: list[dict], stats: dict) -> list[dict]:
+    identities: list[tuple[dict, Optional[dict]]] = []
+    title_keys: set[tuple[str, int]] = set()
+    scan_keys: set[tuple[str, str, int]] = set()
+    for plan in plans:
+        identity = _annotate_tmdb_plan_identity(plan)
+        identities.append((plan, identity))
+        if not identity:
+            continue
+        title_keys.add(identity["title_key"])
+        scan_keys.add(identity["scan_key"])
+
+    long_term_keys = _get_long_term_missing_title_mark_keys(title_keys)
+    scan_states = _get_tmdb_metadata_scan_states(scan_keys)
+    filtered: list[dict] = []
+    skipped_long_term = 0
+    skipped_complete = 0
+    need_scan = 0
+    unknown = 0
+    invalid = 0
+
+    for plan, identity in identities:
+        if not identity:
+            invalid += 1
+            stats["tmdb_skipped"] += 1
+            continue
+        if identity["title_key"] in long_term_keys:
+            skipped_long_term += 1
+            stats["tmdb_skipped"] += 1
+            continue
+        state = scan_states.get(identity["scan_key"], "")
+        if state == TMDB_SCAN_STATUS_COMPLETE:
+            skipped_complete += 1
+            stats["tmdb_skipped"] += 1
+            continue
+        if state == TMDB_SCAN_STATUS_NEED_SCAN:
+            need_scan += 1
+        else:
+            unknown += 1
+        filtered.append(plan)
+
+    logger.info(
+        f"[STRM] 全量 TMDb 扫描状态过滤: 输入 {len(plans)} 项 | "
+        f"待扫描 {len(filtered)} 项（标记待扫 {need_scan}, 首次/未知 {unknown}, 无法识别 {invalid}） | "
+        f"跳过长期缺失 {skipped_long_term} | 跳过已完整 {skipped_complete}"
+    )
+    return filtered
+
+
 def _ensure_tmdb_long_term_missing_schema() -> bool:
     global _tmdb_long_term_missing_schema_ready
     if _tmdb_long_term_missing_schema_ready:
@@ -258,10 +437,54 @@ def _ensure_tmdb_long_term_missing_schema() -> bool:
                     ON tmdb_long_term_missing_metadata(local_file_path, media_type, tmdb_id)
                     """
                 )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tmdb_long_term_missing_title
+                    ON tmdb_long_term_missing_metadata(media_type, tmdb_id)
+                    """
+                )
             _tmdb_long_term_missing_schema_ready = True
             return True
         except Exception as e:
             logger.debug(f"[STRM] 长期缺失TMDb元数据缓存初始化失败: {e}")
+            return False
+
+
+def _ensure_tmdb_metadata_scan_state_schema() -> bool:
+    global _tmdb_metadata_scan_state_schema_ready
+    if _tmdb_metadata_scan_state_schema_ready:
+        return True
+    with _tmdb_metadata_scan_state_lock:
+        if _tmdb_metadata_scan_state_schema_ready:
+            return True
+        try:
+            from core.cache_db import tmdb_cache_db
+            with tmdb_cache_db(write=True) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tmdb_metadata_scan_state (
+                        local_group_path TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        tmdb_id INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        missing_keys_json TEXT NOT NULL DEFAULT '[]',
+                        reason TEXT NOT NULL DEFAULT '',
+                        checked_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (local_group_path, media_type, tmdb_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tmdb_metadata_scan_state_status
+                    ON tmdb_metadata_scan_state(status, media_type, tmdb_id)
+                    """
+                )
+            _tmdb_metadata_scan_state_schema_ready = True
+            return True
+        except Exception as e:
+            logger.debug(f"[STRM] TMDb元数据扫描状态缓存初始化失败: {e}")
             return False
 
 
@@ -347,6 +570,162 @@ def _get_long_term_missing_metadata_marks(local_file_path: str, media_type: str,
     except Exception as e:
         logger.debug(f"[STRM] 读取长期缺失TMDb元数据标记失败: {e}")
         return set()
+
+
+def _has_long_term_missing_title_mark(media_type: str, tmdb_id: int) -> bool:
+    if not media_type or not tmdb_id or not _ensure_tmdb_long_term_missing_schema():
+        return False
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM tmdb_long_term_missing_metadata
+                WHERE media_type = ? AND tmdb_id = ?
+                LIMIT 1
+                """,
+                (str(media_type), int(tmdb_id)),
+            ).fetchone()
+        return bool(row)
+    except Exception as e:
+        logger.debug(f"[STRM] 读取长期缺失TMDb作品标记失败: {e}")
+        return False
+
+
+def _get_long_term_missing_title_mark_keys(title_keys: set[tuple[str, int]]) -> set[tuple[str, int]]:
+    normalized: dict[str, set[int]] = {}
+    for media_type, tmdb_id in title_keys:
+        media_type = str(media_type or "")
+        tmdb_id = int(tmdb_id or 0)
+        if media_type and tmdb_id:
+            normalized.setdefault(media_type, set()).add(tmdb_id)
+    if not normalized or not _ensure_tmdb_long_term_missing_schema():
+        return set()
+
+    marked: set[tuple[str, int]] = set()
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db() as conn:
+            for media_type, ids in normalized.items():
+                for id_batch in batched(sorted(ids), 800):
+                    placeholders = ",".join("?" for _ in id_batch)
+                    rows = conn.execute(
+                        f"""
+                        SELECT DISTINCT media_type, tmdb_id
+                        FROM tmdb_long_term_missing_metadata
+                        WHERE media_type = ? AND tmdb_id IN ({placeholders})
+                        """,
+                        (media_type, *id_batch),
+                    ).fetchall()
+                    for row in rows:
+                        marked.add((str(row["media_type"]), int(row["tmdb_id"] or 0)))
+    except Exception as e:
+        logger.debug(f"[STRM] 批量读取长期缺失TMDb作品标记失败: {e}")
+    return marked
+
+
+def _get_tmdb_metadata_scan_states(scan_keys: set[tuple[str, str, int]]) -> dict[tuple[str, str, int], str]:
+    normalized = {
+        (str(group_path or ""), str(media_type or ""), int(tmdb_id or 0))
+        for group_path, media_type, tmdb_id in scan_keys
+        if str(group_path or "") and str(media_type or "") and int(tmdb_id or 0)
+    }
+    if not normalized or not _ensure_tmdb_metadata_scan_state_schema():
+        return {}
+
+    paths = sorted({key[0] for key in normalized})
+    states: dict[tuple[str, str, int], str] = {}
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db() as conn:
+            for path_batch in batched(paths, 500):
+                placeholders = ",".join("?" for _ in path_batch)
+                rows = conn.execute(
+                    f"""
+                    SELECT local_group_path, media_type, tmdb_id, status
+                    FROM tmdb_metadata_scan_state
+                    WHERE local_group_path IN ({placeholders})
+                    """,
+                    tuple(path_batch),
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["local_group_path"]), str(row["media_type"]), int(row["tmdb_id"] or 0))
+                    if key in normalized:
+                        states[key] = str(row["status"] or "")
+    except Exception as e:
+        logger.debug(f"[STRM] 批量读取TMDb元数据扫描状态失败: {e}")
+    return states
+
+
+def _flush_tmdb_metadata_scan_state_updates(updates: dict[tuple[str, str, int], dict]) -> None:
+    if not updates or not _ensure_tmdb_metadata_scan_state_schema():
+        return
+    now_ts = time.time()
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db(write=True) as conn:
+            for (group_path, media_type, tmdb_id), payload in updates.items():
+                status = str(payload.get("status") or "")
+                if status not in {TMDB_SCAN_STATUS_COMPLETE, TMDB_SCAN_STATUS_NEED_SCAN}:
+                    continue
+                missing_keys = sorted({str(item or "") for item in payload.get("missing_keys") or [] if str(item or "")})
+                conn.execute(
+                    """
+                    INSERT INTO tmdb_metadata_scan_state(
+                        local_group_path, media_type, tmdb_id, status,
+                        missing_keys_json, reason, checked_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(local_group_path, media_type, tmdb_id) DO UPDATE SET
+                        status = excluded.status,
+                        missing_keys_json = excluded.missing_keys_json,
+                        reason = excluded.reason,
+                        checked_at = excluded.checked_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        group_path,
+                        media_type,
+                        int(tmdb_id),
+                        status,
+                        json.dumps(missing_keys, ensure_ascii=False, separators=(",", ":")),
+                        str(payload.get("reason") or ""),
+                        now_ts,
+                        now_ts,
+                    ),
+                )
+    except Exception as e:
+        logger.debug(f"[STRM] 写入TMDb元数据扫描状态失败: {e}")
+
+
+def _record_tmdb_scan_state_update(
+    updates: dict[tuple[str, str, int], dict],
+    lock: Lock,
+    local_group_path: str,
+    media_type: str,
+    tmdb_id: int,
+    status: str,
+    missing_keys: Optional[list[str]] = None,
+    reason: str = "",
+) -> None:
+    if status not in {TMDB_SCAN_STATUS_COMPLETE, TMDB_SCAN_STATUS_NEED_SCAN}:
+        return
+    local_group_path = str(local_group_path or "")
+    media_type = str(media_type or "")
+    tmdb_id = int(tmdb_id or 0)
+    if not local_group_path or not media_type or not tmdb_id:
+        return
+    key = (local_group_path, media_type, tmdb_id)
+    with lock:
+        current = updates.get(key)
+        if current and current.get("status") == TMDB_SCAN_STATUS_NEED_SCAN and status == TMDB_SCAN_STATUS_COMPLETE:
+            return
+        updates[key] = {
+            "status": status,
+            "missing_keys": list(missing_keys or []),
+            "reason": reason,
+        }
 
 
 def _sync_long_term_missing_metadata_marks(
@@ -506,11 +885,12 @@ def _run_tmdb_metadata_fallback(plan: dict, scraping_config, api_key: str, task_
     if not filename or not remote_file_path or not local_file_path:
         return "skip", 0, "缺少 TMDb 补齐所需路径"
 
-    parsed = _parse_filename(filename, file_path=remote_file_path)
+    _build_tmdb_identity_from_plan(plan)
+    parsed = plan.get("_tmdb_parsed")
     if not parsed:
-        return "skip", 0, "文件名解析失败"
+        return "skip", 0, "目录缺少 TMDb ID"
     if not int(parsed.get("tmdb_id_direct") or 0):
-        return "skip", 0, "缺少直写 TMDb ID"
+        return "skip", 0, "目录缺少 TMDb ID"
 
     check_started = perf_counter()
     missing = list_missing_tmdb_metadata_for_strm(
@@ -565,11 +945,17 @@ def _process_tmdb_batch(
     cancel_event: Optional[Event],
     progress_callback: Optional[Callable[[], None]] = None,
     respect_long_term_missing_skip: bool = True,
+    title_level_long_term_skip: bool = False,
+    update_scan_state: bool = False,
 ) -> None:
     """处理单批 TMDb 补齐：预处理 → 并发拉取 → 分组落盘，处理完后释放 data_by_key。"""
     prepared_items: list[dict] = []
     fetch_payloads: dict[tuple, dict] = {}
     data_by_key: dict[tuple, dict | None] = {}
+    long_term_title_mark_cache: dict[tuple, bool] = {}
+    logged_long_term_title_skips: set[tuple] = set()
+    scan_state_updates: dict[tuple[str, str, int], dict] = {}
+    scan_state_update_lock = Lock()
     last_progress_at = 0.0
 
     def _emit_progress(force: bool = False) -> None:
@@ -592,7 +978,10 @@ def _process_tmdb_batch(
             stats["tmdb_skipped"] += 1
             continue
 
-        parsed = _parse_filename(filename, file_path=remote_file_path)
+        parsed = plan.get("_tmdb_parsed")
+        if not isinstance(parsed, dict):
+            _build_tmdb_identity_from_plan(plan)
+            parsed = plan.get("_tmdb_parsed")
         if not parsed:
             stats["tmdb_skipped"] += 1
             continue
@@ -600,10 +989,29 @@ def _process_tmdb_batch(
         tmdb_id = int(parsed.get("tmdb_id_direct") or 0)
         if not tmdb_id:
             stats["tmdb_skipped"] += 1
-            logger.debug(f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 缺少直写 TMDb ID | 文件:{remote_file_path}")
+            logger.debug(f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 目录缺少 TMDb ID | 文件:{remote_file_path}")
             continue
 
         media_type = str(parsed.get("media_type", "") or "")
+        local_group_path = str(plan.get("_tmdb_scan_group_path") or "")
+        if update_scan_state and not local_group_path:
+            local_group_path = _build_tmdb_scrape_group_key(local_file_path, media_type)
+        if respect_long_term_missing_skip and title_level_long_term_skip:
+            title_key = (media_type, tmdb_id)
+            has_title_mark = long_term_title_mark_cache.get(title_key)
+            if has_title_mark is None:
+                has_title_mark = _has_long_term_missing_title_mark(media_type, tmdb_id)
+                long_term_title_mark_cache[title_key] = has_title_mark
+            if has_title_mark:
+                stats["tmdb_skipped"] += 1
+                if title_key not in logged_long_term_title_skips:
+                    logged_long_term_title_skips.add(title_key)
+                    logger.debug(
+                        f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 长期缺失作品已标记 | "
+                        f"TMDb:{tmdb_id} | 类型:{media_type}"
+                    )
+                continue
+
         check_started = perf_counter()
         missing = list_missing_tmdb_metadata_for_strm(
             local_file_path,
@@ -619,6 +1027,16 @@ def _process_tmdb_batch(
             )
         if not missing:
             stats["tmdb_skipped"] += 1
+            if update_scan_state:
+                _record_tmdb_scan_state_update(
+                    scan_state_updates,
+                    scan_state_update_lock,
+                    local_group_path,
+                    media_type,
+                    tmdb_id,
+                    TMDB_SCAN_STATUS_COMPLETE,
+                    reason="本地元数据已完整",
+                )
             continue
         if respect_long_term_missing_skip:
             marked_missing = _get_long_term_missing_metadata_marks(local_file_path, media_type, tmdb_id)
@@ -658,9 +1076,11 @@ def _process_tmdb_batch(
             "parsed": parsed,
             "missing": missing,
             "fetch_key": fetch_key,
+            "local_group_path": local_group_path,
         })
 
     if not prepared_items:
+        _flush_tmdb_metadata_scan_state_updates(scan_state_updates)
         return
 
     if cancel_event and cancel_event.is_set():
@@ -715,6 +1135,17 @@ def _process_tmdb_batch(
             tmdb_data = data_by_key.get(fetch_key)
             if not tmdb_data:
                 failed_total += 1
+                if update_scan_state:
+                    _record_tmdb_scan_state_update(
+                        scan_state_updates,
+                        scan_state_update_lock,
+                        str(item.get("local_group_path") or ""),
+                        parsed["media_type"],
+                        int(parsed.get("tmdb_id_direct") or 0),
+                        TMDB_SCAN_STATUS_NEED_SCAN,
+                        item.get("missing") or [],
+                        "TMDb详情获取失败",
+                    )
                 logger.warning(f"[STRM] {log_prefix} TMDb 元数据补齐失败: TMDb 详情获取失败 | 文件:{remote_file_path}")
                 continue
             scrape_started = perf_counter()
@@ -737,6 +1168,28 @@ def _process_tmdb_batch(
                     parsed.get("episode"),
                 )
                 _sync_long_term_missing_metadata_marks(local_file_path, parsed, tmdb_data, remaining_missing)
+                if update_scan_state:
+                    if remaining_missing:
+                        _record_tmdb_scan_state_update(
+                            scan_state_updates,
+                            scan_state_update_lock,
+                            str(item.get("local_group_path") or ""),
+                            parsed["media_type"],
+                            int(parsed.get("tmdb_id_direct") or 0),
+                            TMDB_SCAN_STATUS_NEED_SCAN,
+                            remaining_missing,
+                            "刮削后仍缺失",
+                        )
+                    else:
+                        _record_tmdb_scan_state_update(
+                            scan_state_updates,
+                            scan_state_update_lock,
+                            str(item.get("local_group_path") or ""),
+                            parsed["media_type"],
+                            int(parsed.get("tmdb_id_direct") or 0),
+                            TMDB_SCAN_STATUS_COMPLETE,
+                            reason="补齐后元数据完整",
+                        )
                 if logger.isEnabledFor(10):
                     logger.debug(
                         f"[STRM] TMDb本地刮削完成: {remote_file_path} | 生成:{len(generated)} | "
@@ -744,6 +1197,17 @@ def _process_tmdb_batch(
                     )
             except Exception as e:
                 failed_total += 1
+                if update_scan_state:
+                    _record_tmdb_scan_state_update(
+                        scan_state_updates,
+                        scan_state_update_lock,
+                        str(item.get("local_group_path") or ""),
+                        parsed["media_type"],
+                        int(parsed.get("tmdb_id_direct") or 0),
+                        TMDB_SCAN_STATUS_NEED_SCAN,
+                        item.get("missing") or [],
+                        "本地刮削异常",
+                    )
                 logger.warning(f"[STRM] {log_prefix} TMDb 本地刮削异常: {remote_file_path}: {e}")
         return generated_total, failed_total
 
@@ -766,7 +1230,21 @@ def _process_tmdb_batch(
                 try:
                     generated_count, failed_count = future.result()
                 except Exception as e:
-                    generated_count, failed_count = 0, len(grouped_scrape_items[futures[future]])
+                    failed_group_items = grouped_scrape_items[futures[future]]
+                    generated_count, failed_count = 0, len(failed_group_items)
+                    if update_scan_state:
+                        for item in failed_group_items:
+                            parsed = item["parsed"]
+                            _record_tmdb_scan_state_update(
+                                scan_state_updates,
+                                scan_state_update_lock,
+                                str(item.get("local_group_path") or ""),
+                                parsed["media_type"],
+                                int(parsed.get("tmdb_id_direct") or 0),
+                                TMDB_SCAN_STATUS_NEED_SCAN,
+                                item.get("missing") or [],
+                                "目录组落盘异常",
+                            )
                     logger.warning(f"[STRM] {log_prefix} TMDb 目录组落盘异常: {futures[future]}: {e}")
                 stats["tmdb_generated"] += generated_count
                 stats["tmdb_failed"] += failed_count
@@ -775,6 +1253,7 @@ def _process_tmdb_batch(
     data_by_key.clear()
     prepared_items.clear()
     grouped_scrape_items.clear()
+    _flush_tmdb_metadata_scan_state_updates(scan_state_updates)
     _emit_progress(force=True)
 
 
@@ -790,6 +1269,8 @@ def _apply_tmdb_fallbacks(
     cancel_event: Optional[Event] = None,
     progress_callback: Optional[Callable[[], None]] = None,
     respect_long_term_missing_skip: bool = True,
+    title_level_long_term_skip: bool = False,
+    update_scan_state: bool = False,
 ):
     if not plans:
         return
@@ -826,6 +1307,8 @@ def _apply_tmdb_fallbacks(
                 cancel_event,
                 progress_callback,
                 respect_long_term_missing_skip,
+                title_level_long_term_skip,
+                update_scan_state,
             )
             if progress_callback:
                 progress_callback()
@@ -1122,7 +1605,8 @@ def _batch_download_aux(
     download_mode: str = "standard",
     cookie: str = "",
     cancel_event: Optional[Event] = None,
-) -> Tuple[int, int]:
+    return_detail: bool = False,
+) -> Tuple[int, int] | tuple[int, int, dict]:
     """批量下载附属文件并输出下载条目日志"""
     if not items:
         return (0, 0)
@@ -1143,6 +1627,12 @@ def _batch_download_aux(
 
     downloaded = 0
     failed = 0
+    detail = {
+        "subtitle_downloaded": 0,
+        "aux_downloaded": 0,
+        "subtitle_download_failed": 0,
+        "aux_download_failed": 0,
+    }
 
     def _dl_one(it):
         return _download_aux_file(
@@ -1164,15 +1654,26 @@ def _batch_download_aux(
             if cancel_event and cancel_event.is_set():
                 break
             status, fname, msg = future.result()
+            file_class = str(futures[future].get("_file_class") or "data")
             if status == "ok":
                 downloaded += 1
+                if file_class == "subtitle":
+                    detail["subtitle_downloaded"] += 1
+                else:
+                    detail["aux_downloaded"] += 1
                 logger.trace(f"[STRM] 下载附属文件成功: {fname}")
             elif status == "cancelled":
                 logger.trace(f"[STRM] 下载附属文件已取消: {fname}")
             else:
                 failed += 1
+                if file_class == "subtitle":
+                    detail["subtitle_download_failed"] += 1
+                else:
+                    detail["aux_download_failed"] += 1
                 logger.warning(f"[STRM] 下载附属文件失败: {fname}: {msg}")
 
+    if return_detail:
+        return (downloaded, failed, detail)
     return (downloaded, failed)
 
 
@@ -2008,6 +2509,17 @@ class StrmService:
             "downloaded": 0,
             "downloaded_dirs": 0,
             "download_failed": 0,
+            "strm_generated": 0,
+            "subtitle_downloaded": 0,
+            "aux_downloaded": 0,
+            "subtitle_download_failed": 0,
+            "aux_download_failed": 0,
+            "strm_skipped": 0,
+            "subtitle_skipped": 0,
+            "aux_skipped": 0,
+            "video_min_size_skipped": 0,
+            "out_of_scope_skipped": 0,
+            "other_skipped": 0,
             "tmdb_generated": 0,
             "tmdb_skipped": 0,
             "tmdb_failed": 0,
@@ -2087,6 +2599,7 @@ class StrmService:
         def _record_skip(reason: str):
             key = str(reason or "unknown")
             stats["skip_reasons"][key] = int(stats["skip_reasons"].get(key, 0) or 0) + 1
+            _apply_skip_reason_stats(stats, key)
 
         def _collect_finished_downloads(block: bool = False):
             for future, meta in dl_futures:
@@ -2098,18 +2611,21 @@ class StrmService:
                     res = future.result()
                     if res and res[0] == "ok":
                         stats["downloaded"] += 1
+                        _apply_download_class_stats(stats, meta.get("_file_class", ""), True)
                         local_file_path = meta.get("_local_path", "")
                         if local_file_path:
                             folder_counter["aux"].add(os.path.dirname(local_file_path))
                             stats.update(_snapshot_folder_counter(folder_counter))
                     elif res and res[0] == "fail":
                         stats["download_failed"] += 1
+                        _apply_download_class_stats(stats, meta.get("_file_class", ""), False)
                         stats["failed"] += 1
                         dl_retry_items.append(meta)
                     elif res and res[0] == "cancelled":
                         pass
                 except Exception as e:
                     stats["download_failed"] += 1
+                    _apply_download_class_stats(stats, meta.get("_file_class", ""), False)
                     stats["failed"] += 1
                     logger.warning(f"[STRM] 增量附属下载异常: {meta.get('filename', '')}: {e}")
                     dl_retry_items.append(meta)
@@ -2131,6 +2647,7 @@ class StrmService:
                         continue
                     if result.status == "success":
                         stats["generated"] += 1
+                        stats["strm_generated"] += 1
                         if result.path:
                             folder_counter["strm"].add(os.path.dirname(result.path))
                             stats.update(_snapshot_folder_counter(folder_counter))
@@ -2209,7 +2726,7 @@ class StrmService:
 
             if dl_retry_items and not (cancel_event and cancel_event.is_set()):
                 logger.info(f"[STRM] 增量附属重试开始，共 {len(dl_retry_items)} 项")
-                retry_ok, retry_fail = _batch_download_aux(
+                retry_ok, retry_fail, retry_detail = _batch_download_aux(
                     client,
                     dl_retry_items,
                     local_path,
@@ -2217,11 +2734,13 @@ class StrmService:
                     aux_download_mode,
                     cookie,
                     cancel_event,
+                    return_detail=True,
                 )
                 stats["downloaded"] += retry_ok
                 stats["failed"] -= retry_ok
                 stats["retry_success"] += retry_ok
                 stats["retry_failed"] += retry_fail
+                _apply_download_detail_stats(stats, retry_detail)
 
             if download_tmdb_metadata and tmdb_plans and not (cancel_event and cancel_event.is_set()):
                 _apply_tmdb_fallbacks(
@@ -2307,7 +2826,14 @@ class StrmService:
                 cancel_event=cancel_event,
             )
             results.append(task_result)
-            for key in ("generated", "generated_dirs", "downloaded", "downloaded_dirs", "download_failed", "failed", "skipped", "retry_success", "retry_failed", "matched_items"):
+            for key in (
+                "generated", "generated_dirs", "downloaded", "downloaded_dirs", "download_failed",
+                "strm_generated", "subtitle_downloaded", "aux_downloaded",
+                "subtitle_download_failed", "aux_download_failed",
+                "strm_skipped", "subtitle_skipped", "aux_skipped",
+                "video_min_size_skipped", "out_of_scope_skipped", "other_skipped",
+                "failed", "skipped", "retry_success", "retry_failed", "matched_items",
+            ):
                 summary[key] += int(task_result.get(key, 0) or 0)
             for reason, count in (task_result.get("skip_reasons") or {}).items():
                 summary["skip_reasons"][reason] = int(summary["skip_reasons"].get(reason, 0) or 0) + int(count or 0)
@@ -2329,6 +2855,17 @@ class StrmService:
             "downloaded": summary["downloaded"],
             "downloaded_dirs": summary["downloaded_dirs"],
             "download_failed": summary["download_failed"],
+            "strm_generated": summary["strm_generated"],
+            "subtitle_downloaded": summary["subtitle_downloaded"],
+            "aux_downloaded": summary["aux_downloaded"],
+            "subtitle_download_failed": summary["subtitle_download_failed"],
+            "aux_download_failed": summary["aux_download_failed"],
+            "strm_skipped": summary["strm_skipped"],
+            "subtitle_skipped": summary["subtitle_skipped"],
+            "aux_skipped": summary["aux_skipped"],
+            "video_min_size_skipped": summary["video_min_size_skipped"],
+            "out_of_scope_skipped": summary["out_of_scope_skipped"],
+            "other_skipped": summary["other_skipped"],
             "failed": summary["failed"],
             "skipped": summary["skipped"],
             "skip_reasons": summary["skip_reasons"],
@@ -2388,6 +2925,17 @@ class StrmService:
                     "generated": int(payload.get("generated", 0) or 0),
                     "downloaded": int(payload.get("downloaded", 0) or 0),
                     "download_failed": int(payload.get("download_failed", 0) or 0),
+                    "strm_generated": int(payload.get("strm_generated", payload.get("generated", 0)) or 0),
+                    "subtitle_downloaded": int(payload.get("subtitle_downloaded", 0) or 0),
+                    "aux_downloaded": int(payload.get("aux_downloaded", 0) or 0),
+                    "subtitle_download_failed": int(payload.get("subtitle_download_failed", 0) or 0),
+                    "aux_download_failed": int(payload.get("aux_download_failed", 0) or 0),
+                    "strm_skipped": int(payload.get("strm_skipped", 0) or 0),
+                    "subtitle_skipped": int(payload.get("subtitle_skipped", 0) or 0),
+                    "aux_skipped": int(payload.get("aux_skipped", 0) or 0),
+                    "video_min_size_skipped": int(payload.get("video_min_size_skipped", 0) or 0),
+                    "out_of_scope_skipped": int(payload.get("out_of_scope_skipped", 0) or 0),
+                    "other_skipped": int(payload.get("other_skipped", 0) or 0),
                     "tmdb_generated": int(payload.get("tmdb_generated", 0) or 0),
                     "tmdb_skipped": int(payload.get("tmdb_skipped", 0) or 0),
                     "tmdb_failed": int(payload.get("tmdb_failed", 0) or 0),
@@ -2423,6 +2971,17 @@ class StrmService:
                 "downloaded": 0,
                 "downloaded_dirs": 0,
                 "download_failed": 0,
+                "strm_generated": 0,
+                "subtitle_downloaded": 0,
+                "aux_downloaded": 0,
+                "subtitle_download_failed": 0,
+                "aux_download_failed": 0,
+                "strm_skipped": 0,
+                "subtitle_skipped": 0,
+                "aux_skipped": 0,
+                "video_min_size_skipped": 0,
+                "out_of_scope_skipped": 0,
+                "other_skipped": 0,
                 "tmdb_generated": 0,
                 "tmdb_skipped": 0,
                 "tmdb_failed": 0,
@@ -2551,6 +3110,7 @@ class StrmService:
             def _record_skip(reason: str):
                 key = str(reason or "unknown")
                 stats["skip_reasons"][key] = int(stats["skip_reasons"].get(key, 0) or 0) + 1
+                _apply_skip_reason_stats(stats, key)
 
             completed_dl_futures: set = set()
             folder_counter = _build_folder_counter()
@@ -2566,6 +3126,7 @@ class StrmService:
                         res = future.result()
                         if res and res[0] == "ok":
                             stats["downloaded"] += 1
+                            _apply_download_class_stats(stats, meta.get("_file_class", ""), True)
                             local_path = meta.get("_local_path", "")
                             if local_path:
                                 folder_counter["aux"].add(os.path.dirname(local_path))
@@ -2573,6 +3134,7 @@ class StrmService:
                             logger.trace(f"[STRM] 下载附属文件完成: {res[1]}")
                         elif res and res[0] == "fail":
                             stats["download_failed"] += 1
+                            _apply_download_class_stats(stats, meta.get("_file_class", ""), False)
                             stats["failed"] += 1
                             logger.warning(f"[STRM] 下载附属文件失败: {res[1]}: {res[2]}")
                             if not cancelled:
@@ -2585,6 +3147,7 @@ class StrmService:
                         cancel_event.set()
                     except Exception as e:
                         stats["download_failed"] += 1
+                        _apply_download_class_stats(stats, meta.get("_file_class", ""), False)
                         stats["failed"] += 1
                         logger.warning(f"[STRM] 下载附属文件异常: {meta.get('filename', '')}: {e}")
                         if not cancelled:
@@ -2610,6 +3173,7 @@ class StrmService:
                             continue
                         if result.status == "success":
                             stats["generated"] += 1
+                            stats["strm_generated"] += 1
                             if result.path:
                                 folder_counter["strm"].add(os.path.dirname(result.path))
                                 stats.update(_snapshot_folder_counter(folder_counter))
@@ -2760,7 +3324,7 @@ class StrmService:
 
             if dl_retry_items and not cancelled:
                 logger.info(f"[STRM] 开始失败附属重试，共 {len(dl_retry_items)} 项")
-                retry_ok, retry_fail = _batch_download_aux(
+                retry_ok, retry_fail, retry_detail = _batch_download_aux(
                     client,
                     dl_retry_items,
                     local_path,
@@ -2768,11 +3332,13 @@ class StrmService:
                     aux_download_mode,
                     cookie,
                     cancel_event,
+                    return_detail=True,
                 )
                 stats["downloaded"] += retry_ok
                 stats["failed"] -= retry_ok
                 stats["retry_success"] += retry_ok
                 stats["retry_failed"] += retry_fail
+                _apply_download_detail_stats(stats, retry_detail)
                 logger.info(f"[STRM] 失败附属重试完成: 成功 {retry_ok} | 失败 {retry_fail}")
 
             if download_tmdb_metadata and tmdb_plans and not cancelled:
@@ -2785,6 +3351,10 @@ class StrmService:
                         detail=stats.copy(),
                     )
 
+                metadata_skip_mode = overwrite_mode != "overwrite"
+                if metadata_skip_mode:
+                    tmdb_plans = _filter_tmdb_plans_for_full_scan_state(tmdb_plans, stats)
+
                 _apply_tmdb_fallbacks(
                     tmdb_plans,
                     scraping_config,
@@ -2793,7 +3363,9 @@ class StrmService:
                     "全量",
                     cancel_event,
                     _update_tmdb_progress,
-                    respect_long_term_missing_skip=(overwrite_mode != "overwrite"),
+                    respect_long_term_missing_skip=metadata_skip_mode,
+                    title_level_long_term_skip=True,
+                    update_scan_state=metadata_skip_mode,
                 )
 
             elapsed = perf_counter() - start_time

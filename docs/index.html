@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChillPoster - 家庭影音自动化中枢</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f8fb;
+      --bg-2: #eef4f8;
+      --panel: rgba(255, 255, 255, .9);
+      --panel-2: rgba(248, 251, 253, .96);
+      --line: rgba(39, 56, 78, .13);
+      --line-strong: rgba(39, 56, 78, .22);
+      --text: #132033;
+      --muted: #64748b;
+      --soft: #415466;
+      --teal: #0cae98;
+      --blue: #427ee8;
+      --gold: #f8d77a;
+      --rose: #ff8ea3;
+      --green: #93f1a7;
+      --shadow: 0 28px 70px rgba(56, 76, 102, .18);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        linear-gradient(125deg, rgba(12, 174, 152, .13), transparent 34%),
+        radial-gradient(circle at 82% 10%, rgba(66, 126, 232, .16), transparent 30%),
+        linear-gradient(180deg, #fbfdff 0%, #f3f7fb 52%, #eef4f8 100%);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .app {
+      min-height: 100vh;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 16px clamp(20px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, .82);
+      backdrop-filter: blur(18px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 210px;
+    }
+
+    .logo {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, .8);
+      border-radius: 10px;
+      color: #ffffff;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      box-shadow: 0 14px 36px rgba(66, 126, 232, .2);
+      font-weight: 950;
+      letter-spacing: 0;
+    }
+
+    .brand strong {
+      display: block;
+      font-size: 18px;
+      line-height: 1.1;
+    }
+
+    .brand span {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow-x: auto;
+    }
+
+    .nav button,
+    .ghost-btn {
+      min-height: 38px;
+      padding: 8px 12px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: #334155;
+      background: transparent;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .nav button:hover,
+    .nav button.active,
+    .ghost-btn:hover {
+      border-color: rgba(12, 174, 152, .28);
+      background: rgba(12, 174, 152, .09);
+      color: #0f766e;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, .88fr) minmax(520px, 1.12fr);
+      gap: clamp(32px, 5vw, 72px);
+      align-items: center;
+      min-height: calc(100vh - 75px);
+      padding: clamp(44px, 8vw, 96px) clamp(20px, 5vw, 72px) clamp(38px, 7vw, 80px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      margin-bottom: 22px;
+      color: var(--teal);
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--teal);
+      box-shadow: 0 0 18px var(--teal);
+    }
+
+    h1 {
+      max-width: 860px;
+      margin: 0;
+      font-size: clamp(44px, 6.2vw, 78px);
+      line-height: .94;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin: 28px 0 0;
+      color: var(--soft);
+      font-size: clamp(17px, 1.7vw, 21px);
+      line-height: 1.82;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .primary-btn,
+    .secondary-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 12px 18px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    .primary-btn {
+      border: 1px solid rgba(12, 174, 152, .42);
+      color: #ffffff;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      box-shadow: 0 18px 42px rgba(66, 126, 232, .2);
+    }
+
+    .secondary-btn {
+      border: 1px solid var(--line-strong);
+      color: #24364a;
+      background: rgba(255, 255, 255, .72);
+    }
+
+    .trust-row {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      max-width: 760px;
+      margin-top: 36px;
+    }
+
+    .trust-item {
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .68);
+    }
+
+    .trust-item strong {
+      display: block;
+      font-size: 18px;
+    }
+
+    .trust-item span {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .console {
+      position: relative;
+      min-height: 560px;
+      border: 1px solid rgba(255, 255, 255, .16);
+      border-radius: 16px;
+      background:
+        linear-gradient(160deg, rgba(255, 255, 255, .08), rgba(255, 255, 255, .02)),
+        rgba(12, 19, 26, .88);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .console::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(255, 255, 255, .09), transparent 28%);
+    }
+
+    .console-head {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dots {
+      display: flex;
+      gap: 7px;
+    }
+
+    .dots span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--rose);
+    }
+
+    .dots span:nth-child(2) {
+      background: var(--gold);
+    }
+
+    .dots span:nth-child(3) {
+      background: var(--green);
+    }
+
+    .console-head em {
+      color: var(--muted);
+      font-size: 12px;
+      font-style: normal;
+    }
+
+    .console-grid {
+      position: relative;
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      min-height: 508px;
+    }
+
+    .console-side {
+      padding: 18px 12px;
+      border-right: 1px solid var(--line);
+      background: rgba(255, 255, 255, .025);
+    }
+
+    .side-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      padding: 10px;
+      border-radius: 8px;
+      color: #334155;
+      font-size: 12px;
+    }
+
+    .side-pill.active {
+      color: #081014;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      font-weight: 900;
+    }
+
+    .side-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .console-main {
+      padding: 20px;
+    }
+
+    .screen-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .screen-title h2 {
+      margin: 0;
+      font-size: 24px;
+    }
+
+    .screen-title p {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .status-chip {
+      min-width: 86px;
+      padding: 7px 10px;
+      border: 1px solid rgba(87, 226, 194, .3);
+      border-radius: 999px;
+      color: var(--teal);
+      background: rgba(87, 226, 194, .1);
+      font-size: 12px;
+      text-align: center;
+      font-weight: 800;
+    }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .metric,
+    .task-row,
+    .pipeline-card,
+    .feature-card,
+    .doc-panel,
+    .wiki-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .055);
+    }
+
+    .metric {
+      min-height: 104px;
+      padding: 15px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-top: 12px;
+      font-size: 27px;
+      letter-spacing: 0;
+    }
+
+    .progress {
+      height: 7px;
+      margin-top: 14px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, .09);
+    }
+
+    .progress i {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--teal), var(--blue));
+    }
+
+    .task-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      margin-top: 10px;
+      padding: 13px 14px;
+    }
+
+    .task-row strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .task-row span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .task-row b {
+      color: var(--teal);
+      font-size: 12px;
+    }
+
+    section {
+      padding: clamp(52px, 7vw, 92px) clamp(20px, 5vw, 72px);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      margin-bottom: 26px;
+    }
+
+    .section-head h2 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(32px, 4.5vw, 54px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .section-head p {
+      max-width: 520px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.75;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .shot-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);
+      gap: clamp(24px, 5vw, 56px);
+      align-items: center;
+    }
+
+    .shot-copy h2 {
+      margin: 0;
+      font-size: clamp(32px, 4.8vw, 58px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .shot-copy p {
+      max-width: 620px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.8;
+    }
+
+    .shot-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .shot-list span {
+      min-height: 46px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #334155;
+      background: rgba(255, 255, 255, .055);
+      font-size: 13px;
+    }
+
+    .product-shot {
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, .18);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, .06);
+      box-shadow: var(--shadow);
+    }
+
+    .product-shot img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .shot-caption {
+      margin: 0;
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      background: rgba(0, 0, 0, .18);
+    }
+
+    .feature-card {
+      min-height: 232px;
+      padding: 22px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, .075), rgba(255, 255, 255, .035));
+    }
+
+    .icon {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      color: #ffffff;
+      background: linear-gradient(135deg, var(--teal), var(--blue));
+      font-weight: 950;
+    }
+
+    .feature-card h3,
+    .wiki-card h3,
+    .doc-panel h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+    }
+
+    .feature-card p,
+    .wiki-card p,
+    .doc-panel p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.75;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .pipeline-card {
+      position: relative;
+      min-height: 176px;
+      padding: 20px;
+      overflow: hidden;
+    }
+
+    .pipeline-card::after {
+      content: attr(data-step);
+      position: absolute;
+      right: 14px;
+      bottom: -12px;
+      color: rgba(255, 255, 255, .07);
+      font-size: 72px;
+      font-weight: 950;
+    }
+
+    .pipeline-card strong {
+      display: block;
+      margin-bottom: 12px;
+      font-size: 17px;
+    }
+
+    .pipeline-card span {
+      position: relative;
+      z-index: 1;
+      color: var(--muted);
+      line-height: 1.65;
+      font-size: 14px;
+    }
+
+    .docs-layout {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .doc-menu {
+      position: sticky;
+      top: 90px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(16, 24, 32, .72);
+    }
+
+    .doc-menu button {
+      display: flex;
+      width: 100%;
+      align-items: center;
+      justify-content: space-between;
+      margin: 4px 0;
+      padding: 11px 12px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: #d8e3eb;
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .doc-menu button:hover,
+    .doc-menu button.active {
+      border-color: rgba(134, 189, 255, .32);
+      background: rgba(134, 189, 255, .1);
+      color: #fff;
+    }
+
+    .doc-panel {
+      min-height: 620px;
+      padding: clamp(22px, 4vw, 42px);
+      background: rgba(16, 24, 32, .84);
+      box-shadow: var(--shadow);
+    }
+
+    .doc-panel h2 {
+      margin: 0 0 18px;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.1;
+    }
+
+    .doc-panel h3 {
+      margin-top: 34px;
+    }
+
+    .doc-panel ul,
+    .doc-panel ol {
+      margin: 12px 0 0;
+      padding-left: 22px;
+      color: #cbd7e0;
+      line-height: 1.8;
+    }
+
+    .doc-panel li {
+      margin: 6px 0;
+    }
+
+    .doc-panel code,
+    .code-block {
+      font-family: "SFMono-Regular", Consolas, monospace;
+    }
+
+    .doc-panel code {
+      padding: 2px 6px;
+      border-radius: 6px;
+      color: #e7fff8;
+      background: rgba(255, 255, 255, .08);
+    }
+
+    .code-block {
+      overflow: auto;
+      margin: 18px 0;
+      padding: 18px;
+      border: 1px solid rgba(255, 255, 255, .11);
+      border-radius: 8px;
+      color: #1f2f46;
+      background: #f4f7fb;
+      line-height: 1.65;
+      white-space: pre;
+    }
+
+    .wiki-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .wiki-card {
+      min-height: 150px;
+      padding: 20px;
+    }
+
+    .footer {
+      padding: 34px clamp(20px, 5vw, 72px);
+      color: var(--muted);
+      background: #eef4f8;
+    }
+
+    .footer strong {
+      color: var(--text);
+    }
+
+    @media (max-width: 1120px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .console {
+        min-height: 520px;
+      }
+
+      .feature-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .pipeline {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .shot-wrap {
+        grid-template-columns: 1fr;
+      }
+
+      .docs-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .doc-menu {
+        position: static;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .hero {
+        min-height: auto;
+      }
+
+      .trust-row,
+      .metric-grid,
+      .feature-grid,
+      .pipeline,
+      .shot-list,
+      .wiki-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .console-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .console-side {
+        display: none;
+      }
+
+      .section-head {
+        display: block;
+      }
+
+      .section-head p {
+        margin-top: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="ChillPoster 首页">
+        <span class="logo">CP</span>
+        <span>
+          <strong>ChillPoster</strong>
+          <span>家庭影音自动化中枢</span>
+        </span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <button class="active" data-scroll="top">首页</button>
+        <button data-scroll="live">实机截图</button>
+        <button data-scroll="features">核心能力</button>
+        <button data-scroll="workflow">一条龙流程</button>
+        <button data-scroll="docs">Wiki 文档</button>
+        <button data-scroll="deploy">部署</button>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Emby + 115 + STRM + 封面系统</div>
+          <h1>ChillPoster 家庭影音自动化中枢</h1>
+          <p class="lead">面向 Emby 与 115 网盘用户，把封面生成、资源转存、302 网关、媒体整理、STRM 同步、RSS 真实库、缺集统计、通知和运维任务放进同一个管理端。重点不是“看起来很多功能”，而是让日常入库、维护和排障有固定流程。</p>
+          <div class="hero-actions">
+            <button class="primary-btn" data-scroll="docs">查看完整 Wiki</button>
+            <button class="secondary-btn" data-scroll="live">查看实机界面</button>
+          </div>
+          <div class="trust-row">
+            <div class="trust-item">
+              <strong>5256</strong>
+              <span>默认管理端口</span>
+            </div>
+            <div class="trust-item">
+              <strong>多网关</strong>
+              <span>按 Emby 端口启动</span>
+            </div>
+            <div class="trust-item">
+              <strong>自动续跑</strong>
+              <span>整理任务可恢复</span>
+            </div>
+            <div class="trust-item">
+              <strong>Docker</strong>
+              <span>NAS 长期部署</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="product-shot" aria-label="ChillPoster NAS 实机仪表盘截图">
+          <img src="chillposter-real-dashboard-light-wide.png" alt="ChillPoster NAS 浅色模式实机仪表盘">
+          <p class="shot-caption">NAS 实机仪表盘截图，来源于当前运行中的 ChillPoster 管理端。</p>
+        </div>
+      </section>
+
+      <section id="live">
+        <div class="shot-wrap">
+          <div class="shot-copy">
+            <div class="eyebrow">NAS 实机快照</div>
+            <h2>界面展示以当前 CP 实物为准</h2>
+            <p>页面使用 NAS 上正在运行的 ChillPoster 仪表盘截图作为展示素材。后续如果要做官网，可以继续补充封面系统、媒体整理、一条龙配置、缺集统计等页面截图。</p>
+            <div class="shot-list">
+              <span>来源：192.168.2.2:5256</span>
+              <span>截图：本地 Chrome headless</span>
+              <span>用途：产品介绍页实机展示</span>
+              <span>后续：补充功能页真实截图</span>
+            </div>
+          </div>
+          <figure class="product-shot">
+            <img src="chillposter-real-dashboard-light-wide.png" alt="ChillPoster NAS 浅色模式实机仪表盘截图">
+            <figcaption class="shot-caption">当前截图为仪表盘页面，未展示配置页，避免暴露敏感配置。</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="features">
+        <div class="section-head">
+          <h2>围绕日常维护组织功能</h2>
+          <p>这里按实际菜单和模块解释 ChillPoster 做什么，不写虚的功能名，也不把未确认的页面效果画成成品。</p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="icon">01</div>
+            <h3>Emby 封面系统</h3>
+            <p>手动封面、封面设计、自动封面、备份恢复、字体管理和模板管理，统一维护媒体库视觉风格。</p>
+          </article>
+          <article class="feature-card">
+            <div class="icon">02</div>
+            <h3>115 网盘一条龙</h3>
+            <p>资源转存、目录拓扑、媒体整理、失败隔离、定时清理、秒传上传和 Life 事件监控协同工作。</p>
+          </article>
+          <article class="feature-card">
+            <div class="icon">03</div>
+            <h3>302 网关</h3>
+            <p>根据配置启动一个或多个网关服务，支持多 Emby、多端口映射和 115 资源访问链路。</p>
+          </article>
+          <article class="feature-card">
+            <div class="icon">04</div>
+            <h3>媒体整理与 STRM</h3>
+            <p>识别测试、TMDB 信息、重命名模板、二级分类、整理记录和 STRM 同步让入库过程更稳定。</p>
+          </article>
+          <article class="feature-card">
+            <div class="icon">05</div>
+            <h3>发现推荐与缺集治理</h3>
+            <p>发现内容、统计缺集、比对 TMDB、跳转资源搜索或 MoviePilot 订阅，形成补齐闭环。</p>
+          </article>
+          <article class="feature-card">
+            <div class="icon">06</div>
+            <h3>通知与运维</h3>
+            <p>微信、Telegram、Webhook、Docker 管理、系统健康、Emby 任务中心与版本升级集中在一个后台。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="workflow">
+        <div class="section-head">
+          <h2>一条龙链路怎么跑</h2>
+          <p>下面是 ChillPoster 里真实存在的协作关系：发现、转存、整理、STRM、刷新和通知。每一步都对应后台配置或任务记录。</p>
+        </div>
+
+        <div class="pipeline">
+          <div class="pipeline-card" data-step="1">
+            <strong>资源发现</strong>
+            <span>通过发现推荐、RSS、缺集统计或 MoviePilot 联动找到目标内容。</span>
+          </div>
+          <div class="pipeline-card" data-step="2">
+            <strong>115 转存</strong>
+            <span>把资源统一转入标准拓扑目录，为自动整理和 STRM 同步做准备。</span>
+          </div>
+          <div class="pipeline-card" data-step="3">
+            <strong>自动整理</strong>
+            <span>扫描、识别、刮削、重命名、二级分类，并记录整理结果。</span>
+          </div>
+          <div class="pipeline-card" data-step="4">
+            <strong>STRM 与刷新</strong>
+            <span>生成或更新 STRM 文件，触发 Emby 媒体库刷新和计划任务。</span>
+          </div>
+          <div class="pipeline-card" data-step="5">
+            <strong>通知闭环</strong>
+            <span>整理成功、失败、入库聚合、签到和系统任务都能推送到通知渠道。</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="docs">
+        <div class="section-head">
+          <h2>Wiki 文档</h2>
+          <p>Wiki 按安装、配置、功能、运维和发布来写，尽量说明在哪里配置、会影响什么、排障先看哪里。</p>
+        </div>
+
+        <div class="docs-layout">
+          <aside class="doc-menu" aria-label="Wiki 目录">
+            <button class="active" data-page="overview">Wiki 首页 <span>›</span></button>
+            <button data-page="install">安装部署 <span>›</span></button>
+            <button data-page="config">核心配置 <span>›</span></button>
+            <button data-page="features">功能指南 <span>›</span></button>
+            <button data-page="ops">运维手册 <span>›</span></button>
+            <button data-page="release">发布流程 <span>›</span></button>
+          </aside>
+
+          <article class="doc-panel" id="docPanel"></article>
+        </div>
+      </section>
+
+      <section id="deploy">
+        <div class="section-head">
+          <h2>几分钟部署到 NAS，长期运行更省心</h2>
+          <p>正式使用推荐 Docker 或 Docker Compose。本地开发可以用 Python + Vite 构建前端后启动。</p>
+        </div>
+
+        <div class="doc-panel">
+          <h3>Docker Compose 示例</h3>
+          <div class="code-block">services:
+  chillposter:
+    image: chillne/chillposter:latest
+    container_name: chillposter
+    restart: unless-stopped
+    ports:
+      - "5256:5256"
+      - "8011:8011"
+    volumes:
+      - ./config:/app/config
+      - ./fonts:/app/fonts
+      - ./templates:/app/templates
+      - ./layouts:/app/layouts
+      - ./backups:/app/backups</div>
+          <div class="wiki-grid">
+            <div class="wiki-card">
+              <h3>管理端口</h3>
+              <p>默认访问 <code>http://NAS_IP:5256</code>。不建议直接暴露公网，远程访问优先使用 VPN 或带鉴权的反代。</p>
+            </div>
+            <div class="wiki-card">
+              <h3>网关端口</h3>
+              <p>如果启用 302 网关，需要额外映射配置中的网关端口，例如 <code>8011</code>。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <strong>ChillPoster</strong> · 面向 Emby 与 115 网盘生态的家庭影音自动化中枢。
+    </footer>
+  </div>
+
+  <script>
+    const pages = {
+      overview: `
+        <h2>ChillPoster Wiki</h2>
+        <p>ChillPoster 是一个以 Emby 为中心、深度适配 115 网盘使用场景的影音自动化管理系统。它通过统一 Web UI 管理封面、转存、302 网关、整理、STRM、RSS、缺集、通知与运维。</p>
+        <div class="wiki-grid">
+          <div class="wiki-card"><h3>适合谁</h3><p>已经使用 Emby，并希望统一管理封面、媒体库和后台任务的 NAS 用户。</p></div>
+          <div class="wiki-card"><h3>解决什么</h3><p>把资源发现、网盘转存、目录整理、Emby 入库和通知反馈变成可观察的闭环。</p></div>
+          <div class="wiki-card"><h3>核心入口</h3><p>仪表盘、网盘一条龙、封面系统、工具箱和核心配置共同组成日常控制台。</p></div>
+          <div class="wiki-card"><h3>长期维护</h3><p>任务状态、日志、健康检查、Docker 管理和发布流程让服务更容易长期运行。</p></div>
+        </div>
+        <h3>架构概览</h3>
+        <ul>
+          <li><code>main.py</code> 启动 UI 应用与一个或多个网关服务。</li>
+          <li><code>app/routers/</code> 提供 API 路由。</li>
+          <li><code>app/services/</code> 承载网盘、通知、整理、RSS、STRM 等服务逻辑。</li>
+          <li><code>frontend/</code> 是 Vue/Vite 管理端源码。</li>
+          <li><code>config/</code> 保存本地配置、状态和日志，通常不提交 Git。</li>
+        </ul>
+      `,
+      install: `
+        <h2>安装部署</h2>
+        <p>生产使用推荐 Docker 或 Docker Compose；开发调试可本地源码运行。</p>
+        <h3>Docker 快速部署</h3>
+        <div class="code-block">docker run -d \\
+  --name chillposter \\
+  -p 5256:5256 \\
+  -v /volume1/docker/chillposter/config:/app/config \\
+  -v /volume1/docker/chillposter/fonts:/app/fonts \\
+  -v /volume1/docker/chillposter/templates:/app/templates \\
+  -v /volume1/docker/chillposter/layouts:/app/layouts \\
+  chillne/chillposter:latest</div>
+        <h3>本地源码运行</h3>
+        <div class="code-block">source .venv/bin/activate
+pip install -r requirements.txt
+
+cd frontend
+npm install
+npm run build
+
+cd ..
+python main.py</div>
+        <h3>NAS 直测</h3>
+        <p>测试本地未提交改动时，优先使用 <code>scripts/deploy-nas-dev.sh</code>。它会本地构建镜像，通过局域网传输到 NAS 并重启 Compose 服务。</p>
+      `,
+      config: `
+        <h2>核心配置</h2>
+        <p>推荐先完成账户、Emby、115、302、媒体整理、STRM、通知和 TMDB 配置，再开启自动化任务。</p>
+        <h3>首次配置顺序</h3>
+        <ol>
+          <li>账户管理：修改默认登录信息。</li>
+          <li>Emby 配置：填写 Emby 地址与 API Key。</li>
+          <li>115 配置：绑定账号、根目录与转存目录。</li>
+          <li>302 配置：设置网关端口和访问模式。</li>
+          <li>媒体整理：配置源目录、目标目录、分类规则与监控目录。</li>
+          <li>STRM 同步：创建同步任务并验证 Emby 扫描结果。</li>
+          <li>通知配置：绑定微信、Telegram 或 Webhook。</li>
+        </ol>
+        <h3>标准拓扑建议</h3>
+        <div class="code-block">影视库/
+├── 转存目录/
+├── 整理目录/
+├── 媒体库/
+└── 失败目录/</div>
+        <p>标准拓扑能让转存源、整理目标、失败隔离和 Emby 入库关系更清晰。</p>
+      `,
+      features: `
+        <h2>功能指南</h2>
+        <h3>封面系统</h3>
+        <p>支持手动封面、封面设计、自动封面、封面备份、字体管理、模板管理与翻译配置。建议先做单媒体预览，再批量应用。</p>
+        <h3>媒体整理</h3>
+        <p>负责扫描源目录、识别电影与剧集、匹配 TMDB、重命名、二级分类、刷新 Emby 并写入整理记录。正式开启监控前建议先用识别测试验证规则。</p>
+        <h3>缺集统计</h3>
+        <p>读取本地媒体库并比对 TMDB 季集信息，帮助定位缺失内容，可联动资源搜索或 MoviePilot 订阅。</p>
+        <h3>RSS 与真实库</h3>
+        <p>支持创建任务、Cron 定时、手动运行、启停任务和标准路径绑定，适合把订阅源接入一条龙链路。</p>
+        <h3>Emby 任务中心</h3>
+        <p>可查看任务分组、运行或停止任务、保存触发器、开启任务通知并查看进度。</p>
+      `,
+      ops: `
+        <h2>运维手册</h2>
+        <h3>日常检查</h3>
+        <ul>
+          <li>UI 是否能打开，<code>/api/version</code> 是否返回预期版本。</li>
+          <li>系统健康页面是否有异常。</li>
+          <li>后台任务是否存在长时间 running。</li>
+          <li>302 网关端口是否可访问。</li>
+          <li>Emby、115 和通知渠道是否仍然有效。</li>
+        </ul>
+        <h3>日志位置</h3>
+        <div class="code-block">config/app.log
+config/app.log.1
+config/app.log.2
+config/app.log.3</div>
+        <h3>备份策略</h3>
+        <p>升级、迁移或重装前建议备份 <code>config/</code>、<code>fonts/</code>、<code>templates/</code>、<code>layouts/</code> 与 <code>backups/</code>。</p>
+        <h3>安全建议</h3>
+        <p>不要直接把管理端口暴露公网。远程访问建议使用 VPN、内网穿透认证或反向代理鉴权。</p>
+      `,
+      release: `
+        <h2>发布流程</h2>
+        <p>ChillPoster 的正式 Docker 版本以 Git tag 为准。Tag 格式为 <code>vX.Y.Z.N</code>，例如 <code>v1.0.0.2</code>。</p>
+        <h3>发布前检查</h3>
+        <div class="code-block">git status
+python -m py_compile main.py
+
+cd frontend
+npm run build</div>
+        <h3>提交与打标签</h3>
+        <div class="code-block">git add &lt;changed-files&gt;
+git commit -m "Describe the change"
+git push
+
+git tag v1.0.0.2
+git push origin v1.0.0.2</div>
+        <h3>镜像标签</h3>
+        <ul>
+          <li><code>chillne/chillposter:v1.0.0.2</code></li>
+          <li><code>chillne/chillposter:1.0.0.2</code></li>
+          <li><code>chillne/chillposter:latest</code></li>
+        </ul>
+      `
+    };
+
+    function scrollToId(id) {
+      const target = id === "top" ? document.body : document.getElementById(id);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
+    document.querySelectorAll("[data-scroll]").forEach((button) => {
+      button.addEventListener("click", () => scrollToId(button.dataset.scroll));
+    });
+
+    const docPanel = document.getElementById("docPanel");
+    const docButtons = Array.from(document.querySelectorAll("[data-page]"));
+
+    function setPage(page) {
+      docPanel.innerHTML = pages[page] || pages.overview;
+      docButtons.forEach((button) => button.classList.toggle("active", button.dataset.page === page));
+      history.replaceState(null, "", `#${page}`);
+    }
+
+    docButtons.forEach((button) => {
+      button.addEventListener("click", () => setPage(button.dataset.page));
+    });
+
+    const initial = location.hash.replace("#", "");
+    setPage(pages[initial] ? initial : "overview");
+  </script>
+</body>
+</html>

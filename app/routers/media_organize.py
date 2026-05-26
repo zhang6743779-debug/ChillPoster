@@ -117,6 +117,12 @@ class OrganizeRequest(BaseModel):
     _organize_chain_id: str = PrivateAttr(default="")
 
 
+class EmbyLibraryLocaleFixPayload(BaseModel):
+    server_idx: int = 0
+    overwrite: bool = False
+    refresh_cache: bool = True
+
+
 _DEFAULT_SCRAPE_FIELDS = {
     "emby_scrapers_enabled": False,
     "scrape_enabled": True,
@@ -890,6 +896,47 @@ async def refresh_emby_lib_cache():
     from app.services.emby_library_cache import refresh_cache
     count = refresh_cache()
     return {"status": "success", "count": count, "message": "Emby 媒体库快照已刷新"}
+
+
+@router.post("/emby_libraries/fix_locale_defaults")
+async def fix_emby_library_locale_defaults(payload: Optional[EmbyLibraryLocaleFixPayload] = None):
+    """一次性修复已有 Emby 媒体库的语言/地区默认值。"""
+    from app.routers.config_302 import get_emby_config_by_index_sync
+    from core.emby_client import EmbyClient
+
+    req = payload or EmbyLibraryLocaleFixPayload()
+    server = get_emby_config_by_index_sync(req.server_idx)
+    if not isinstance(server, dict) or not server.get("url") or not server.get("key"):
+        raise HTTPException(status_code=400, detail="请先在 Emby 配置中填写地址和接口密钥")
+
+    client = EmbyClient(server["url"], server["key"], server.get("public_host") or server.get("url"))
+    try:
+        result = client.fix_library_locale_defaults(overwrite=req.overwrite)
+        cache_count = None
+        if req.refresh_cache:
+            try:
+                from app.services.emby_library_cache import refresh_cache
+                cache_count = refresh_cache()
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 修复媒体库语言后刷新快照失败: {e}")
+
+        status = "success" if result.get("failed", 0) == 0 else "partial_success"
+        return {
+            "status": status,
+            "message": (
+                f"已修复 {result.get('updated', 0)} 个媒体库，"
+                f"跳过 {result.get('skipped', 0)} 个，失败 {result.get('failed', 0)} 个"
+            ),
+            "server_idx": req.server_idx,
+            "overwrite": req.overwrite,
+            "cache_count": cache_count,
+            **result,
+        }
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 # ==========================================
