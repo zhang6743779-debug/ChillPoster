@@ -114,6 +114,7 @@ class OrganizeRequest(BaseModel):
     source_cid: str = ''
     source_name: str = ''
     _prefetched_source_tree_entries: Optional[list[dict]] = PrivateAttr(default=None)
+    _organize_chain_id: str = PrivateAttr(default="")
 
 
 _DEFAULT_SCRAPE_FIELDS = {

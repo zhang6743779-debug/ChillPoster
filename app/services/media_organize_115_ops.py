@@ -1344,8 +1344,9 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
                                   failed_dir_cid: str, moved_dirs: set,
                                   subtitles_by_parent: dict | None = None,
                                   target_path: str = "",
-                                  move_top_dir: bool = True):
-    """将失败文件所在的源目录顶层文件夹移到失败目录；根目录文件则移动文件及匹配字幕。"""
+                                  move_top_dir: bool = True,
+                                  target_label: str = "整理失败目录"):
+    """将文件或源目录顶层文件夹移到指定兜底目录；根目录文件则移动文件及匹配字幕。"""
     try:
         file_id = str(file_item.get("id") or file_item.get("fid", ""))
         if move_top_dir:
@@ -1362,7 +1363,7 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
             if target_path:
                 _record_organized_source_path(file_id or target_id, target_path, source_path=file_item.get("path", ""))
             label = "目录" if moving_dir else "文件"
-            logger.debug(f"[MediaOrganize] 移动失败{label}: {target_name or file_item.get('name', '')} -> 整理失败目录")
+            logger.debug(f"[MediaOrganize] 移动{label}到{target_label}: {target_name or file_item.get('name', '')}")
         if subtitles_by_parent and not moving_dir:
             await _move_matched_subtitles_to_target(
                 client,
@@ -1373,15 +1374,17 @@ async def _move_top_dir_to_failed(client, file_item: dict, source_cid_str: str,
             )
     except Exception as e:
         logger.warning(
-            f"[MediaOrganize] 移动失败文件失败: file={file_item.get('name', '')}, "
+            f"[MediaOrganize] 移动条目到{target_label}失败: file={file_item.get('name', '')}, "
             f"source_cid={source_cid_str}, target={target_path or failed_dir_cid}, err={e}"
         )
 
 
 async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
                                    failed_dir_cid: str, moved_dirs: set,
-                                   subtitles_by_parent: dict | None = None):
-    """批量将失败文件所在的源目录顶层文件夹移到失败目录，一次 API 请求。"""
+                                   subtitles_by_parent: dict | None = None,
+                                   target_label: str = "整理失败目录",
+                                   move_top_dir: bool = True):
+    """批量将文件或文件所在源目录顶层文件夹移到指定兜底目录，一次 API 请求。"""
     ids_to_move = []
     seen_targets = set()
     file_ids_by_target = {}
@@ -1389,7 +1392,12 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
     direct_file_ids = set()
     for fi in group_failed:
         file_id = str(fi.get("id") or fi.get("fid", ""))
-        target_id, moving_dir, target_name = _resolve_failed_move_target(client, fi, source_cid)
+        if move_top_dir:
+            target_id, moving_dir, target_name = _resolve_failed_move_target(client, fi, source_cid)
+        else:
+            target_id = file_id
+            moving_dir = False
+            target_name = str(fi.get("name", "") or "")
         if target_id and file_id:
             file_ids_by_target.setdefault(target_id, []).append(file_id)
         if target_id and file_id and not moving_dir:
@@ -1409,13 +1417,15 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
             for source_file_id in file_ids_by_target.get(target_id, []):
                 moved_dirs.add(source_file_id)
             label = "目录" if moving_dir_by_target.get(target_id) else "文件"
-            logger.debug(f"[MediaOrganize] 移动失败{label}: {name} -> 整理失败目录")
+            logger.debug(f"[MediaOrganize] 移动{label}到{target_label}: {name}")
     except Exception as e:
-        logger.warning(f"[MediaOrganize] 批量移动失败文件/目录失败: 条目数={len(ids_to_move)}, err={e}")
+        logger.warning(f"[MediaOrganize] 批量移动条目到{target_label}失败: 条目数={len(ids_to_move)}, err={e}")
         # 降级逐个移动
         for fi in group_failed:
             await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,
-                                          subtitles_by_parent=subtitles_by_parent)
+                                          subtitles_by_parent=subtitles_by_parent,
+                                          target_label=target_label,
+                                          move_top_dir=move_top_dir)
         return
 
     if subtitles_by_parent:

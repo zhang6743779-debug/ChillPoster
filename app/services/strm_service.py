@@ -3,6 +3,7 @@ import json
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, CancelledError
+from datetime import date, datetime
 from itertools import batched
 from queue import Queue, Empty
 from threading import Thread, Event, Lock
@@ -62,6 +63,8 @@ ProcessResult = namedtuple("ProcessResult", ["status", "path", "message", "data"
 
 _tmdb_fallback_cache_lock = Lock()
 _tmdb_fallback_cache: dict[tuple, tuple[float, dict | None]] = {}
+_tmdb_long_term_missing_lock = Lock()
+_tmdb_long_term_missing_schema_ready = False
 
 
 def _build_folder_counter() -> dict:
@@ -223,6 +226,201 @@ def _build_tmdb_scrape_group_key(local_file_path: str, media_type: str) -> str:
     return parent
 
 
+def _ensure_tmdb_long_term_missing_schema() -> bool:
+    global _tmdb_long_term_missing_schema_ready
+    if _tmdb_long_term_missing_schema_ready:
+        return True
+    with _tmdb_long_term_missing_lock:
+        if _tmdb_long_term_missing_schema_ready:
+            return True
+        try:
+            from core.cache_db import tmdb_cache_db
+            with tmdb_cache_db(write=True) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS tmdb_long_term_missing_metadata (
+                        local_file_path TEXT NOT NULL,
+                        metadata_key TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        tmdb_id INTEGER NOT NULL DEFAULT 0,
+                        release_date TEXT NOT NULL DEFAULT '',
+                        status TEXT NOT NULL DEFAULT '',
+                        reason TEXT NOT NULL DEFAULT '',
+                        marked_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        PRIMARY KEY (local_file_path, metadata_key)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tmdb_long_term_missing_lookup
+                    ON tmdb_long_term_missing_metadata(local_file_path, media_type, tmdb_id)
+                    """
+                )
+            _tmdb_long_term_missing_schema_ready = True
+            return True
+        except Exception as e:
+            logger.debug(f"[STRM] 长期缺失TMDb元数据缓存初始化失败: {e}")
+            return False
+
+
+def _parse_tmdb_date(value: str) -> Optional[date]:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _days_since_tmdb_date(value: str) -> Optional[int]:
+    parsed = _parse_tmdb_date(value)
+    if not parsed:
+        return None
+    return (date.today() - parsed).days
+
+
+def _tmdb_source_for_media(data: Optional[dict], media_type: str) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    if str(media_type or "").lower() == "movie":
+        return data
+    source = data.get("series_details")
+    return source if isinstance(source, dict) else data
+
+
+def _latest_episode_air_date(data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    latest: Optional[date] = None
+    episodes = data.get("episodes_details")
+    if isinstance(episodes, dict):
+        iterable = episodes.values()
+    else:
+        iterable = []
+    for episode in iterable:
+        if not isinstance(episode, dict):
+            continue
+        air_date = _parse_tmdb_date(episode.get("air_date") or "")
+        if air_date and (latest is None or air_date > latest):
+            latest = air_date
+    return latest.isoformat() if latest else ""
+
+
+def _long_term_missing_reason(tmdb_data: Optional[dict], media_type: str) -> tuple[bool, str, str, str]:
+    source = _tmdb_source_for_media(tmdb_data, media_type)
+    normalized_type = str(media_type or "").lower()
+    if normalized_type == "movie":
+        release_date = str(source.get("release_date") or "").strip()
+        age_days = _days_since_tmdb_date(release_date)
+        if age_days is not None and age_days >= 365:
+            return True, release_date, str(source.get("status") or "").strip(), f"电影上映超过一年({age_days}天)"
+        return False, release_date, str(source.get("status") or "").strip(), ""
+
+    status = str(source.get("status") or "").strip()
+    normalized_status = status.lower()
+    ended = normalized_status in {"ended", "canceled", "cancelled"}
+    last_air_date = str(source.get("last_air_date") or "").strip() or _latest_episode_air_date(tmdb_data)
+    age_days = _days_since_tmdb_date(last_air_date)
+    if ended and age_days is not None and age_days >= 365:
+        return True, last_air_date, status, f"剧集完结超过一年({age_days}天)"
+    return False, last_air_date, status, ""
+
+
+def _get_long_term_missing_metadata_marks(local_file_path: str, media_type: str, tmdb_id: int) -> set[str]:
+    if not local_file_path or not tmdb_id or not _ensure_tmdb_long_term_missing_schema():
+        return set()
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT metadata_key
+                FROM tmdb_long_term_missing_metadata
+                WHERE local_file_path = ? AND media_type = ? AND tmdb_id = ?
+                """,
+                (str(local_file_path), str(media_type), int(tmdb_id)),
+            ).fetchall()
+        return {str(row["metadata_key"]) for row in rows if str(row["metadata_key"] or "")}
+    except Exception as e:
+        logger.debug(f"[STRM] 读取长期缺失TMDb元数据标记失败: {e}")
+        return set()
+
+
+def _sync_long_term_missing_metadata_marks(
+    local_file_path: str,
+    parsed: dict,
+    tmdb_data: Optional[dict],
+    remaining_missing: list[str],
+) -> None:
+    if not local_file_path or not isinstance(parsed, dict) or not _ensure_tmdb_long_term_missing_schema():
+        return
+    tmdb_id = int(parsed.get("tmdb_id_direct") or 0)
+    media_type = str(parsed.get("media_type") or "")
+    if not tmdb_id or not media_type:
+        return
+
+    remaining = sorted({str(item or "") for item in remaining_missing if str(item or "")})
+    is_long_term, release_date, status, reason = _long_term_missing_reason(tmdb_data, media_type)
+    now_ts = time.time()
+    try:
+        from core.cache_db import tmdb_cache_db
+        with tmdb_cache_db(write=True) as conn:
+            if not remaining:
+                conn.execute(
+                    "DELETE FROM tmdb_long_term_missing_metadata WHERE local_file_path = ? AND media_type = ? AND tmdb_id = ?",
+                    (str(local_file_path), media_type, tmdb_id),
+                )
+                return
+            if not is_long_term:
+                return
+            placeholders = ",".join("?" for _ in remaining)
+            conn.execute(
+                f"""
+                DELETE FROM tmdb_long_term_missing_metadata
+                WHERE local_file_path = ? AND media_type = ? AND tmdb_id = ?
+                AND metadata_key NOT IN ({placeholders})
+                """,
+                (str(local_file_path), media_type, tmdb_id, *remaining),
+            )
+            for metadata_key in remaining:
+                conn.execute(
+                    """
+                    INSERT INTO tmdb_long_term_missing_metadata(
+                        local_file_path, metadata_key, media_type, tmdb_id,
+                        release_date, status, reason, marked_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(local_file_path, metadata_key) DO UPDATE SET
+                        media_type = excluded.media_type,
+                        tmdb_id = excluded.tmdb_id,
+                        release_date = excluded.release_date,
+                        status = excluded.status,
+                        reason = excluded.reason,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        str(local_file_path),
+                        metadata_key,
+                        media_type,
+                        tmdb_id,
+                        release_date,
+                        status,
+                        reason,
+                        now_ts,
+                        now_ts,
+                    ),
+                )
+        logger.info(
+            f"[STRM] 长期缺失TMDb元数据已标记: {local_file_path} | "
+            f"TMDb:{tmdb_id} | 缺失:{','.join(remaining)} | {reason}"
+        )
+    except Exception as e:
+        logger.debug(f"[STRM] 写入长期缺失TMDb元数据标记失败: {e}")
+
+
 def _prune_tmdb_fallback_cache(now_ts: float):
     expired_keys = [
         key for key, (ts, _) in _tmdb_fallback_cache.items()
@@ -366,6 +564,7 @@ def _process_tmdb_batch(
     log_prefix: str,
     cancel_event: Optional[Event],
     progress_callback: Optional[Callable[[], None]] = None,
+    respect_long_term_missing_skip: bool = True,
 ) -> None:
     """处理单批 TMDb 补齐：预处理 → 并发拉取 → 分组落盘，处理完后释放 data_by_key。"""
     prepared_items: list[dict] = []
@@ -404,10 +603,11 @@ def _process_tmdb_batch(
             logger.debug(f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 缺少直写 TMDb ID | 文件:{remote_file_path}")
             continue
 
+        media_type = str(parsed.get("media_type", "") or "")
         check_started = perf_counter()
         missing = list_missing_tmdb_metadata_for_strm(
             local_file_path,
-            parsed["media_type"],
+            media_type,
             scraping_config,
             parsed.get("season"),
             parsed.get("episode"),
@@ -420,8 +620,16 @@ def _process_tmdb_batch(
         if not missing:
             stats["tmdb_skipped"] += 1
             continue
+        if respect_long_term_missing_skip:
+            marked_missing = _get_long_term_missing_metadata_marks(local_file_path, media_type, tmdb_id)
+            if marked_missing and set(missing).issubset(marked_missing):
+                stats["tmdb_skipped"] += 1
+                logger.debug(
+                    f"[STRM] {log_prefix} TMDb 元数据补齐跳过: 长期缺失已标记 | "
+                    f"文件:{remote_file_path} | 缺失:{','.join(missing)}"
+                )
+                continue
 
-        media_type = str(parsed.get("media_type", "") or "")
         fetch_key = (tmdb_id, media_type)
         required_episode_keys = _normalize_required_episodes(None, parsed, parsed.get("season"))
         cached = _get_cached_tmdb_fallback_value(fetch_key, media_type, required_episode_keys)
@@ -521,6 +729,14 @@ def _process_tmdb_batch(
                     overwrite=False,
                 )
                 generated_total += len(generated)
+                remaining_missing = list_missing_tmdb_metadata_for_strm(
+                    local_file_path,
+                    parsed["media_type"],
+                    scraping_config,
+                    parsed.get("season"),
+                    parsed.get("episode"),
+                )
+                _sync_long_term_missing_metadata_marks(local_file_path, parsed, tmdb_data, remaining_missing)
                 if logger.isEnabledFor(10):
                     logger.debug(
                         f"[STRM] TMDb本地刮削完成: {remote_file_path} | 生成:{len(generated)} | "
@@ -573,6 +789,7 @@ def _apply_tmdb_fallbacks(
     log_prefix: str,
     cancel_event: Optional[Event] = None,
     progress_callback: Optional[Callable[[], None]] = None,
+    respect_long_term_missing_skip: bool = True,
 ):
     if not plans:
         return
@@ -608,6 +825,7 @@ def _apply_tmdb_fallbacks(
                 log_prefix,
                 cancel_event,
                 progress_callback,
+                respect_long_term_missing_skip,
             )
             if progress_callback:
                 progress_callback()
@@ -1005,9 +1223,13 @@ def _process_single_item(
         if file_class in ("video", "audio") and sync_video:
             strm_name = get_strm_filename(filename)
             strm_path = os.path.join(target_dir, strm_name)
+            data = {
+                "strm_path": strm_path,
+                "tmdb_plan": _build_tmdb_plan(item, remote_path, local_path, strm_path) if download_tmdb_metadata else None,
+            }
 
             if overwrite_mode == "skip" and not force_strm_overwrite and os.path.exists(strm_path):
-                return ProcessResult("skip", filename, "STRM已存在", None)
+                return ProcessResult("skip", filename, "STRM已存在", data)
 
             if file_class == "video" and min_video_size_mb > 0:
                 try:
@@ -1019,10 +1241,6 @@ def _process_single_item(
 
             strm_url = build_strm_url(url_base, pickcode, filename)
             write_queue.put((strm_path, strm_url, filename))
-            data = {
-                "strm_path": strm_path,
-                "tmdb_plan": _build_tmdb_plan(item, remote_path, local_path, strm_path) if download_tmdb_metadata else None,
-            }
             return ProcessResult("submitted", None, None, data)
 
         elif file_class == "subtitle" or (file_class in ("image", "data") and download_aux):
@@ -1965,6 +2183,10 @@ class StrmService:
                 elif result and result.status == "skip":
                     stats["skipped"] += 1
                     _record_skip(result.message)
+                    if result.message == "STRM已存在" and item_download_tmdb_metadata:
+                        tmdb_plan = (result.data or {}).get("tmdb_plan") if result.data else None
+                        if tmdb_plan:
+                            tmdb_plans.append(tmdb_plan)
                 elif result and result.status == "submitted" and item_download_tmdb_metadata:
                     tmdb_plan = (result.data or {}).get("tmdb_plan") if result.data else None
                     if tmdb_plan:
@@ -2002,7 +2224,15 @@ class StrmService:
                 stats["retry_failed"] += retry_fail
 
             if download_tmdb_metadata and tmdb_plans and not (cancel_event and cancel_event.is_set()):
-                _apply_tmdb_fallbacks(tmdb_plans, scraping_config, tmdb_api_key, stats, "增量", cancel_event)
+                _apply_tmdb_fallbacks(
+                    tmdb_plans,
+                    scraping_config,
+                    tmdb_api_key,
+                    stats,
+                    "增量",
+                    cancel_event,
+                    respect_long_term_missing_skip=(overwrite_mode != "overwrite"),
+                )
         finally:
             dl_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -2158,6 +2388,9 @@ class StrmService:
                     "generated": int(payload.get("generated", 0) or 0),
                     "downloaded": int(payload.get("downloaded", 0) or 0),
                     "download_failed": int(payload.get("download_failed", 0) or 0),
+                    "tmdb_generated": int(payload.get("tmdb_generated", 0) or 0),
+                    "tmdb_skipped": int(payload.get("tmdb_skipped", 0) or 0),
+                    "tmdb_failed": int(payload.get("tmdb_failed", 0) or 0),
                     "skipped": int(payload.get("skipped", 0) or 0),
                     "deleted": int(payload.get("deleted", 0) or 0),
                     "failed": int(payload.get("failed", 0) or 0),
@@ -2453,6 +2686,10 @@ class StrmService:
                         elif result and result.status == "skip":
                             stats["skipped"] += 1
                             _record_skip(result.message)
+                            if result.message == "STRM已存在" and download_tmdb_metadata:
+                                tmdb_plan = (result.data or {}).get("tmdb_plan") if result.data else None
+                                if tmdb_plan:
+                                    tmdb_plans.append(tmdb_plan)
                         elif result and result.status == "submitted" and download_tmdb_metadata:
                             tmdb_plan = (result.data or {}).get("tmdb_plan") if result.data else None
                             if tmdb_plan:
@@ -2556,6 +2793,7 @@ class StrmService:
                     "全量",
                     cancel_event,
                     _update_tmdb_progress,
+                    respect_long_term_missing_skip=(overwrite_mode != "overwrite"),
                 )
 
             elapsed = perf_counter() - start_time

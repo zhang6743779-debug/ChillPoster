@@ -840,7 +840,7 @@ def _format_organize_task_size(size_value) -> str:
         return f"{value:.{precision}f}".rstrip("0").rstrip(".")
 
     if size >= 1024 ** 4:
-        return f"{_compact(size / 1024 ** 4)}TB"
+        return f"{_compact(size / 1024 ** 4, 3)}TB"
     if size >= 1024 ** 3:
         return f"{_compact(size / 1024 ** 3)}GB"
     if size >= 1024 ** 2:
@@ -1034,6 +1034,8 @@ _ORGANIZE_PROGRESS_MIN_INTERVAL_SECONDS = 1.0
 _ORGANIZE_PROGRESS_MIN_FILE_DELTA = 10
 _ORGANIZE_PROGRESS_THROTTLE_LOCK = threading.Lock()
 _ORGANIZE_PROGRESS_THROTTLE_STATE: dict[str, dict] = {}
+_ORGANIZE_NOTIFY_CHAIN_LOCK = threading.Lock()
+_ORGANIZE_NOTIFY_CHAINS: dict[str, dict] = {}
 
 
 def _should_emit_streaming_progress(run_id: str, *, scanned_video_count: int,
@@ -1069,6 +1071,138 @@ def _should_emit_streaming_progress(run_id: str, *, scanned_video_count: int,
 def _clear_streaming_progress_throttle(run_id: str) -> None:
     with _ORGANIZE_PROGRESS_THROTTLE_LOCK:
         _ORGANIZE_PROGRESS_THROTTLE_STATE.pop(run_id, None)
+
+
+def _record_deferred_organize_task_notify(
+    chain_id: str,
+    *,
+    run_id: str = "",
+    source_cid: str = "",
+    status: str,
+    total_files: int = 0,
+    success_count: int = 0,
+    failed_count: int = 0,
+    skipped_count: int = 0,
+    sha1_duplicate_skipped_count: int = 0,
+    wash_rejected_skipped_count: int = 0,
+    same_batch_duplicate_skipped_count: int = 0,
+    trailer_skipped_count: int = 0,
+    other_skipped_count: int = 0,
+    strm_generated_count: int = 0,
+    organize_size_bytes: int = 0,
+    elapsed_seconds: float | None = None,
+    detail: str = "",
+) -> None:
+    """Accumulate one organize run into a source cleanup chain notification."""
+    chain_id = str(chain_id or "").strip()
+    if not chain_id:
+        _send_organize_task_notify(
+            status=status,
+            total_files=total_files,
+            success_count=success_count,
+            failed_count=failed_count,
+            skipped_count=skipped_count,
+            sha1_duplicate_skipped_count=sha1_duplicate_skipped_count,
+            wash_rejected_skipped_count=wash_rejected_skipped_count,
+            same_batch_duplicate_skipped_count=same_batch_duplicate_skipped_count,
+            trailer_skipped_count=trailer_skipped_count,
+            other_skipped_count=other_skipped_count,
+            strm_generated_count=strm_generated_count,
+            organize_size_bytes=organize_size_bytes,
+            elapsed_seconds=elapsed_seconds,
+            detail=detail,
+        )
+        return
+
+    now = _time.time()
+    with _ORGANIZE_NOTIFY_CHAIN_LOCK:
+        chain = _ORGANIZE_NOTIFY_CHAINS.setdefault(chain_id, {
+            "chain_id": chain_id,
+            "source_cid": str(source_cid or ""),
+            "started_at": now,
+            "last_updated_at": now,
+            "run_ids": [],
+            "status": status,
+            "total_files": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "skipped_count": 0,
+            "sha1_duplicate_skipped_count": 0,
+            "wash_rejected_skipped_count": 0,
+            "same_batch_duplicate_skipped_count": 0,
+            "trailer_skipped_count": 0,
+            "other_skipped_count": 0,
+            "strm_generated_count": 0,
+            "organize_size_bytes": 0,
+            "elapsed_seconds": 0.0,
+            "details": [],
+        })
+        chain["last_updated_at"] = now
+        if source_cid:
+            chain["source_cid"] = str(source_cid)
+        if run_id and run_id not in chain["run_ids"]:
+            chain["run_ids"].append(run_id)
+        if status != "success":
+            chain["status"] = status
+        chain["total_files"] += int(total_files or 0)
+        chain["success_count"] += int(success_count or 0)
+        chain["failed_count"] += int(failed_count or 0)
+        chain["skipped_count"] += int(skipped_count or 0)
+        chain["sha1_duplicate_skipped_count"] += int(sha1_duplicate_skipped_count or 0)
+        chain["wash_rejected_skipped_count"] += int(wash_rejected_skipped_count or 0)
+        chain["same_batch_duplicate_skipped_count"] += int(same_batch_duplicate_skipped_count or 0)
+        chain["trailer_skipped_count"] += int(trailer_skipped_count or 0)
+        chain["other_skipped_count"] += int(other_skipped_count or 0)
+        chain["strm_generated_count"] += int(strm_generated_count or 0)
+        chain["organize_size_bytes"] += int(organize_size_bytes or 0)
+        if elapsed_seconds is not None:
+            chain["elapsed_seconds"] += float(elapsed_seconds or 0.0)
+        if detail:
+            chain["details"].append(str(detail))
+        logger.info(
+            f"[MediaOrganize] 已累加整理统计: chain={chain_id} runs={len(chain['run_ids'])} "
+            f"成功={chain['success_count']}/{chain['total_files']} 体积={_format_organize_task_size(chain['organize_size_bytes']) or '-'}"
+        )
+
+
+def _flush_deferred_organize_task_notify(chain_id: str, *, extra_detail: str = "") -> bool:
+    chain_id = str(chain_id or "").strip()
+    if not chain_id:
+        return False
+    with _ORGANIZE_NOTIFY_CHAIN_LOCK:
+        chain = _ORGANIZE_NOTIFY_CHAINS.pop(chain_id, None)
+    if not chain:
+        return False
+
+    detail_lines = []
+    run_count = len(chain.get("run_ids") or [])
+    if run_count > 1:
+        detail_lines.append(f"已合并 {run_count} 次整理（含自动补跑）")
+    detail_lines.extend(str(item) for item in chain.get("details", []) if item)
+    if extra_detail:
+        detail_lines.append(str(extra_detail))
+
+    _send_organize_task_notify(
+        status=chain.get("status") or "success",
+        total_files=int(chain.get("total_files") or 0),
+        success_count=int(chain.get("success_count") or 0),
+        failed_count=int(chain.get("failed_count") or 0),
+        skipped_count=int(chain.get("skipped_count") or 0),
+        sha1_duplicate_skipped_count=int(chain.get("sha1_duplicate_skipped_count") or 0),
+        wash_rejected_skipped_count=int(chain.get("wash_rejected_skipped_count") or 0),
+        same_batch_duplicate_skipped_count=int(chain.get("same_batch_duplicate_skipped_count") or 0),
+        trailer_skipped_count=int(chain.get("trailer_skipped_count") or 0),
+        other_skipped_count=int(chain.get("other_skipped_count") or 0),
+        strm_generated_count=int(chain.get("strm_generated_count") or 0),
+        organize_size_bytes=int(chain.get("organize_size_bytes") or 0),
+        elapsed_seconds=float(chain.get("elapsed_seconds") or 0.0),
+        detail="\n".join(detail_lines),
+    )
+    logger.info(
+        f"[MediaOrganize] 整理链路统计通知已发送: chain={chain_id} runs={run_count} "
+        f"成功={int(chain.get('success_count') or 0)}/{int(chain.get('total_files') or 0)}"
+    )
+    return True
 
 
 def _update_streaming_progress(run_id: str, *, scanned_video_count: int, processed_result_count: int,
@@ -1202,6 +1336,7 @@ async def _trigger_auto_organize_and_wait(
     source_tree_entries: Optional[list[dict]] = None,
     source_cid: str = "",
     source_name: str = "",
+    chain_id: str = "",
 ) -> tuple[str, str]:
     from app.routers.media_organize import organize_media, OrganizeRequest
 
@@ -1223,6 +1358,8 @@ async def _trigger_auto_organize_and_wait(
         )
         if source_tree_entries is not None:
             organize_req._prefetched_source_tree_entries = list(source_tree_entries or [])
+        if chain_id:
+            organize_req._organize_chain_id = str(chain_id)
         result = await organize_media(organize_req)
         if result.get("status") == "busy":
             logger.info("[115Life] 整理启动时发现已有任务运行，跳过事件补跑")
@@ -1242,7 +1379,7 @@ async def _trigger_auto_organize_and_wait(
             await asyncio.sleep(1)
 
 
-async def _run_post_organize_followup(drive_index: int, source_cid: str, source_name: str = ""):
+async def _run_post_organize_followup(drive_index: int, source_cid: str, source_name: str = "", chain_id: str = ""):
     try:
         snapshot = await _scan_source_poll_snapshot(drive_index, source_cid)
         source_tree_entries = list(snapshot.get("tree_entries", []) or [])
@@ -1259,23 +1396,43 @@ async def _run_post_organize_followup(drive_index: int, source_cid: str, source_
                 source_tree_entries,
                 source_cid=str(source_cid),
                 source_name=str(source_name or ""),
+                chain_id=str(chain_id or ""),
             )
             if run_id:
                 logger.info(f"[MediaOrganize] 残留视频补跑完成: run_id={run_id} 状态={status}")
+                if status != "finished":
+                    _flush_deferred_organize_task_notify(
+                        chain_id,
+                        extra_detail=f"源目录仍有 {remaining_video_count} 个视频残留，自动补跑状态：{status}",
+                    )
             elif status == "organize_running":
                 logger.info("[MediaOrganize] 残留视频补跑跳过，已有整理任务正在运行")
             else:
                 logger.warning(f"[MediaOrganize] 残留视频补跑未启动: {status or '未知原因'}")
+                _flush_deferred_organize_task_notify(
+                    chain_id,
+                    extra_detail=f"源目录仍有 {remaining_video_count} 个视频残留，自动补跑未启动：{status or '未知原因'}",
+                )
             return
 
         logger.info(f"[MediaOrganize] 源目录已无视频残留，开始清理非视频残留: 条目 {entry_count} 个")
-        client = _get_115_client(drive_index)
-        await _cleanup_empty_source_dirs(client, str(source_cid))
+        cleanup_error = ""
+        try:
+            client = _get_115_client(drive_index)
+            await _cleanup_empty_source_dirs(client, str(source_cid))
+        except Exception as e:
+            cleanup_error = str(e)
+            logger.warning(f"[MediaOrganize] 清理非视频残留失败: {e}", exc_info=True)
+        _flush_deferred_organize_task_notify(
+            chain_id,
+            extra_detail=f"非视频残留清理失败：{cleanup_error}" if cleanup_error else "",
+        )
     except Exception as e:
         logger.warning(f"[MediaOrganize] 整理结束收尾失败: {e}", exc_info=True)
+        _flush_deferred_organize_task_notify(chain_id, extra_detail=f"整理结束复查失败：{e}")
 
 
-def _schedule_post_organize_followup(drive_index: int, source_cid: str, source_name: str = ""):
+def _schedule_post_organize_followup(drive_index: int, source_cid: str, source_name: str = "", chain_id: str = ""):
     main_loop = _state._main_event_loop
     done_event = _state._organize_done_event
 
@@ -1283,13 +1440,13 @@ def _schedule_post_organize_followup(drive_index: int, source_cid: str, source_n
         if done_event:
             await done_event.wait()
         await asyncio.sleep(0.5)
-        await _run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""))
+        await _run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""), str(chain_id or ""))
 
     if main_loop and not main_loop.is_closed() and main_loop.is_running():
         asyncio.run_coroutine_threadsafe(_runner(), main_loop)
     else:
         threading.Thread(
-            target=lambda: asyncio.run(_run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""))),
+            target=lambda: asyncio.run(_run_post_organize_followup(drive_index, str(source_cid), str(source_name or ""), str(chain_id or ""))),
             daemon=True,
         ).start()
 
@@ -1539,6 +1696,7 @@ async def _run_organize_async(run_id: str, req):
     pending_failed_moves: list[dict] = []
     duplicate_batch_size = 50000
     organize_cancel_event = threading.Event()
+    organize_chain_id = str(getattr(req, "_organize_chain_id", "") or f"organize_chain_{uuid.uuid4().hex[:12]}")
     _raise_cancel_if_requested = globals()["_raise_if_organize_cancelled"]
 
     def _raise_if_organize_cancelled(current_run_id: str):
@@ -1602,6 +1760,8 @@ async def _run_organize_async(run_id: str, req):
             wash_dir_cid,
             moved_dirs,
             subtitles_by_parent=subtitles_by_parent,
+            target_label=wash_target_label,
+            move_top_dir=False,
         )
         moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
@@ -1623,6 +1783,7 @@ async def _run_organize_async(run_id: str, req):
             failed_dir_cid,
             moved_dirs,
             subtitles_by_parent=subtitles_by_parent,
+            target_label="整理失败目录",
         )
         moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
         logger.info(f"[MediaOrganize] 失败文件/目录统一移动完成: {moved_count}/{len(batch)}")
@@ -1663,19 +1824,20 @@ async def _run_organize_async(run_id: str, req):
                 _flush_pending_media_server_refreshes()
             await asyncio.sleep(1)
             try:
-                await _flush_pending_failed_moves()
-            except Exception as e:
-                logger.warning(f"[MediaOrganize] 统一移动失败文件失败: {e}")
-
-            try:
                 await _flush_pending_wash_reject_moves()
             except Exception as e:
                 logger.warning(f"[Wash] 统一移动洗版未通过文件失败: {e}")
+
+            try:
+                await _flush_pending_failed_moves()
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 统一移动失败文件失败: {e}")
 
             _schedule_post_organize_followup(
                 drive_index,
                 str(source_cid),
                 str(config_data.get("source_name", "") or ""),
+                organize_chain_id,
             )
 
             try:
@@ -1732,7 +1894,9 @@ async def _run_organize_async(run_id: str, req):
         dedup_cid = config_data.get("dedup_cid", "0")
         dedup_dir_cid = str(dedup_cid) if dedup_cid and dedup_cid != "0" and dedup_cid != 0 else failed_dir_cid
         wash_cid = config_data.get("wash_cid", "0")
-        wash_dir_cid = str(wash_cid) if wash_cid and wash_cid != "0" and wash_cid != 0 else failed_dir_cid
+        has_wash_dir = bool(wash_cid and wash_cid != "0" and wash_cid != 0)
+        wash_dir_cid = str(wash_cid) if has_wash_dir else failed_dir_cid
+        wash_target_label = "洗版目录" if has_wash_dir else "整理失败目录（未配置洗版目录）"
         moved_dirs: set = set()
         fs = _get_115_fs(client)
         target_remote_path = str(config_data.get("target_name", "") or "")
@@ -2513,6 +2677,7 @@ async def _run_organize_async(run_id: str, req):
                                         moved_dirs,
                                         subtitles_by_parent=subtitles_by_parent,
                                         move_top_dir=False,
+                                        target_label=wash_target_label,
                                     )
                             else:
                                 logger.info(
@@ -2539,6 +2704,7 @@ async def _run_organize_async(run_id: str, req):
                                         moved_dirs,
                                         subtitles_by_parent=subtitles_by_parent,
                                         move_top_dir=False,
+                                        target_label=wash_target_label,
                                     )
                                 continue
 
@@ -3118,10 +3284,26 @@ async def _run_organize_async(run_id: str, req):
             _raise_if_organize_cancelled(run_id)
 
         if scanned_video_count == 0:
+            elapsed = _time.time() - _org_start
+            _record_deferred_organize_task_notify(
+                organize_chain_id,
+                run_id=run_id,
+                source_cid=str(source_cid),
+                status="success",
+                total_files=0,
+                success_count=0,
+                failed_count=0,
+                skipped_count=0,
+                strm_generated_count=strm_generated_count,
+                organize_size_bytes=organize_size_bytes,
+                elapsed_seconds=elapsed,
+                detail="源目录没有视频文件",
+            )
             _schedule_post_organize_followup(
                 drive_index,
                 str(source_cid),
                 str(config_data.get("source_name", "") or ""),
+                organize_chain_id,
             )
             _clear_streaming_progress_throttle(run_id)
             update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
@@ -3219,7 +3401,10 @@ async def _run_organize_async(run_id: str, req):
         if failed_count:
             notify_detail = f"部分条目失败：{failed_count} 个，请查看日志中的失败文件明细"
         await asyncio.sleep(2)
-        _send_organize_task_notify(
+        _record_deferred_organize_task_notify(
+            organize_chain_id,
+            run_id=run_id,
+            source_cid=str(source_cid),
             status="success",
             total_files=total_files,
             success_count=success_count,
@@ -3301,14 +3486,14 @@ async def _run_organize_async(run_id: str, req):
                     f"[MediaOrganize] 取消前处理待移动文件: "
                     f"失败 {failed_pending_count} 条，洗版未通过 {wash_pending_count} 条"
                 )
-            if failed_pending_count:
-                failed_left = await _flush_pending_failed_moves()
-                moved_failed = max(0, failed_pending_count - int(failed_left or 0))
-                logger.info(f"[MediaOrganize] 取消前失败文件/目录移动完成: {moved_failed}/{failed_pending_count}")
             if wash_pending_count:
                 wash_left = await _flush_pending_wash_reject_moves()
                 moved_wash = max(0, wash_pending_count - int(wash_left or 0))
                 logger.info(f"[Wash] 取消前洗版未通过文件移动完成: {moved_wash}/{wash_pending_count}")
+            if failed_pending_count:
+                failed_left = await _flush_pending_failed_moves()
+                moved_failed = max(0, failed_pending_count - int(failed_left or 0))
+                logger.info(f"[MediaOrganize] 取消前失败文件/目录移动完成: {moved_failed}/{failed_pending_count}")
         except Exception as move_err:
             logger.warning(f"[MediaOrganize] 取消前移动待处理文件失败: {move_err}")
         try:

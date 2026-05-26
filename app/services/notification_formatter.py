@@ -3,7 +3,7 @@ import copy
 from jinja2 import Template
 
 # 模板版本号：每次修改 DEFAULT_TEMPLATES 内容时递增，触发强制覆盖旧配置
-TEMPLATE_VERSION = 17
+TEMPLATE_VERSION = 18
 
 # 通知模板默认值
 DEFAULT_TEMPLATES = {
@@ -84,6 +84,9 @@ DEFAULT_TEMPLATES = {
                 "{% if scanned_dirs %}\n📁 文件夹：{{ scanned_dirs }}{% endif %}"
                 "{% if generated %}\n🎞️ 生成：{{ generated }}{% endif %}"
                 "{% if downloaded %}\n⬇️ 下载：{{ downloaded }}{% endif %}"
+                "{% if tmdb_generated %}\n🧩 TMDb补齐：{{ tmdb_generated }}{% endif %}"
+                "{% if tmdb_skipped %}\n⏭️ TMDb跳过：{{ tmdb_skipped }}{% endif %}"
+                "{% if tmdb_failed %}\n❌ TMDb失败：{{ tmdb_failed }}{% endif %}"
                 "{% if skipped %}\n⏭️ 跳过：{{ skipped }}{% endif %}"
                 "{% if deleted %}\n🧹 删除：{{ deleted }}{% endif %}"
                 "{% if retry_success or retry_failed %}\n🔁 重试：成功 {{ retry_success }} / 失败 {{ retry_failed }}{% endif %}"

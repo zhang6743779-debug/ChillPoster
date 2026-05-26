@@ -7,11 +7,13 @@ export const ToastStack = {
         },
     },
     template: `
-        <div class="toast-container">
+        <div class="toast-container" role="status" aria-live="polite">
             <transition-group name="toast">
                 <div v-for="toast in toasts" :key="toast.id" class="toast-message" :class="toast.type">
-                    <i class="fa-solid" :class="toast.icon"></i>
-                    <span>{{ toast.msg }}</span>
+                    <span class="toast-icon-wrap">
+                        <i class="fa-solid" :class="toast.icon"></i>
+                    </span>
+                    <span class="toast-text">{{ toast.msg }}</span>
                 </div>
             </transition-group>
         </div>

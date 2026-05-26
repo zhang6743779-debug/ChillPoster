@@ -6302,26 +6302,105 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 14px
 
 /* === Toast 通知系统样式 === */
 .toast-container {
-    position: fixed; bottom: 30px; right: 30px; z-index: 99999;
-    display: flex; flex-direction: column; gap: 15px; pointer-events: none;
+    position: fixed;
+    right: 28px;
+    bottom: calc(28px + env(safe-area-inset-bottom));
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 12px;
+    pointer-events: none;
 }
 .toast-message {
-    background: #1e293b; color: #e2e8f0; padding: 12px 20px; border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-    display: flex; align-items: center; gap: 12px; min-width: 280px; max-width: 400px;
-    border-left: 4px solid var(--accent); font-size: 13px; font-weight: 500; pointer-events: auto;
-    animation: slideInRight 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; opacity: 0; transform: translateX(100%);
+    --toast-accent: var(--accent);
+    --toast-accent-rgb: var(--accent-rgb);
+    width: fit-content;
+    min-width: 300px;
+    max-width: min(440px, calc(100vw - 48px));
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 13px 16px 13px 13px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 18px;
+    background:
+        linear-gradient(135deg, rgba(var(--toast-accent-rgb), 0.12), transparent 42%),
+        rgba(17, 17, 17, 0.88);
+    color: var(--text-main);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(18px) saturate(1.15);
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 1.45;
+    pointer-events: auto;
+    animation: slideInRight 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    opacity: 0;
+    transform: translate3d(28px, 0, 0) scale(0.98);
 }
-.toast-message.success { border-color: var(--success); }
-.toast-message.success i { color: var(--success); font-size: 16px; }
-.toast-message.error { border-color: var(--danger); }
-.toast-message.error i { color: var(--danger); font-size: 16px; }
-.toast-message.warning { border-color: var(--warning); }
-.toast-message.warning i { color: var(--warning); font-size: 16px; }
-.toast-message.info { border-color: var(--accent); }
-.toast-message.info i { color: var(--accent); font-size: 16px; }
-@keyframes slideInRight { from { opacity: 0; transform: translateX(50px); } to { opacity: 1; transform: translateX(0); } }
-.toast-leave-active { transition: all 0.3s ease; }
-.toast-leave-to { opacity: 0; transform: translateX(50px); }
+.toast-message::before {
+    content: "";
+    position: absolute;
+    inset: 8px auto 8px 0;
+    width: 3px;
+    border-radius: 999px;
+    background: var(--toast-accent);
+    box-shadow: 0 0 16px rgba(var(--toast-accent-rgb), 0.45);
+}
+.toast-icon-wrap {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    color: var(--toast-accent);
+    background: rgba(var(--toast-accent-rgb), 0.14);
+    box-shadow: inset 0 0 0 1px rgba(var(--toast-accent-rgb), 0.22);
+}
+.toast-icon-wrap i {
+    font-size: 15px;
+}
+.toast-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.toast-message.success {
+    --toast-accent: var(--success);
+    --toast-accent-rgb: 52, 211, 153;
+}
+.toast-message.error {
+    --toast-accent: var(--danger);
+    --toast-accent-rgb: 248, 113, 113;
+}
+.toast-message.warning {
+    --toast-accent: var(--warning);
+    --toast-accent-rgb: 251, 191, 36;
+}
+.toast-message.info {
+    --toast-accent: var(--accent);
+    --toast-accent-rgb: var(--accent-rgb);
+}
+html[data-theme="light"] .toast-message {
+    border-color: rgba(51, 65, 85, 0.18);
+    background:
+        linear-gradient(135deg, rgba(var(--toast-accent-rgb), 0.16), transparent 44%),
+        rgba(232, 239, 247, 0.9);
+    box-shadow: 0 18px 38px rgba(51, 65, 85, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.58);
+}
+html[data-theme="light"] .toast-icon-wrap {
+    background: rgba(var(--toast-accent-rgb), 0.13);
+    box-shadow: inset 0 0 0 1px rgba(var(--toast-accent-rgb), 0.24);
+}
+@keyframes slideInRight {
+    from { opacity: 0; transform: translate3d(28px, 0, 0) scale(0.98); }
+    to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+.toast-leave-active { transition: opacity 0.18s ease, transform 0.18s ease; }
+.toast-leave-to { opacity: 0; transform: translate3d(24px, 0, 0) scale(0.98); }
 
 /* === 弱提示框 === */
 .info-alert-box {
