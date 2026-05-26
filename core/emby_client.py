@@ -20,6 +20,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("EmbyClient")
 
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except Exception:
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+DISCOVER_SCAN_ITEM_PAGE_LIMIT = _env_int("CHILLPOSTER_DISCOVER_SCAN_ITEM_PAGE_LIMIT", 1000, 100, 5000)
+DISCOVER_EPISODE_PAGE_LIMIT = _env_int("CHILLPOSTER_DISCOVER_EPISODE_PAGE_LIMIT", 5000, 500, 10000)
+
 DEFAULT_LIBRARY_LOCALE_OPTIONS = {
     "PreferredMetadataLanguage": "zh",
     "MetadataCountryCode": "CN",
@@ -671,7 +683,7 @@ class EmbyClient:
         try:
             result = {}
             start = 0
-            limit = 1000
+            limit = DISCOVER_EPISODE_PAGE_LIMIT
             while True:
                 params = {
                     "ParentId": series_id,
@@ -701,6 +713,51 @@ class EmbyClient:
             return result
         except Exception as e:
             logger.warning(f"获取剧集集数失败 (Series:{series_id}): {e}")
+            return {}
+
+    def get_series_episode_counts_by_library(self, library_id: str) -> dict:
+        """
+        批量返回指定媒体库内所有剧集的集数索引：
+        {series_id: {season_number: {episode_numbers}}}
+        """
+        if not library_id:
+            return {}
+        user_id = self._get_user_id()
+        endpoint = f"emby/Users/{user_id}/Items" if user_id else "emby/Items"
+        try:
+            result = {}
+            start = 0
+            limit = DISCOVER_EPISODE_PAGE_LIMIT
+            while True:
+                params = {
+                    "ParentId": library_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Episode",
+                    "Fields": "SeriesId,ParentIndexNumber,IndexNumber",
+                    "StartIndex": start,
+                    "Limit": limit,
+                }
+                data = self._request("GET", endpoint, params=params)
+                items = data.get("Items", []) if isinstance(data, dict) else []
+                if not items:
+                    break
+                for item in items:
+                    series_id = str(item.get("SeriesId") or "").strip()
+                    season_num = item.get("ParentIndexNumber")
+                    ep_num = item.get("IndexNumber")
+                    if not series_id or season_num is None or ep_num is None:
+                        continue
+                    try:
+                        result.setdefault(series_id, {}).setdefault(int(season_num), set()).add(int(ep_num))
+                    except Exception:
+                        continue
+                total = data.get("TotalRecordCount", 0) if isinstance(data, dict) else 0
+                start += len(items)
+                if not total or start >= total:
+                    break
+            return result
+        except Exception as e:
+            logger.warning(f"批量获取媒体库剧集集数失败 (Library:{library_id}): {e}")
             return {}
 
     def ensure_library_exists(self, name, path, collection_type="movies", enable_scrapers=False):
@@ -992,7 +1049,7 @@ class EmbyClient:
         endpoint = f"emby/Users/{uid}/Items" if uid else "emby/Items"
         results = {}
         start = 0
-        limit = 200
+        limit = DISCOVER_SCAN_ITEM_PAGE_LIMIT
         while True:
             params = {
                 "Recursive": "true",
@@ -1032,7 +1089,7 @@ class EmbyClient:
                     "library_name": str(library_name or ""),
                 }
             total = data.get("TotalRecordCount", 0)
-            start += limit
+            start += len(items)
             if start >= total:
                 break
         return results

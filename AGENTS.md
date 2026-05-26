@@ -66,14 +66,17 @@ The root `test_*.py` scripts are ad-hoc integration/debug scripts and may requir
 
 ## NAS direct testing workflow
 
-When the user asks to test on NAS, deploy to NAS, or "NAS 直测", prefer the local LAN deployment flow instead of DockerHub:
+Only run the NAS direct testing workflow when the user explicitly asks to test on NAS, deploy to NAS, or "NAS 直测". Do not automatically deploy local changes to NAS after ordinary code edits or builds. When the user does explicitly ask for NAS direct testing, prefer the local LAN deployment flow instead of DockerHub:
 
 - NAS host: `192.168.2.2`
 - SSH port: `225`
 - SSH user: `Chill`
 - The NAS runs ChillPoster with Docker Compose.
 - Use `scripts/deploy-nas-dev.env` for the local deployment configuration and `scripts/deploy-nas-dev.sh` for the workflow.
-- Expected flow: build the local test image, transfer it directly to the NAS over SSH/LAN, load it on the NAS, and restart the Compose service there.
+- Expected flow: build the local test image, save it to a local tar file, transfer the tar through the NAS SMB `docker` share, run `docker load -i` on the NAS, then restart the Compose service there.
+- Always use SMB for the image tar transfer. Mount `smb://Chill@192.168.2.2/docker` locally and copy to `/Volumes/docker/ChillPoster/chillposter-nas-dev.tar`, which maps to `/vol2/1000/docker/ChillPoster/chillposter-nas-dev.tar` on the NAS.
+- Do not use `scp`, `rsync` over SSH, raw SSH pipes, or ad-hoc TCP receivers for NAS direct testing unless the user explicitly asks for a different transfer path. In this LAN environment they have repeatedly stalled on large image tar transfers, while SMB transferred the 2.6 GB tar reliably in about 40 seconds.
+- After a successful NAS-local `docker load -i` and Compose restart, verify `/api/version`, check `docker exec chillposter cat /app/VERSION`, and clean up the temporary tar file on both the local machine and the NAS.
 - This path is for quick testing of local uncommitted changes. Do not use DockerHub unless the user explicitly asks for a release, DockerHub push, tag build, or formal publish.
 
 ## Versioning and release workflow

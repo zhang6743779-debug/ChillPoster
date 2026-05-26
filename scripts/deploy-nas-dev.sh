@@ -15,6 +15,7 @@ fi
 
 NAS_COMPOSE_SERVICE="${NAS_COMPOSE_SERVICE:-chillposter}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-22}"
+NAS_SSH_OPTS="${NAS_SSH_OPTS:--o IPQoS=none}"
 NAS_PLATFORM="${NAS_PLATFORM:-linux/amd64}"
 NAS_IMAGE_NAME="${NAS_IMAGE_NAME:-chillposter:dev}"
 NAS_BASE_IMAGE="${NAS_BASE_IMAGE:-chillne/chillposter:latest}"
@@ -24,6 +25,10 @@ NAS_DOCKERFILE="${NAS_DOCKERFILE:-Dockerfile.dev-nas}"
 NAS_DOCKER_CMD="${NAS_DOCKER_CMD:-docker}"
 NAS_COMPOSE_CMD="${NAS_COMPOSE_CMD:-docker compose}"
 NAS_BUILD_ARGS="${NAS_BUILD_ARGS:-}"
+NAS_TRANSFER_METHOD="${NAS_TRANSFER_METHOD:-smb}"
+NAS_SMB_URL="${NAS_SMB_URL:-}"
+NAS_SMB_MOUNT="${NAS_SMB_MOUNT:-}"
+NAS_SMB_TAR_PATH="${NAS_SMB_TAR_PATH:-}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is not available locally." >&2
@@ -35,6 +40,15 @@ if ! command -v ssh >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "${NAS_TRANSFER_METHOD}" != "smb" ]] && ! command -v scp >/dev/null 2>&1; then
+  echo "scp is not available locally." >&2
+  exit 1
+fi
+
+read -r -a NAS_SSH_OPTS_ARRAY <<< "${NAS_SSH_OPTS}"
+NAS_SSH=(ssh "${NAS_SSH_OPTS_ARRAY[@]}" -p "${NAS_SSH_PORT}" "${NAS_SSH_TARGET}")
+NAS_SCP=(scp "${NAS_SSH_OPTS_ARRAY[@]}" -P "${NAS_SSH_PORT}")
+
 if git -C "${ROOT_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   GIT_SHA="$(git -C "${ROOT_DIR}" rev-parse --short HEAD)"
 else
@@ -43,6 +57,8 @@ fi
 
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 DEV_VERSION="dev-${GIT_SHA}-$(date +%Y%m%d%H%M%S)"
+NAS_IMAGE_TAR_LOCAL="${NAS_IMAGE_TAR_LOCAL:-/tmp/chillposter-nas-dev-${DEV_VERSION}.tar}"
+NAS_IMAGE_TAR_REMOTE="${NAS_IMAGE_TAR_REMOTE:-${NAS_COMPOSE_DIR}/chillposter-nas-dev.tar}"
 
 echo "==> Building ${NAS_IMAGE_NAME} for ${NAS_PLATFORM}"
 cd "${ROOT_DIR}"
@@ -80,15 +96,47 @@ docker buildx build \
   ${NAS_BUILD_ARGS} \
   .
 
-echo "==> Loading image into NAS: ${NAS_SSH_TARGET}"
-docker save "${NAS_IMAGE_NAME}" | ssh -p "${NAS_SSH_PORT}" "${NAS_SSH_TARGET}" "${NAS_DOCKER_CMD} load"
+echo "==> Saving image tar: ${NAS_IMAGE_TAR_LOCAL}"
+rm -f "${NAS_IMAGE_TAR_LOCAL}"
+docker save -o "${NAS_IMAGE_TAR_LOCAL}" "${NAS_IMAGE_NAME}"
+
+if [[ "${NAS_TRANSFER_METHOD}" == "smb" ]]; then
+  : "${NAS_SMB_URL:?Set NAS_SMB_URL when NAS_TRANSFER_METHOD=smb, for example smb://user@host/docker}"
+  : "${NAS_SMB_MOUNT:?Set NAS_SMB_MOUNT when NAS_TRANSFER_METHOD=smb, for example /Volumes/docker}"
+  : "${NAS_SMB_TAR_PATH:?Set NAS_SMB_TAR_PATH when NAS_TRANSFER_METHOD=smb, for example ChillPoster/chillposter-nas-dev.tar}"
+  NAS_SMB_DEST="${NAS_SMB_MOUNT%/}/${NAS_SMB_TAR_PATH}"
+
+  if [[ ! -d "${NAS_SMB_MOUNT}" ]]; then
+    echo "==> Mounting NAS SMB share: ${NAS_SMB_URL}"
+    osascript -e "mount volume \"${NAS_SMB_URL}\""
+  fi
+  if [[ ! -d "${NAS_SMB_MOUNT}" ]]; then
+    echo "SMB mount is not available: ${NAS_SMB_MOUNT}" >&2
+    exit 1
+  fi
+
+  echo "==> Copying image tar to NAS over SMB: ${NAS_SMB_DEST}"
+  mkdir -p "$(dirname "${NAS_SMB_DEST}")"
+  rm -f "${NAS_SMB_DEST}"
+  rsync --progress "${NAS_IMAGE_TAR_LOCAL}" "${NAS_SMB_DEST}"
+else
+  echo "==> Copying image tar to NAS: ${NAS_SSH_TARGET}:${NAS_IMAGE_TAR_REMOTE}"
+  "${NAS_SSH[@]}" "rm -f '${NAS_IMAGE_TAR_REMOTE}'"
+  "${NAS_SCP[@]}" "${NAS_IMAGE_TAR_LOCAL}" "${NAS_SSH_TARGET}:${NAS_IMAGE_TAR_REMOTE}"
+fi
+
+echo "==> Loading image on NAS: ${NAS_IMAGE_TAR_REMOTE}"
+"${NAS_SSH[@]}" "${NAS_DOCKER_CMD} load -i '${NAS_IMAGE_TAR_REMOTE}'"
 
 if [[ -n "${NAS_COMPOSE_SERVICE}" ]]; then
   echo "==> Recreating compose service: ${NAS_COMPOSE_SERVICE}"
-  ssh -p "${NAS_SSH_PORT}" "${NAS_SSH_TARGET}" "cd '${NAS_COMPOSE_DIR}' && ${NAS_COMPOSE_CMD} up -d --force-recreate --no-deps '${NAS_COMPOSE_SERVICE}'"
+  "${NAS_SSH[@]}" "cd '${NAS_COMPOSE_DIR}' && ${NAS_COMPOSE_CMD} up -d --force-recreate --no-deps '${NAS_COMPOSE_SERVICE}'"
 else
   echo "==> Recreating compose project"
-  ssh -p "${NAS_SSH_PORT}" "${NAS_SSH_TARGET}" "cd '${NAS_COMPOSE_DIR}' && ${NAS_COMPOSE_CMD} up -d --force-recreate"
+  "${NAS_SSH[@]}" "cd '${NAS_COMPOSE_DIR}' && ${NAS_COMPOSE_CMD} up -d --force-recreate"
 fi
+
+"${NAS_SSH[@]}" "rm -f '${NAS_IMAGE_TAR_REMOTE}'"
+rm -f "${NAS_IMAGE_TAR_LOCAL}"
 
 echo "==> Done. Deployed ${NAS_IMAGE_NAME} (${DEV_VERSION}) to ${NAS_SSH_TARGET}."

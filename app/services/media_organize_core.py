@@ -473,7 +473,7 @@ def _build_target_cache_item(item: dict) -> tuple[str, dict] | None:
         parent_id = int(item.get("parent_id", item.get("cid", 0)) or 0)
     except (TypeError, ValueError):
         parent_id = 0
-    return str(item_id), {
+    cache_data = {
         "name": str(item.get("name", "") or ""),
         "path": str(item.get("path", "") or ""),
         "pickcode": str(item.get("pickcode", item.get("pick_code", "")) or ""),
@@ -483,6 +483,18 @@ def _build_target_cache_item(item: dict) -> tuple[str, dict] | None:
         "is_dir": bool(item.get("is_dir", False)),
         "parent_id": parent_id,
     }
+    if _target_event_file_class(cache_data["name"], cache_data["is_dir"]) == "video":
+        parsed = _parse_filename(
+            cache_data["name"],
+            media_type_hint="tv",
+            file_path=cache_data["path"],
+            quiet=True,
+        ) or {}
+        if parsed.get("season") is not None:
+            cache_data["season"] = int(parsed["season"])
+        if parsed.get("episode") is not None:
+            cache_data["episode"] = int(parsed["episode"])
+    return str(item_id), cache_data
 
 
 def _normalize_target_entry(item: dict) -> dict | None:
@@ -875,6 +887,7 @@ async def _evaluate_library_replacement(config_data: dict, drive_index: int,
         candidate_dir = _join_remote_path(target_base, expected_folder, format_season_dir_name(season_num))
         rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
         expected_name = _render_template(rename_format, variables) + ext
+    expected_target_path = _join_remote_path(candidate_dir, expected_name)
 
     candidates = library_index.find_existing_candidates(
         media_type,
@@ -885,13 +898,18 @@ async def _evaluate_library_replacement(config_data: dict, drive_index: int,
     candidate, match_reason = _select_existing_candidate(candidates, expected_name=expected_name)
     if not candidate:
         if match_reason == "no_candidate":
-            return {"decision": "no_candidate"}
-        return {"decision": "keep_existing", "reason": match_reason}
+            return {"decision": "no_candidate", "candidate_dir": candidate_dir, "expected_target_path": expected_target_path}
+        return {
+            "decision": "keep_existing",
+            "reason": match_reason,
+            "candidate_dir": candidate_dir,
+            "expected_target_path": expected_target_path,
+        }
 
     expected_parsed = _parse_filename(
         expected_name,
         media_type_hint=media_type,
-        file_path=_join_remote_path(candidate_dir, expected_name),
+        file_path=expected_target_path,
     ) or {}
     existing_parsed = _parse_filename(
         str(candidate.get("name", "") or ""),
@@ -924,6 +942,7 @@ async def _evaluate_library_replacement(config_data: dict, drive_index: int,
     )
     comparison["candidate"] = candidate
     comparison["candidate_dir"] = candidate_dir
+    comparison["expected_target_path"] = expected_target_path
     comparison["match_reason"] = match_reason
     comparison["new_info"] = new_info
     comparison["old_info"] = old_info
@@ -1835,6 +1854,10 @@ async def _run_organize_async(run_id: str, req):
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 统一移动失败文件失败: {e}")
 
+            flushed_count = _flush_pending_library_cache_updates()
+            if flushed_count:
+                logger.info(f"[媒体库缓存] 补跑前已落盘整理结果 {flushed_count} 条")
+
             _schedule_post_organize_followup(
                 drive_index,
                 str(source_cid),
@@ -2095,6 +2118,14 @@ async def _run_organize_async(run_id: str, req):
             ffprobe_name_conflict_samples: dict = {}
             ffprobe_name_conflict_accepted: dict[tuple, set[str]] = {}
 
+            def _record_group_failure(file_item: dict, reason: str, media_type: str = "") -> None:
+                _append_organize_failure_history(
+                    file_item=file_item or {},
+                    reason=reason or "未知原因",
+                    source_path=str((file_item or {}).get("path", "") or ""),
+                    media_type=media_type,
+                )
+
             def _record_ffprobe_name_conflict(ffprobe_batch_key: tuple, sampled_profile: dict, current_size: int, file_name: str, reason: str, base_profile: dict | None = None, base_sizes: list[int] | None = None) -> None:
                 conflict_sample_key = (ffprobe_batch_key, reason)
                 conflict_state = ffprobe_name_conflict_samples.get(conflict_sample_key)
@@ -2165,7 +2196,9 @@ async def _run_organize_async(run_id: str, req):
                     search_result = identified_search_result
 
                     if not search_result:
-                        results.append({"file": file_name, "status": "error", "message": identified_error_message or "无法识别媒体信息"})
+                        failure_reason = identified_error_message or "无法识别媒体信息"
+                        results.append({"file": file_name, "status": "error", "message": failure_reason})
+                        _record_group_failure(file_item, failure_reason)
                         group_failed.append(file_item)
                         continue
 
@@ -2176,8 +2209,10 @@ async def _run_organize_async(run_id: str, req):
 
                     tmdb_data = identified_tmdb_data
                     if not tmdb_data:
+                        failure_reason = identified_error_message or f"无法获取 TMDb 数据 (ID: {tmdb_id})"
                         results.append({"file": file_name, "status": "error",
-                                       "message": identified_error_message or f"无法获取 TMDb 数据 (ID: {tmdb_id})"})
+                                       "message": failure_reason})
+                        _record_group_failure(file_item, failure_reason, media_type)
                         group_failed.append(file_item)
                         continue
 
@@ -2206,7 +2241,9 @@ async def _run_organize_async(run_id: str, req):
 
                     if media_type == 'tv' and episode_num is None:
                         logger.warning(f"[MediaOrganize] 剧集缺少集号，跳过整理: {file_name}")
-                        results.append({"file": file_name, "status": "error", "message": "剧集缺少集号，无法安全整理"})
+                        failure_reason = "剧集缺少集号，无法安全整理"
+                        results.append({"file": file_name, "status": "error", "message": failure_reason})
+                        _record_group_failure(file_item, failure_reason, media_type)
                         group_failed.append(file_item)
                         _processed = len(results)
                         _update_streaming_progress(
@@ -2229,6 +2266,7 @@ async def _run_organize_async(run_id: str, req):
                             validation_message = episode_validation.get("message") or "TMDb 中不存在该季集"
                             logger.warning(f"[MediaOrganize] 剧集季集校验失败: {file_name} | {validation_message}")
                             results.append({"file": file_name, "status": "error", "message": validation_message})
+                            _record_group_failure(file_item, validation_message, media_type)
                             group_failed.append(file_item)
                             _processed = len(results)
                             _update_streaming_progress(
@@ -2460,6 +2498,7 @@ async def _run_organize_async(run_id: str, req):
                                 "status": "error",
                                 "message": f"洗版删除旧文件失败: {remove_reason}",
                             })
+                            _record_group_failure(file_item, f"洗版删除旧文件失败: {remove_reason}", media_type)
                             _send_wash_notify(_build_wash_notify_payload(
                                 tmdb_data=tmdb_data,
                                 variables=variables,
@@ -2573,6 +2612,7 @@ async def _run_organize_async(run_id: str, req):
                             )
                         else:
                             group_failed.append(file_item)
+                            _record_group_failure(file_item, result.get("message", "") or "整理失败", media_type)
                     else:
                         folder_name, resolved_season_num, season_dir_name = _resolve_tv_target_names(variables, config_data, file_req)
                         batch_key = _build_tv_batch_key(
@@ -2598,6 +2638,7 @@ async def _run_organize_async(run_id: str, req):
                                 if should_log_tv_summary:
                                     _tv_summary_logged.discard(tv_summary_key)
                                 results.append({"file": file_name, "status": batch_context.get("status", "error"), "message": batch_context.get("message", "")})
+                                _record_group_failure(file_item, batch_context.get("message", "") or "剧集整理规划失败", media_type)
                                 group_failed.append(file_item)
                                 continue
                             pending_tv_batches[batch_key] = {
@@ -2670,6 +2711,13 @@ async def _run_organize_async(run_id: str, req):
                                     "status": "skipped",
                                     "message": f"同批次重复剧集，已被更优文件替换（{_human_wash_reason(dedupe_reason)}）",
                                 })
+                                _append_skipped_history(
+                                    file_item=existing_plan.get("vf") or {},
+                                    reason=f"同批次重复剧集，已被更优文件替换（{_human_wash_reason(dedupe_reason)}）",
+                                    source_path=(existing_plan.get("vf") or {}).get("path", ""),
+                                    media_type="tv",
+                                    title=existing_name,
+                                )
                                 if wash_dir_cid:
                                     await _move_top_dir_to_failed(
                                         client,
@@ -2697,6 +2745,13 @@ async def _run_organize_async(run_id: str, req):
                                     "status": "skipped",
                                     "message": f"同批次重复剧集，已保留更优文件（{_human_wash_reason(dedupe_reason)}）",
                                 })
+                                _append_skipped_history(
+                                    file_item=file_item,
+                                    reason=f"同批次重复剧集，已保留更优文件（{_human_wash_reason(dedupe_reason)}）",
+                                    source_path=file_item.get("path", ""),
+                                    media_type="tv",
+                                    title=file_name,
+                                )
                                 if wash_dir_cid:
                                     await _move_top_dir_to_failed(
                                         client,
@@ -2717,6 +2772,7 @@ async def _run_organize_async(run_id: str, req):
                 except Exception as e:
                     logger.error(f"[MediaOrganize] 整理文件失败 {file_name}: {e}", exc_info=True)
                     results.append({"file": file_name, "status": "error", "message": str(e)})
+                    _record_group_failure(file_item, str(e))
                     group_failed.append(file_item)
 
                 # 进度更新与取消检查（每个文件处理完后）
@@ -2811,7 +2867,13 @@ async def _run_organize_async(run_id: str, req):
                         )
                         _send_wash_notify(plan_item.get("wash_notify_payload") or {})
                     else:
-                        group_failed.append(plan_item.get("vf") or {})
+                        failed_vf = plan_item.get("vf") or {}
+                        group_failed.append(failed_vf)
+                        _record_group_failure(
+                            failed_vf,
+                            result.get("message", "") or "剧集整理失败",
+                            plan_item.get("media_type", "tv"),
+                        )
 
                     _processed = len(results)
                     _update_streaming_progress(
@@ -2907,6 +2969,8 @@ async def _run_organize_async(run_id: str, req):
                 _raise_if_organize_cancelled(run_id)
                 strm_generated_count += strm_count
                 logger.info(f"[MediaOrganize] 后处理 STRM 生成完成: {strm_count} 个")
+                for payload in strm_payloads[:max(0, int(strm_count or 0))]:
+                    _append_strm_generated_history(payload)
 
                 seen_checks = set()
                 for payload in emby_checks:
@@ -3171,6 +3235,12 @@ async def _run_organize_async(run_id: str, req):
             name_lower = file_name.lower()
             if any(kw in name_lower for kw in ("预告", "预告片", "trailer", "preview")):
                 results.append({"file": file_name, "status": "skipped", "message": "预告片，跳过"})
+                _append_skipped_history(
+                    file_item=vf,
+                    reason="预告片，跳过整理",
+                    source_path=vf.get("path", ""),
+                    title=file_name,
+                )
                 _update_streaming_progress(
                     run_id,
                     scanned_video_count=scanned_video_count,
@@ -3782,6 +3852,7 @@ def _build_wash_notify_payload(*, tmdb_data: dict, variables: dict, media_type: 
         "new_file_name": str((file_item or {}).get("name", "") or ""),
         "old_file_path": str(candidate.get("path", "") or ""),
         "new_file_path": str((file_item or {}).get("path", "") or ""),
+        "target_file_path": str(wash_result.get("expected_target_path", "") or candidate.get("path", "") or target_base),
         "old_file_short": _compact_notify_text(str(candidate.get("name", "") or ""), 58),
         "new_file_short": _compact_notify_text(str((file_item or {}).get("name", "") or ""), 58),
         "library_location_short": _short_library_location(target_base),
@@ -3804,7 +3875,7 @@ def _send_wash_notify(payload: dict):
         return
     try:
         source_path = payload.get("new_file_path", "")
-        target_path = payload.get("old_file_path", "") or payload.get("library_location", "")
+        target_path = payload.get("target_file_path", "") or payload.get("old_file_path", "") or payload.get("library_location", "")
         append_organize_history({
             "category": "wash_success" if payload.get("status") == "success" else "wash_failed",
             "status": payload.get("status_text", ""),
@@ -3852,6 +3923,54 @@ def _append_organize_failure_history(
         })
     except Exception as e:
         logger.debug(f"[MediaOrganize] 整理失败历史写入失败: {e}")
+
+
+def _append_skipped_history(
+    *, file_item: dict, reason: str, source_path: str = "", target_path: str = "",
+    media_type: str = "", title: str = ""
+) -> None:
+    file_name = str((file_item or {}).get("name", "") or "")
+    try:
+        append_organize_history({
+            "category": "skipped",
+            "status": "skipped",
+            "title": title or file_name or "跳过记录",
+            "media_type": media_type,
+            "source_file": file_name,
+            "source_path": source_path or str((file_item or {}).get("path", "") or ""),
+            "target_path": target_path,
+            "size": _format_notify_size((file_item or {}).get("size", 0)),
+            "reason": reason or "已跳过",
+            "summary": reason or "已跳过",
+        })
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] 跳过历史写入失败: {e}")
+
+
+def _append_strm_generated_history(payload: dict) -> None:
+    result = (payload or {}).get("result") or {}
+    media_type = str((payload or {}).get("media_type", "") or "")
+    renamed_file = str(result.get("renamed_file", "") or "")
+    target_path = _join_remote_path(
+        str((payload or {}).get("target_base", "") or ""),
+        str(result.get("target_folder", "") or ""),
+        str(result.get("season_dir", "") or ""),
+        renamed_file,
+    )
+    try:
+        append_organize_history({
+            "category": "strm_generated",
+            "status": "success",
+            "title": renamed_file or "STRM生成",
+            "media_type": media_type,
+            "target_file": renamed_file,
+            "target_path": target_path,
+            "size": _format_notify_size(result.get("size", 0)),
+            "reason": "整理后自动同步 STRM",
+            "summary": "STRM已生成",
+        })
+    except Exception as e:
+        logger.debug(f"[MediaOrganize] STRM历史写入失败: {e}")
 
 
 def _send_organize_task_notify(
@@ -3934,6 +4053,10 @@ def _finalize_organize_result(
             "is_dir": bool(item_data.get("is_dir", False)),
             "parent_id": int(item_data.get("parent_id", 0) or 0),
         }
+        if item_data.get("season") is not None:
+            normalized_item["season"] = int(item_data.get("season"))
+        if item_data.get("episode") is not None:
+            normalized_item["episode"] = int(item_data.get("episode"))
         item_path = _normalize_remote_path(normalized_item.get("path", ""))
         source_base = _normalize_remote_path(str(config_data.get("source_name", "") or "")).rstrip("/")
         target_base_cfg = _normalize_remote_path(str(config_data.get("target_name", "") or "")).rstrip("/")
@@ -4017,6 +4140,8 @@ def _finalize_organize_result(
             "sha1": file_sha1,
             "is_dir": False,
             "parent_id": file_parent_id,
+            "season": parsed.get("season") if media_type == "tv" else None,
+            "episode": parsed.get("episode") if media_type == "tv" else None,
         },
     )
 
@@ -4093,6 +4218,7 @@ def _finalize_organize_result(
                 "media_type": strm_ctx.get("media_type", media_type),
                 "pickcode": strm_ctx.get("pickcode", ""),
                 "category_path": strm_ctx.get("category_path", ""),
+                "target_base": target_base,
                 "force_overwrite": bool(strm_force_overwrite),
                 "replace_remote_paths": list(strm_replace_remote_paths or []),
             })

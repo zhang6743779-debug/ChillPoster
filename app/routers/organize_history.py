@@ -403,18 +403,11 @@ async def get_organize_history(
     if not isinstance(page_size, int):
         page_size = DEFAULT_PAGE_SIZE
 
-    structured_records = [
+    records = [
         record
         for record in (_normalize_structured_record(item) for item in list_organize_history())
         if record is not None
     ]
-    legacy_records = [
-        record
-        for idx, line in enumerate(_read_tail_lines())
-        if (record := _build_record(line, idx)) is not None
-    ]
-    legacy_records.reverse()
-    records = structured_records + legacy_records
 
     keyword = (keyword or "").strip()
     keyword_records = [record for record in records if _matches_keyword(record, keyword)]

@@ -174,6 +174,25 @@ class Drive115Service:
         cid = str(item.get("cid") or item.get("id") or item.get("category_id") or item.get("fid") or "").strip()
         return cid if cid and cid != "0" else ""
 
+    def _extract_115_created_dir_cid(self, resp: dict) -> str:
+        if not isinstance(resp, dict):
+            return ""
+        data = resp.get("data") or {}
+        if isinstance(data, list) and data:
+            data = data[0] if isinstance(data[0], dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        cid = str(
+            data.get("cid")
+            or data.get("id")
+            or data.get("category_id")
+            or resp.get("cid")
+            or resp.get("id")
+            or resp.get("category_id")
+            or ""
+        ).strip()
+        return cid if cid and cid != "0" else ""
+
     async def _find_115_child_dir_cid(self, client, parent_cid: str, name: str, *, request_label: str = "115目录") -> str:
         offset = 0
         page_index = 0
@@ -205,7 +224,7 @@ class Drive115Service:
             offset += len(items)
             if page_index % 5 == 0:
                 logger.info(
-                    f"[CleanUp] {request_label}逐级查找仍在翻页: "
+                    f"[115] {request_label}逐级查找仍在翻页: "
                     f"parent={parent_cid}, name={name}, pages={page_index}, scanned={offset}"
                 )
 
@@ -229,7 +248,7 @@ class Drive115Service:
             err_text = str(e)
             if len(err_text) > 300:
                 err_text = err_text[:300] + "..."
-            logger.warning(f"[CleanUp] {request_label}按路径查询失败，改用逐级查找: {normalized_path} | {err_text}")
+            logger.warning(f"[115] {request_label}按路径查询失败，改用逐级查找: {normalized_path} | {err_text}")
 
         parent_cid = "0"
         for part in [item for item in normalized_path.strip("/").split("/") if item]:
@@ -244,12 +263,80 @@ class Drive115Service:
                 err_text = str(e)
                 if len(err_text) > 300:
                     err_text = err_text[:300] + "..."
-                logger.warning(f"[CleanUp] {request_label}逐级查找失败: parent={parent_cid}, name={part} | {err_text}")
+                logger.warning(f"[115] {request_label}逐级查找失败: parent={parent_cid}, name={part} | {err_text}")
                 return None
 
             if not next_cid:
                 return None
             parent_cid = next_cid
+
+        return parent_cid
+
+    async def _ensure_115_dir_id_by_path(self, client, path: str, *, request_label: str = "115目录") -> str | None:
+        normalized_path = self._normalize_115_remote_path(path)
+        if not normalized_path:
+            return None
+        if normalized_path == "/":
+            return "0"
+
+        existing_cid = await self._resolve_115_dir_id_by_path(client, normalized_path, request_label=request_label)
+        if existing_cid:
+            return existing_cid
+
+        parent_cid = "0"
+        current_path = ""
+        for part in [item for item in normalized_path.strip("/").split("/") if item]:
+            current_path = f"{current_path}/{part}" if current_path else f"/{part}"
+            existing_child_cid = await self._find_115_child_dir_cid(
+                client,
+                parent_cid,
+                part,
+                request_label=request_label,
+            )
+            if existing_child_cid:
+                parent_cid = existing_child_cid
+                continue
+
+            resp = await run_115_write_request(
+                client,
+                f"创建{request_label}",
+                lambda write_client, _part=part, _parent_cid=parent_cid: write_client.fs_mkdir_app(
+                    _part,
+                    pid=int(_parent_cid),
+                    app="android",
+                    async_=False,
+                ),
+                raise_on_state_false=False,
+            )
+
+            if isinstance(resp, dict) and not resp.get("state", True):
+                error_text = str(resp.get("error") or resp.get("message") or "")
+                if "已存在" in error_text or "exist" in error_text.lower():
+                    existing_child_cid = await self._find_115_child_dir_cid(
+                        client,
+                        parent_cid,
+                        part,
+                        request_label=request_label,
+                    )
+                    if existing_child_cid:
+                        logger.debug(f"[Rapid] {request_label}已存在，复用目录: {current_path} cid={existing_child_cid}")
+                        parent_cid = existing_child_cid
+                        continue
+                raise RuntimeError(f"创建{request_label}失败: {resp}")
+
+            created_cid = self._extract_115_created_dir_cid(resp)
+            if not created_cid:
+                created_cid = await self._find_115_child_dir_cid(
+                    client,
+                    parent_cid,
+                    part,
+                    request_label=request_label,
+                )
+            if not created_cid:
+                raise RuntimeError(f"创建{request_label}未返回目录ID: path={current_path}, resp={resp}")
+
+            parent_cid = created_cid
+            logger.debug(f"[Rapid] 已创建{request_label}: {current_path} cid={created_cid}")
 
         return parent_cid
 
@@ -563,7 +650,8 @@ class Drive115Service:
                 else:
                     logger.debug(f"[Rapid] SHA1获取成功: {sha1_info['sha1'][:16]}... (size: {sha1_info['size']})")
                     filename = await self._resolve_rapid_filename(filename_resolver, pickcode)
-                    target_dir = sec_cfg.get('upload_dir', '/ChillPoster')
+                    remote_root_name = str(sec_cfg.get("remote_root_name") or "影视库").strip().strip("/") or "影视库"
+                    target_dir = str(sec_cfg.get("upload_dir") or f"/{remote_root_name}/秒传目录").strip()
                     rapid_result = await self._rapid_transfer_to_secondary(
                         secondary_client, client, pickcode, sha1_info, filename, target_dir, user_agent
                     )
@@ -689,58 +777,21 @@ class Drive115Service:
             emby_index: Emby 配置索引，用于确定使用哪个 115 账号的 cookie
         """
         drive_name = config.get('name', '115')
-        target_dir = config.get('upload_dir', '/ChillPoster')
+        remote_root_name = str(config.get("remote_root_name") or "影视库").strip().strip("/") or "影视库"
+        target_dir = str(config.get('upload_dir') or f"/{remote_root_name}/秒传目录").strip()
         logger.debug(f"[Sync-{drive_name}] 目标目录: {target_dir}")
         try:
             # 1. [修复] 使用 to_id 直接获取 src_file_id (需要文件头部 import to_id)
             src_file_id = to_id(src_pickcode)
 
-            # 2. 获取目标目录 CID
-            target_cid = None
+            # 2. 获取/创建项目统一的复制/秒传目录。
             logger.debug(f"[Sync-{drive_name}] 查询目标目录: {target_dir}")
-            target_cid_info = await self._run_115_read_request(
-                "查询复制目标目录",
-                lambda: client.fs_dir_getid_app(target_dir),
+            target_cid = await self._ensure_115_dir_id_by_path(
+                client,
+                target_dir,
+                request_label="复制目标目录",
             )
-
-            if target_cid_info and target_cid_info.get('id'):
-                target_cid = target_cid_info.get('id')
-                logger.debug(f"[Sync-{drive_name}] 目标目录已存在: CID={target_cid}")
-            else:
-                logger.debug(f"[Sync-{drive_name}] 目标目录不存在，准备创建: {target_dir}")
-                
-                # [修复] fs_mkdir 需要传入名称而不是路径
-                # 假设目标是在根目录下，去掉开头的 "/"
-                dir_name = target_dir.strip("/")
-                
-                # 如果配置的是多级路径 (e.g. /A/B)，简单处理取最后一级，或者默认建在根目录
-                # 这里为了稳妥，直接在根目录创建该名称的文件夹
-                if "/" in dir_name:
-                    dir_name = dir_name.split("/")[-1]
-
-                make_resp = await run_115_write_request(
-                    client,
-                    "创建复制目标目录",
-                    lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
-                )  # 默认 pid=0 (根目录)
-                
-                if make_resp and make_resp.get('state'):
-                    # 尝试直接从创建结果中拿 ID
-                    target_cid = make_resp.get('data', {}).get('id')
-                    
-                    # 如果没拿到，再查一次
-                    if not target_cid:
-                        target_cid_info = await self._run_115_read_request(
-                            "复查复制目标目录",
-                            lambda: client.fs_dir_getid_app(target_dir),
-                        )
-                        if target_cid_info:
-                            target_cid = target_cid_info.get('id')
-                else:
-                    logger.error(f"[Sync-{drive_name}] 创建目录失败: {dir_name}, 响应: {make_resp}")
-                    return None
-
-            if not target_cid: 
+            if not target_cid:
                 logger.error(f"[Sync-{drive_name}] 无法获取目标目录 CID: {target_dir}")
                 return None
 
@@ -900,30 +951,15 @@ class Drive115Service:
         } 或 None
         """
         try:
-            # 1. 获取/创建目标目录
-            target_cid_info = await self._run_115_read_request(
-                "查询秒传目标目录",
-                lambda: secondary_client.fs_dir_getid_app(target_dir),
+            # 1. 获取/创建项目统一的秒传目录，例如 /影视库/秒传目录。
+            target_cid = await self._ensure_115_dir_id_by_path(
+                secondary_client,
+                target_dir,
+                request_label="秒传目标目录",
             )
-            if not target_cid_info or not target_cid_info.get('id'):
-                # 创建目录
-                dir_name = target_dir.strip("/").split("/")[-1]
-                make_resp = await run_115_write_request(
-                    secondary_client,
-                    "创建秒传目标目录",
-                    lambda write_client: write_client.fs_mkdir_app(dir_name, app="android", async_=False),
-                )
-                if make_resp and make_resp.get('state'):
-                    target_cid_info = await self._run_115_read_request(
-                        "复查秒传目标目录",
-                        lambda: secondary_client.fs_dir_getid_app(target_dir),
-                    )
-
-            if not target_cid_info or not target_cid_info.get('id'):
+            if not target_cid:
                 logger.error(f"[Rapid] 无法获取目标目录: {target_dir}")
                 return None
-
-            target_cid = target_cid_info['id']
 
             # 2. 【优化】复用已获取的直链，避免重复请求（节省约 300ms）
             download_url = sha1_info.get('direct_url')
@@ -1513,7 +1549,8 @@ class Drive115Service:
         if account_type == "main":
             name = drive_config.get('name', '主号')
             cookie = drive_config.get('cookie')
-            upload_dir = drive_config.get('upload_dir', '/ChillPoster')
+            remote_root_name = str(drive_config.get("remote_root_name") or "影视库").strip().strip("/") or "影视库"
+            upload_dir = drive_config.get('upload_dir') or f"/{remote_root_name}/秒传目录"
             recycle_code = drive_config.get('recycle_code', '')
         else:
             # 小号配置
@@ -1523,8 +1560,8 @@ class Drive115Service:
             account = rapid_accounts[account_index]
             name = account.get('name', f'小号{account_index + 1}')
             cookie = account.get('cookie', '')
-            # 小号使用独立配置，如果没有则使用主号配置作为默认值
-            upload_dir = account.get('upload_dir', drive_config.get('upload_dir', '/ChillPoster'))
+            # 小号统一清理项目创建的秒传目录，不再支持单独配置目录。
+            upload_dir = drive_config.get('upload_dir', '/影视库/秒传目录')
             recycle_code = account.get('recycle_code', drive_config.get('recycle_code', ''))
 
         if not cookie: return

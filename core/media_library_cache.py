@@ -102,6 +102,8 @@ def _parse_tv_episode_key(name: str, path: str) -> tuple[int, int] | None:
 
 def _normalize_item(item: dict) -> dict:
     item = item or {}
+    season = item.get("season")
+    episode = item.get("episode")
     return {
         "name": str(item.get("name", "") or ""),
         "path": str(item.get("path", "") or ""),
@@ -111,6 +113,8 @@ def _normalize_item(item: dict) -> dict:
         "sha1": str(item.get("sha1", "") or ""),
         "is_dir": bool(item.get("is_dir", False)),
         "parent_id": _safe_int(item.get("parent_id", 0), 0),
+        "season": _safe_int(season, None) if season is not None else None,
+        "episode": _safe_int(episode, None) if episode is not None else None,
     }
 
 
@@ -309,7 +313,7 @@ def _set_task_meta(
 
 
 def _row_to_item(row: sqlite3.Row | dict) -> dict:
-    return {
+    item = {
         "name": str(row["name"] or ""),
         "path": str(row["path"] or ""),
         "pickcode": str(row["pickcode"] or ""),
@@ -319,6 +323,17 @@ def _row_to_item(row: sqlite3.Row | dict) -> dict:
         "is_dir": bool(row["is_dir"]),
         "parent_id": int(row["parent_id"] or 0),
     }
+    try:
+        season = row["season"]
+        episode = row["episode"]
+    except (KeyError, IndexError):
+        season = None
+        episode = None
+    if season is not None:
+        item["season"] = int(season)
+    if episode is not None:
+        item["episode"] = int(episode)
+    return item
 
 
 def _row_to_cache_entry(row: sqlite3.Row) -> dict:
@@ -339,8 +354,8 @@ def _item_to_row(task_key: str, item_key: str, item: dict, updated_at: float | N
     sha1_norm = str(normalized.get("sha1", "") or "").upper().strip()
     media_kind = "video" if _is_video_item(normalized) else ""
     folder_path_norm = _remote_dirname(path_norm) if media_kind == "video" else ""
-    season = item.get("season") if isinstance(item, dict) else None
-    episode = item.get("episode") if isinstance(item, dict) else None
+    season = normalized.get("season")
+    episode = normalized.get("episode")
     season = _safe_int(season, None) if season is not None else None
     episode = _safe_int(episode, None) if episode is not None else None
     return (

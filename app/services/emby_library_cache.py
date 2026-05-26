@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from core.configs import EMBY_DISCOVER_INDEX_FILE
@@ -31,6 +32,17 @@ _level = "level1"
 DISCOVER_INDEX_VERSION = 3
 DISCOVER_INDEX_TTL_SECONDS = 24 * 60 * 60
 DISCOVER_INDEX_MIN_REFRESH_INTERVAL = 5 * 60
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except Exception:
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+DISCOVER_INDEX_LIBRARY_SCAN_WORKERS = _env_int("CHILLPOSTER_DISCOVER_INDEX_LIBRARY_SCAN_WORKERS", 6, 1, 12)
 _discover_index: dict[str, str] = {}
 _discover_series_index: dict[str, dict[int, set[int]]] = {}
 _discover_items: dict[str, dict] = {}
@@ -1715,43 +1727,109 @@ def build_discover_index(server_idx: int = 0, reason: str = "manual", force: boo
         if not client:
             return
         libraries = _collect_server_libraries(client)
-        all_items = client.get_all_library_items()
-        items = {
-            key: value
-            for key, value in (all_items or {}).items()
-            if isinstance(value, dict) and value.get("media_type") != "tv"
-        }
-        fallback_tv_items = {
-            key: value
-            for key, value in (all_items or {}).items()
-            if isinstance(value, dict) and value.get("media_type") == "tv"
-        }
+        tv_libraries = [
+            lib for lib in libraries
+            if lib.get("id") and str(lib.get("type", "") or "").lower() in {"tvshows", "mixed", "unknown", ""}
+        ]
+        items: dict[str, dict] = {}
+        tv_episode_counts_by_key: dict[str, dict[int, set[int]]] = {}
         tv_library_count = 0
-        for lib in libraries:
+        episode_batch_library_count = 0
+        episode_batch_series_count = 0
+        library_scan_error_count = 0
+
+        def _scan_movie_items() -> dict:
+            scan_client = _create_client(server_idx)
+            if not scan_client:
+                return {"kind": "movies", "items": {}}
+            try:
+                all_items = scan_client.get_all_library_items(item_types="Movie")
+                return {
+                    "kind": "movies",
+                    "items": {
+                        key: value
+                        for key, value in (all_items or {}).items()
+                        if isinstance(value, dict) and value.get("media_type") != "tv"
+                    },
+                }
+            finally:
+                scan_client.close()
+
+        def _scan_tv_library(lib: dict) -> dict:
             lib_id = lib.get("id")
             lib_name = lib.get("name", "")
-            lib_type = str(lib.get("type", "") or "").lower()
-            if not lib_id:
-                continue
-            if lib_type and lib_type not in {"tvshows", "mixed", "unknown"}:
-                continue
-            library_items = client.get_all_library_items(
-                item_types="Series",
-                library_id=lib_id,
-                library_name=lib_name,
-            )
-            if library_items:
+            scan_client = _create_client(server_idx)
+            if not scan_client:
+                return {"kind": "tv", "library_id": lib_id, "library_name": lib_name, "items": {}, "episode_counts": {}}
+            try:
+                library_items = scan_client.get_all_library_items(
+                    item_types="Series",
+                    library_id=lib_id,
+                    library_name=lib_name,
+                )
+                episode_counts_by_series_id = (
+                    scan_client.get_series_episode_counts_by_library(lib_id)
+                    if library_items else {}
+                )
+                return {
+                    "kind": "tv",
+                    "library_id": lib_id,
+                    "library_name": lib_name,
+                    "items": library_items or {},
+                    "episode_counts": episode_counts_by_series_id or {},
+                }
+            finally:
+                scan_client.close()
+
+        scan_workers = min(DISCOVER_INDEX_LIBRARY_SCAN_WORKERS, max(1, len(tv_libraries) + 1))
+        with ThreadPoolExecutor(max_workers=scan_workers) as executor:
+            futures = [executor.submit(_scan_movie_items)]
+            futures.extend(executor.submit(_scan_tv_library, lib) for lib in tv_libraries)
+            for future in as_completed(futures):
+                try:
+                    scan_result = future.result() or {}
+                except Exception as e:
+                    library_scan_error_count += 1
+                    logger.warning(f"[EmbyLibCache] Emby 可用性索引媒体库扫描失败: {e}")
+                    continue
+
+                if scan_result.get("kind") == "movies":
+                    items.update(scan_result.get("items") or {})
+                    continue
+
+                library_items = scan_result.get("items") or {}
+                if not library_items:
+                    continue
                 tv_library_count += 1
                 items.update(library_items)
-        if fallback_tv_items and not any(
+                episode_counts_by_series_id = scan_result.get("episode_counts") or {}
+                if episode_counts_by_series_id:
+                    episode_batch_library_count += 1
+                    episode_batch_series_count += len(episode_counts_by_series_id)
+                for item_meta in library_items.values():
+                    if not isinstance(item_meta, dict):
+                        continue
+                    tmdb_id = str(item_meta.get("tmdb_id", "") or "")
+                    media_type = item_meta.get("media_type", "")
+                    series_id = str(item_meta.get("emby_id", "") or "")
+                    library_id = str(item_meta.get("library_id") or "")
+                    if not tmdb_id or not series_id:
+                        continue
+                    discover_key = f"{tmdb_id}:{media_type}:{library_id}" if library_id else f"{tmdb_id}:{media_type}"
+                    episode_counts = episode_counts_by_series_id.get(series_id)
+                    if episode_counts is not None:
+                        tv_episode_counts_by_key[discover_key] = episode_counts
+        if not any(
             isinstance(value, dict) and value.get("media_type") == "tv"
             for value in items.values()
         ):
+            fallback_tv_items = client.get_all_library_items(item_types="Series")
             items.update(fallback_tv_items)
         index: dict[str, str] = {}
         series_index: dict[str, dict[int, set[int]]] = {}
         discover_items: dict[str, dict] = {}
         series_error_count = 0
+        series_fallback_count = 0
         for key, meta in items.items():
             if not isinstance(meta, dict):
                 continue
@@ -1773,7 +1851,10 @@ def build_discover_index(server_idx: int = 0, reason: str = "manual", force: boo
                 index.setdefault(f"title:{norm}:{media_type}", tmdb_id)
             if media_type == "tv":
                 try:
-                    episode_counts = client.get_series_episode_counts_by_id(meta.get("emby_id"))
+                    episode_counts = tv_episode_counts_by_key.get(discover_key)
+                    if episode_counts is None:
+                        series_fallback_count += 1
+                        episode_counts = client.get_series_episode_counts_by_id(meta.get("emby_id"))
                     series_index[discover_key] = episode_counts
                     series_index.setdefault(tmdb_id, episode_counts)
                 except Exception as e:
@@ -1788,6 +1869,11 @@ def build_discover_index(server_idx: int = 0, reason: str = "manual", force: boo
             "index_key_count": len(index),
             "series_count": len(series_index),
             "tv_library_count": tv_library_count,
+            "library_scan_workers": scan_workers,
+            "library_scan_error_count": library_scan_error_count,
+            "episode_batch_library_count": episode_batch_library_count,
+            "episode_batch_series_count": episode_batch_series_count,
+            "series_fallback_count": series_fallback_count,
             "series_error_count": series_error_count,
             "build_duration_sec": round(time.time() - start_time, 3),
             "reason": reason,

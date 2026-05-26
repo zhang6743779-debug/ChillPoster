@@ -516,6 +516,13 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             delete drive.qr_loading;
             drive.transfer_drive_index = 0;
             drive.enable_standard_topology = true;
+            drive.rapid_accounts = Array.isArray(drive.rapid_accounts)
+                ? drive.rapid_accounts.map((acc) => ({
+                    name: acc?.name || '',
+                    cookie: acc?.cookie || '',
+                    recycle_code: acc?.recycle_code || ''
+                }))
+                : [];
             const sourceEmby = ensureSingle302Emby();
             const modes = sourceEmby.modes || {};
             const emby = {

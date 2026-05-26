@@ -43,7 +43,7 @@ class Drive115Config(BaseModel):
 
     # 秒传小号池配置（适配前端的多账号池设计）
     rapid_mode: str = 'auto'  # 调度策略: auto 自动轮询, 或指定账号索引
-    rapid_accounts: list = []  # 小号池: [{"name": "小号1", "cookie": "xxx", "recycle_code": "", "upload_dir": "/ChillPoster"}]
+    rapid_accounts: list = []  # 小号池: [{"name": "小号1", "cookie": "xxx", "recycle_code": ""}]
 
     # 允许前端发送额外的字段，防止 422 错误
     class Config:
@@ -149,6 +149,15 @@ def _normalize_single_drive_config(drive: Any) -> dict:
     normalized["transfer_drive_index"] = 0
     if not isinstance(normalized.get("rapid_accounts"), list):
         normalized["rapid_accounts"] = []
+    normalized["rapid_accounts"] = [
+        {
+            "name": str((account or {}).get("name") or ""),
+            "cookie": str((account or {}).get("cookie") or ""),
+            "recycle_code": str((account or {}).get("recycle_code") or ""),
+        }
+        for account in normalized["rapid_accounts"]
+        if isinstance(account, dict)
+    ]
     return normalized
 
 

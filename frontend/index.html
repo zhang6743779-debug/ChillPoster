@@ -1925,12 +1925,14 @@
                                     </label>
                                     <div class="missing-episode-actions">
                                         <button class="btn btn-primary" @click="refreshMissingEpisodeStats" :disabled="missingEpisodeStats.loading" title="使用当前 Emby 剧集索引快速重算缺集">
-                                            <i v-if="missingEpisodeStats.loading" class="fa-solid fa-spinner fa-spin"></i>
+                                            <i v-if="missingEpisodeStats.loadingAction === 'refresh'" class="fa-solid fa-spinner fa-spin"></i>
                                             <i v-else class="fa-solid fa-rotate-right"></i>
                                             {{ missingEpisodeStats.progress.current ? '刷新统计' : '开始统计' }}
                                         </button>
                                         <button class="btn btn-ghost" @click="calibrateMissingEpisodeStats" :disabled="missingEpisodeStats.loading" title="重新扫描 Emby 剧集索引后再统计，耗时更久">
-                                            <i class="fa-solid fa-database"></i> 校准索引
+                                            <i v-if="missingEpisodeStats.loadingAction === 'calibrate'" class="fa-solid fa-spinner fa-spin"></i>
+                                            <i v-else class="fa-solid fa-database"></i>
+                                            校准索引
                                         </button>
                                         <button class="btn btn-ghost" @click="openDiscoverFromMissingStats">
                                             <i class="fa-solid fa-compass"></i> 返回发现
@@ -1963,6 +1965,10 @@
                                             完整入库
                                             <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
                                         </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'manual_complete'}" @click="setMissingEpisodeFilter('manual_complete')">
+                                            已标记完整
+                                            <strong>{{ missingEpisodeActiveSummary.manualCompleteCount || 0 }}</strong>
+                                        </button>
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
                                             异常入库
                                             <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
@@ -1987,8 +1993,8 @@
                                 <div class="missing-episode-mobile-control-group">
                                     <div class="missing-episode-mobile-control-title">排序</div>
                                     <div class="missing-episode-mobile-chip-scroll">
-                                        <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_desc'}" @click="setMissingEpisodeSort('year_desc')">年份最新</button>
-                                        <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_asc'}" @click="setMissingEpisodeSort('year_asc')">年份最旧</button>
+                                        <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_desc'}" @click="setMissingEpisodeSort('year_desc')">日期最新</button>
+                                        <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_asc'}" @click="setMissingEpisodeSort('year_asc')">日期最旧</button>
                                         <button type="button" :class="{active: missingEpisodeStats.sortBy === 'missing_desc'}" @click="setMissingEpisodeSort('missing_desc')">缺集最多</button>
                                         <button type="button" :class="{active: missingEpisodeStats.sortBy === 'missing_asc'}" @click="setMissingEpisodeSort('missing_asc')">缺集最少</button>
                                         <button type="button" :class="{active: missingEpisodeStats.sortBy === 'ratio_desc'}" @click="setMissingEpisodeSort('ratio_desc')">比例高</button>
@@ -2063,6 +2069,10 @@
                                                 完整入库
                                                 <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
                                             </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'manual_complete'}" @click="setMissingEpisodeFilter('manual_complete')">
+                                                已标记完整
+                                                <strong>{{ missingEpisodeActiveSummary.manualCompleteCount || 0 }}</strong>
+                                            </button>
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
                                                 异常入库
                                                 <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
@@ -2070,8 +2080,8 @@
                                         </div>
                                         <div class="missing-episode-panel-title">排序</div>
                                         <div class="missing-episode-chip-grid sort">
-                                            <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_desc'}" @click="setMissingEpisodeSort('year_desc')">年份最新</button>
-                                            <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_asc'}" @click="setMissingEpisodeSort('year_asc')">年份最旧</button>
+                                            <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_desc'}" @click="setMissingEpisodeSort('year_desc')">日期最新</button>
+                                            <button type="button" :class="{active: missingEpisodeStats.sortBy === 'year_asc'}" @click="setMissingEpisodeSort('year_asc')">日期最旧</button>
                                             <button type="button" :class="{active: missingEpisodeStats.sortBy === 'missing_desc'}" @click="setMissingEpisodeSort('missing_desc')">缺集最多</button>
                                             <button type="button" :class="{active: missingEpisodeStats.sortBy === 'missing_asc'}" @click="setMissingEpisodeSort('missing_asc')">缺集最少</button>
                                             <button type="button" :class="{active: missingEpisodeStats.sortBy === 'ratio_desc'}" @click="setMissingEpisodeSort('ratio_desc')">比例高</button>
@@ -2133,7 +2143,7 @@
                                                 </div>
                                                 <div class="missing-episode-poster-meta-row">
                                                     <div class="missing-episode-poster-year" v-if="row.year">{{ row.year }}</div>
-                                                    <div class="missing-episode-poster-status" :class="row.status">
+                                                    <div class="missing-episode-poster-status" :class="[row.status, { manual: row.manualComplete }]">
                                                         {{ getMissingEpisodePosterCategoryLabel(row) }}
                                                     </div>
                                                 </div>
@@ -3729,11 +3739,7 @@
                                                                 </button>
                                                             </div>
 
-                                                            <div class="rapid-account-grid">
-                                                                <div>
-                                                                    <label>秒传目录</label>
-                                                                    <input type="text" v-model="acc.upload_dir" placeholder="默认主号配置">
-                                                                </div>
+                                                            <div class="rapid-account-grid rapid-account-grid-single">
                                                                 <div>
                                                                     <label>回收站安全码</label>
                                                                     <div class="form-row-tight rapid-account-secret-row">
@@ -3757,7 +3763,7 @@
                                                     </div>
 
                                                     <button class="btn btn-ghost btn-sm rapid-add-btn"
-                                                        @click="(config302.drives[0].rapid_accounts = config302.drives[0].rapid_accounts || []).push({name: '', cookie: '', upload_dir: '', recycle_code: ''})">
+                                                        @click="(config302.drives[0].rapid_accounts = config302.drives[0].rapid_accounts || []).push({name: '', cookie: '', recycle_code: ''})">
                                                         <i class="fa-solid fa-plus"></i> 添加小号 CK
                                                     </button>
                                                 </div>
@@ -3785,8 +3791,6 @@
                                                 </button>
                                             </div>
 
-                                            <label>复制/秒传目录</label>
-                                            <input type="text" v-model="config302.drives[0].upload_dir">
                                             </template>
 
                                             <div class="cleanup-subsection">
@@ -5614,9 +5618,9 @@
                 <section class="missing-episode-compare-panel">
                     <button class="modal-close-btn missing-episode-compare-close" @click="closeMissingEpisodeCompare"><i class="fa-solid fa-xmark"></i></button>
                     <div class="missing-episode-compare-head">
-                        <div class="missing-episode-compare-kicker">{{ shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '异常入库对比' : '入库剧集明细' }}</div>
-                        <span class="detail-library-badge" :class="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? 'error' : 'exists'">
-                            {{ shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '需要核对' : '正常入库' }}
+                        <div class="missing-episode-compare-kicker">{{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '已标记完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '异常入库对比' : '入库剧集明细') }}</div>
+                        <span class="detail-library-badge" :class="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) && !isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? 'error' : 'exists'">
+                            {{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '人工完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '需要核对' : '正常入库') }}
                         </span>
                     </div>
                     <div class="missing-episode-compare-media">
@@ -5630,6 +5634,16 @@
                                     <p v-if="missingEpisodeCompareModal.row?.item?.original_title">{{ missingEpisodeCompareModal.row.item.original_title }}</p>
                                 </div>
                                 <div class="missing-episode-compare-action-stack">
+                                    <button
+                                        type="button"
+                                        class="missing-episode-compare-manual-btn"
+                                        :class="{active: isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)}"
+                                        :disabled="isMissingEpisodeManualCompleteUpdating(missingEpisodeCompareModal.row)"
+                                        @click="toggleMissingEpisodeManualComplete(missingEpisodeCompareModal.row)"
+                                    >
+                                        <i class="fa-solid" :class="isMissingEpisodeManualCompleteUpdating(missingEpisodeCompareModal.row) ? 'fa-spinner fa-spin' : (isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? 'fa-rotate-left' : 'fa-circle-check')"></i>
+                                        <span>{{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '取消标记' : '标记完整' }}</span>
+                                    </button>
                                     <button type="button" class="missing-episode-compare-mp-btn" @click="openMissingEpisodeMpSubscribe">
                                         <i class="fa-solid fa-bell"></i>
                                         <span>MP订阅</span>
@@ -5658,6 +5672,7 @@
                                 <span>{{ missingEpisodeCompareModal.row?.localItem?.libraryName || missingEpisodeCompareModal.row?.libraryName || '未分类媒体库' }}</span>
                                 <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.tmdbStatus || '未知状态' }}</span>
                                 <span>{{ countLocalEpisodes(missingEpisodeCompareModal.row?.localItem?.seasons) }} 集已入库</span>
+                                <span v-if="isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)">不计入缺集</span>
                                 <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
                                 <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) && missingEpisodeCompareModal.row?.extraLocalEpisodes">本地多 {{ missingEpisodeCompareModal.row.extraLocalEpisodes }} 集</span>
                                 <span>{{ missingEpisodeCompareModal.row?.label || getMissingEpisodePosterCategoryLabel(missingEpisodeCompareModal.row) }}</span>
@@ -5789,7 +5804,11 @@
                             <span>{{ resourceSearchModal.error || '未搜索到可用资源' }}</span>
                         </div>
                     </div>
-                    <div v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-note">
+                    <div v-if="isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)" class="missing-episode-compare-note">
+                        <i class="fa-solid fa-circle-check"></i>
+                        <span>这个剧已按本地入库状态标记为完整，缺集统计不会再把它计入缺集或异常；需要重新按 TMDB 计算时，可以点击“取消标记”。</span>
+                    </div>
+                    <div v-else-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-note">
                         <i class="fa-solid fa-circle-info"></i>
                         <span>如果标题、年份、季号或集数对不上，可能是 Emby 剧集识别错、绑定到了错误的 TMDB 条目，也可能是 TMDB 自身季集信息有误；本地多出的集号也会标为异常。请先核对媒体库识别与 TMDB 条目，修正后重新刷新统计。</span>
                     </div>
