@@ -100,6 +100,7 @@ _ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
 _WASH_CODEC_MULTIPLIERS = {
     "H264": 1.0,
     "H265": 1.6,
+    "VP9": 1.6,
     "AV1": 1.7,
     "MPEG4": 0.6,
     "XVID": 0.6,
@@ -542,6 +543,8 @@ def _normalize_wash_codec(value: str) -> str:
         return "H265"
     if any(token in text for token in ("H264", "X264", "AVC")):
         return "H264"
+    if "VP9" in text:
+        return "VP9"
     if "AV1" in text:
         return "AV1"
     if "XVID" in text:
@@ -4252,7 +4255,7 @@ def _finalize_organize_result(
     if media_type == "movie":
         remote_refresh_path = f"{target_name}{cat}/{result.get('target_folder', '')}"
     else:
-        remote_refresh_path = f"{target_name}{cat}/{result.get('target_folder', '')}/{result.get('season_dir', '')}"
+        remote_refresh_path = f"{target_name}{cat}/{result.get('target_folder', '')}"
     refresh_target_path = _map_remote_to_strm_local_path(remote_refresh_path)
 
     pending_refresh_payloads.append({

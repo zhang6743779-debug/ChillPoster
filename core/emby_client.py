@@ -1144,6 +1144,21 @@ class EmbyClient:
             return True
         except: return False
 
+    def notify_media_updated(self, path, update_type="Created"):
+        path = str(path or "").strip()
+        if not path:
+            return False
+        try:
+            self._request(
+                "POST",
+                "emby/Library/Media/Updated",
+                json={"Updates": [{"Path": path, "UpdateType": update_type or "Created"}]},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"通知 Emby 路径更新失败: {path} | {e}")
+            return False
+
     def _parse_emby_datetime(self, value):
         if not value:
             return 0.0

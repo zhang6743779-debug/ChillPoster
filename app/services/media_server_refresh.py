@@ -7,7 +7,6 @@ from typing import Any, List, Dict, Optional
 from core.emby_client import EmbyClient
 from core.logger import logger
 from app.routers.config_302 import get_emby_configs_sync
-from app.services.emby_library_cache import find_libraries_for_path, refresh_server_libraries
 
 
 class RefreshMediaItem:
@@ -39,34 +38,36 @@ class _ServiceAdapter:
             path = str(path)
         return path.replace("\\", "/").rstrip("/").lower()
 
+    def _refresh_by_path(self, item: RefreshMediaItem) -> bool:
+        target_path = str(item.target_path or "").strip()
+        if not target_path:
+            return False
+
+        logger.info(f"[MediaServerRefresh] 按路径通知 Emby 更新: {target_path}")
+        return self.client.notify_media_updated(target_path, update_type="Created")
+
     def refresh_library_by_items(self, items: List[RefreshMediaItem]):
-        library_ids = set()
+        refreshed_keys = set()
+        failed_count = 0
 
         for item in items:
             target_path = self._norm_path(str(item.target_path))
             if not target_path:
                 continue
 
-            matched_libs = find_libraries_for_path(self.server_idx, target_path)
-            if not matched_libs:
-                refresh_server_libraries(self.server_idx)
-                matched_libs = find_libraries_for_path(self.server_idx, target_path)
+            dedupe_key = (item.type or "", target_path)
+            if dedupe_key in refreshed_keys:
+                continue
+            refreshed_keys.add(dedupe_key)
 
-            for lib in matched_libs:
-                lib_id = lib.get("id")
-                if lib_id:
-                    library_ids.add(str(lib_id))
+            if not self._refresh_by_path(item):
+                failed_count += 1
 
-        if library_ids:
-            for library_id in sorted(library_ids):
-                self.client.refresh_library(library_id)
-            refresh_server_libraries(self.server_idx)
-        else:
-            self.refresh_root_library()
+        if failed_count:
+            logger.warning(f"[MediaServerRefresh] 精确刷新失败: {failed_count}/{len(refreshed_keys)}")
 
     def refresh_root_library(self):
-        self.client.refresh_library()
-        refresh_server_libraries(self.server_idx)
+        logger.warning("[MediaServerRefresh] 已禁用整理后的整库刷新 fallback")
 
     def close(self):
         try:
@@ -213,7 +214,7 @@ class MediaServerRefresh:
         if not items:
             return
 
-        logger.trace(f"[MediaServerRefresh] 立即刷新媒体库: {len(items)} 个路径")
+        logger.trace(f"[MediaServerRefresh] 立即精确刷新媒体目录: {len(items)} 个路径")
         self._refresh_items(items)
 
     def stop_service(self):

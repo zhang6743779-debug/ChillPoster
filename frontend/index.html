@@ -2450,7 +2450,7 @@
                                                         <div v-if="record.target_path" class="history-path-line" :title="record.target_path">
                                                             <span>目标路径：</span>{{ record.target_path }}
                                                         </div>
-                                                        <div v-if="record.reason && ['organize_failed', 'wash_failed'].includes(record.category)" class="history-path-line history-reason-line" :title="record.reason">
+                                                        <div v-if="record.reason && ['organize_failed', 'wash_failed', 'skipped'].includes(record.category)" class="history-path-line history-reason-line" :title="record.reason">
                                                             <span>原因：</span>{{ record.reason }}
                                                         </div>
                                                         <div v-if="!record.source_path && !record.target_path" class="history-path-line" :title="record.message || record.subtitle">
