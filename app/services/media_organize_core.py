@@ -1767,7 +1767,7 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
-    async def _flush_pending_failed_moves():
+    async def _flush_pending_failed_moves(*, move_top_dir: bool = True, target_label: str = "整理失败目录"):
         nonlocal pending_failed_moves
         if not pending_failed_moves:
             return 0
@@ -1775,7 +1775,8 @@ async def _run_organize_async(run_id: str, req):
             return len(pending_failed_moves)
         batch = pending_failed_moves
         pending_failed_moves = []
-        logger.info(f"[MediaOrganize] 开始统一移动失败文件/目录: {len(batch)} 条")
+        move_mode = "文件/目录" if move_top_dir else "文件"
+        logger.info(f"[MediaOrganize] 开始统一移动失败{move_mode}: {len(batch)} 条 -> {target_label}")
         await _move_failed_files_batch(
             client,
             batch,
@@ -1783,10 +1784,11 @@ async def _run_organize_async(run_id: str, req):
             failed_dir_cid,
             moved_dirs,
             subtitles_by_parent=subtitles_by_parent,
-            target_label="整理失败目录",
+            target_label=target_label,
+            move_top_dir=move_top_dir,
         )
         moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
-        logger.info(f"[MediaOrganize] 失败文件/目录统一移动完成: {moved_count}/{len(batch)}")
+        logger.info(f"[MediaOrganize] 失败{move_mode}统一移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
     def _flush_pending_media_server_refreshes(immediate: bool = False, payloads: Optional[list[dict]] = None):
@@ -3491,9 +3493,12 @@ async def _run_organize_async(run_id: str, req):
                 moved_wash = max(0, wash_pending_count - int(wash_left or 0))
                 logger.info(f"[Wash] 取消前洗版未通过文件移动完成: {moved_wash}/{wash_pending_count}")
             if failed_pending_count:
-                failed_left = await _flush_pending_failed_moves()
+                failed_left = await _flush_pending_failed_moves(
+                    move_top_dir=False,
+                    target_label="整理失败目录（取消时仅移动失败文件）",
+                )
                 moved_failed = max(0, failed_pending_count - int(failed_left or 0))
-                logger.info(f"[MediaOrganize] 取消前失败文件/目录移动完成: {moved_failed}/{failed_pending_count}")
+                logger.info(f"[MediaOrganize] 取消前失败文件移动完成: {moved_failed}/{failed_pending_count}")
         except Exception as move_err:
             logger.warning(f"[MediaOrganize] 取消前移动待处理文件失败: {move_err}")
         try:
