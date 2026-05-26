@@ -39,6 +39,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             monitor_dirs: [],
             auto_sync_strm: true,
             emby_scrapers_enabled: false,
+            emby_locale_defaults_fixed: false,
             wash_enabled: true,
             wash_by_equivalent_size: true,
             wash_tolerance_ratio: 0,
@@ -756,11 +757,28 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             }
         };
 
-        const toggleEmbyScrapers = (event) => {
+        const toggleEmbyScrapers = async (event) => {
             const nextChecked = !!event?.target?.checked;
             mediaOrganizeConfig.emby_scrapers_enabled = nextChecked;
             if (nextChecked) {
                 showToast('建议关闭，你会更快乐~', 'warning');
+                if (!mediaOrganizeConfig.emby_locale_defaults_fixed) {
+                    try {
+                        const resp = await axios.post('/api/media_organize/emby_libraries/fix_locale_defaults', {
+                            overwrite: false,
+                            once_only: true,
+                        });
+                        const data = resp.data || {};
+                        if (data.status === 'success' || data.status === 'partial_success') {
+                            mediaOrganizeConfig.emby_locale_defaults_fixed = true;
+                            showToast(data.message || '已修复已有 Emby 媒体库语言设置', data.failed ? 'warning' : 'success');
+                        } else if (data.status === 'skipped') {
+                            mediaOrganizeConfig.emby_locale_defaults_fixed = true;
+                        }
+                    } catch (e) {
+                        showToast('修复已有 Emby 媒体库语言设置失败: ' + (e.response?.data?.detail || e.message), 'error');
+                    }
+                }
             }
         };
 

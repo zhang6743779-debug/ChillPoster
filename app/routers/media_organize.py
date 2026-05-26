@@ -121,6 +121,7 @@ class EmbyLibraryLocaleFixPayload(BaseModel):
     server_idx: int = 0
     overwrite: bool = False
     refresh_cache: bool = True
+    once_only: bool = True
 
 
 _DEFAULT_SCRAPE_FIELDS = {
@@ -905,6 +906,28 @@ async def fix_emby_library_locale_defaults(payload: Optional[EmbyLibraryLocaleFi
     from core.emby_client import EmbyClient
 
     req = payload or EmbyLibraryLocaleFixPayload()
+    config_data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                loaded_data = json.load(f)
+            if isinstance(loaded_data, dict):
+                config_data = loaded_data
+        except Exception as e:
+            logger.warning(f"[MediaOrganize] 读取媒体整理配置失败，继续执行语言修复: {e}")
+
+    if req.once_only and bool(config_data.get("emby_locale_defaults_fixed", False)):
+        return {
+            "status": "skipped",
+            "message": "已执行过媒体库语言/地区修复，本次跳过",
+            "server_idx": req.server_idx,
+            "overwrite": req.overwrite,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "items": [],
+        }
+
     server = get_emby_config_by_index_sync(req.server_idx)
     if not isinstance(server, dict) or not server.get("url") or not server.get("key"):
         raise HTTPException(status_code=400, detail="请先在 Emby 配置中填写地址和接口密钥")
@@ -919,6 +942,12 @@ async def fix_emby_library_locale_defaults(payload: Optional[EmbyLibraryLocaleFi
                 cache_count = refresh_cache()
             except Exception as e:
                 logger.warning(f"[MediaOrganize] 修复媒体库语言后刷新快照失败: {e}")
+
+        if req.once_only:
+            config_data["emby_locale_defaults_fixed"] = True
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=4)
 
         status = "success" if result.get("failed", 0) == 0 else "partial_success"
         return {
