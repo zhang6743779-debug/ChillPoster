@@ -389,6 +389,8 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         const movieFolderFormatRef = ref(null);
         const tvFolderFormatRef = ref(null);
         const tvEpisodeFormatRef = ref(null);
+        const activeRenameTemplateType = ref('movie');
+        let _renameTemplateDragState = null;
 
         // Preview example variables
         const MOVIE_PREVIEW_VARS = {
@@ -442,105 +444,110 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         const MOVIE_DISPLAY_FORMAT = '{英文片名}.{公映年份}.{分辨率}.{介质来源}.{处理方式}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}.mkv';
         const TV_DISPLAY_FORMAT = '{英文剧名}.{季数集数}.{首播年份}.{分辨率}.{来源平台}.{介质类型}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}.mkv';
 
-        function movieFolderTemplateToDisplay(template) {
+        const MOVIE_TEMPLATE_LABELS = [
+            ['{audio_encode}', '{音频规格}'],
+            ['{resource_effect}', '{处理方式}'],
+            ['{resource_team}', '{制作组}'],
+            ['{resource_type}', '{介质来源}'],
+            ['{video_effect}', '{动态范围}'],
+            ['{video_encode}', '{视频编码}'],
+            ['{color_depth}', '{色深}'],
+            ['{resource_pix}', '{分辨率}'],
+            ['{en_title}', '{英文片名}'],
+            ['{tmdb-{tmdb_id}}', '{TMDB编号}'],
+            ['{tmdb_id}', '{TMDB编号}'],
+            ['{title}', '{中文标题}'],
+            ['{year}', '{公映年份}'],
+            ['{part}', '{分Part}'],
+            ['{fps}', '{帧率}'],
+            ['{ext}', '{文件后缀}'],
+        ];
+        const TV_TEMPLATE_LABELS = [
+            ['{season_episode}', '{季数集数}'],
+            ['{audio_encode}', '{音频规格}'],
+            ['{resource_team}', '{制作组}'],
+            ['{resource_type}', '{介质类型}'],
+            ['{video_effect}', '{动态范围}'],
+            ['{video_encode}', '{视频编码}'],
+            ['{color_depth}', '{色深}'],
+            ['{resource_pix}', '{分辨率}'],
+            ['{episode_num}', '{集号}'],
+            ['{season_num}', '{季号}'],
+            ['{web_source}', '{来源平台}'],
+            ['{en_title}', '{英文剧名}'],
+            ['{tmdb-{tmdb_id}}', '{TMDB编号}'],
+            ['{tmdb_id}', '{TMDB编号}'],
+            ['{title}', '{中文剧名}'],
+            ['{year}', '{首播年份}'],
+            ['{part}', '{分Part}'],
+            ['{fps}', '{帧率}'],
+            ['{ext}', '{文件后缀}'],
+        ];
+
+        function templateToDisplay(template, labels) {
             let result = template || '';
-            result = result.replaceAll('{title}', '{中文标题}');
-            result = result.replaceAll('{year}', '{公映年份}');
-            result = result.replaceAll('{tmdb-{TMDB编号}}', '{TMDB编号}');
-            result = result.replaceAll('{tmdb-{tmdb_id}}', '{TMDB编号}');
+            for (const [raw, display] of labels) {
+                result = result.replaceAll(raw, display);
+            }
             return result;
+        }
+
+        function displayToTemplate(display, labels) {
+            let result = display || '';
+            result = result.replaceAll('{tmdb-{TMDB编号}}', '{tmdb-{tmdb_id}}');
+            for (const [raw, displayLabel] of labels) {
+                const nextRaw = raw === '{tmdb_id}' ? '{tmdb-{tmdb_id}}' : raw;
+                result = result.replaceAll(displayLabel, nextRaw);
+            }
+            return result;
+        }
+
+        function movieFolderTemplateToDisplay(template) {
+            return templateToDisplay(template, MOVIE_TEMPLATE_LABELS);
         }
 
         function movieFolderDisplayToTemplate(display) {
-            let result = display || '';
-            result = result.replaceAll('{tmdb-{TMDB编号}}', '{tmdb-{tmdb_id}}');
-            result = result.replaceAll('{中文标题}', '{title}');
-            result = result.replaceAll('{公映年份}', '{year}');
-            result = result.replaceAll('{TMDB编号}', '{tmdb-{tmdb_id}}');
-            return result;
+            return displayToTemplate(display, MOVIE_TEMPLATE_LABELS);
         }
 
         function tvFolderTemplateToDisplay(template) {
-            let result = template || '';
-            result = result.replaceAll('{title}', '{中文剧名}');
-            result = result.replaceAll('{year}', '{首播年份}');
-            result = result.replaceAll('{tmdb-{TMDB编号}}', '{TMDB编号}');
-            result = result.replaceAll('{tmdb-{tmdb_id}}', '{TMDB编号}');
-            return result;
+            return templateToDisplay(template, TV_TEMPLATE_LABELS);
         }
 
         function tvFolderDisplayToTemplate(display) {
-            let result = display || '';
-            result = result.replaceAll('{tmdb-{TMDB编号}}', '{tmdb-{tmdb_id}}');
-            result = result.replaceAll('{中文剧名}', '{title}');
-            result = result.replaceAll('{首播年份}', '{year}');
-            result = result.replaceAll('{TMDB编号}', '{tmdb-{tmdb_id}}');
-            return result;
+            return displayToTemplate(display, TV_TEMPLATE_LABELS);
         }
 
         function movieTemplateToDisplay(template) {
             let result = template || '';
-            result = result.replaceAll('{audio_encode}', '{音频规格}');
-            result = result.replaceAll('{en_title}', '{英文片名}');
-            result = result.replaceAll('{year}', '{公映年份}');
-            result = result.replaceAll('{resource_pix}', '{分辨率}');
-            result = result.replaceAll('{video_encode}', '{视频编码}');
-            result = result.replaceAll('{color_depth}', '{色深}');
-            result = result.replaceAll('{video_effect}', '{动态范围}');
-            result = result.replaceAll('{fps}', '{帧率}');
-            result = result.replaceAll('{resource_team}', '{制作组}');
             result = result.replaceAll('{web_source}.{resource_type}.{resource_effect}', '{介质来源}.{处理方式}');
             result = result.replaceAll('{web_source}.{resource_effect}', '{介质来源}.{处理方式}');
-            return result.endsWith('.mkv') ? result : `${result}.mkv`;
+            result = templateToDisplay(result, MOVIE_TEMPLATE_LABELS);
+            return result.includes('{文件后缀}') ? result : `${result}.{文件后缀}`;
         }
 
         function movieDisplayToTemplate(display) {
-            let result = (display || '').replace(/\.mkv$/i, '');
-            result = result.replaceAll('{音频规格}', '{audio_encode}');
-            result = result.replaceAll('{英文片名}', '{en_title}');
-            result = result.replaceAll('{公映年份}', '{year}');
-            result = result.replaceAll('{分辨率}', '{resource_pix}');
-            result = result.replaceAll('{视频编码}', '{video_encode}');
-            result = result.replaceAll('{色深}', '{color_depth}');
-            result = result.replaceAll('{动态范围}', '{video_effect}');
-            result = result.replaceAll('{帧率}', '{fps}');
-            result = result.replaceAll('{制作组}', '{resource_team}');
+            let result = display || '';
+            result = result.replaceAll('.{文件后缀}', '');
+            result = result.replaceAll('{文件后缀}', '');
+            result = result.replace(/\.mkv$/i, '');
+            result = displayToTemplate(result, MOVIE_TEMPLATE_LABELS);
             result = result.replaceAll('{介质来源}.{处理方式}', '{web_source}.{resource_type}.{resource_effect}');
             return result;
         }
 
         function tvTemplateToDisplay(template) {
             let result = template || '';
-            result = result.replaceAll('{audio_encode}', '{音频规格}');
-            result = result.replaceAll('{en_title}', '{英文剧名}');
-            result = result.replaceAll('{season_episode}', '{季数集数}');
-            result = result.replaceAll('{year}', '{首播年份}');
-            result = result.replaceAll('{resource_pix}', '{分辨率}');
-            result = result.replaceAll('{web_source}', '{来源平台}');
-            result = result.replaceAll('{resource_type}', '{介质类型}');
-            result = result.replaceAll('{video_encode}', '{视频编码}');
-            result = result.replaceAll('{color_depth}', '{色深}');
-            result = result.replaceAll('{video_effect}', '{动态范围}');
-            result = result.replaceAll('{fps}', '{帧率}');
-            result = result.replaceAll('{resource_team}', '{制作组}');
-            return result.endsWith('.mkv') ? result : `${result}.mkv`;
+            result = templateToDisplay(result, TV_TEMPLATE_LABELS);
+            return result.includes('{文件后缀}') ? result : `${result}.{文件后缀}`;
         }
 
         function tvDisplayToTemplate(display) {
-            let result = (display || '').replace(/\.mkv$/i, '');
-            result = result.replaceAll('{音频规格}', '{audio_encode}');
-            result = result.replaceAll('{英文剧名}', '{en_title}');
-            result = result.replaceAll('{季数集数}', '{season_episode}');
-            result = result.replaceAll('{首播年份}', '{year}');
-            result = result.replaceAll('{分辨率}', '{resource_pix}');
-            result = result.replaceAll('{来源平台}', '{web_source}');
-            result = result.replaceAll('{介质类型}', '{resource_type}');
-            result = result.replaceAll('{视频编码}', '{video_encode}');
-            result = result.replaceAll('{色深}', '{color_depth}');
-            result = result.replaceAll('{动态范围}', '{video_effect}');
-            result = result.replaceAll('{帧率}', '{fps}');
-            result = result.replaceAll('{制作组}', '{resource_team}');
-            return result;
+            let result = display || '';
+            result = result.replaceAll('.{文件后缀}', '');
+            result = result.replaceAll('{文件后缀}', '');
+            result = result.replace(/\.mkv$/i, '');
+            return displayToTemplate(result, TV_TEMPLATE_LABELS);
         }
 
         const movieFolderFormatDisplay = computed({
@@ -568,6 +575,192 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             }
         });
 
+        function setActiveRenameTemplate(type) {
+            activeRenameTemplateType.value = type;
+        }
+
+        function getRenameDisplayRef(type) {
+            return {
+                movie: movieFormatDisplay,
+                movieFolder: movieFolderFormatDisplay,
+                tvFolder: tvFolderFormatDisplay,
+                tvEpisode: tvEpisodeFormatDisplay,
+            }[type] || null;
+        }
+
+        function getRenameTemplateDisplay(type) {
+            return getRenameDisplayRef(type)?.value || '';
+        }
+
+        function setRenameTemplateDisplay(type, value) {
+            const displayRef = getRenameDisplayRef(type);
+            if (!displayRef) return;
+            displayRef.value = value;
+        }
+
+        function activeRenameTemplateForGroup(group) {
+            const active = activeRenameTemplateType.value || '';
+            if (group === 'movie') return active.startsWith('movie') ? active : 'movie';
+            if (group === 'tv') return active.startsWith('tv') ? active : 'tvEpisode';
+            return active || 'movie';
+        }
+
+        function renameTemplateSegments(type) {
+            const value = getRenameTemplateDisplay(type);
+            if (!value) return [];
+            const rawSegments = value
+                .split(/(\{[^{}]+\})/g)
+                .filter(part => part !== '')
+                .map(part => ({
+                    type: part.startsWith('{') && part.endsWith('}') ? 'token' : 'text',
+                    value: part,
+                    label: part.startsWith('{') && part.endsWith('}') ? part.slice(1, -1) : part,
+                }));
+            const segments = [];
+            for (let i = 0; i < rawSegments.length; i += 1) {
+                const prev = rawSegments[i];
+                const current = rawSegments[i + 1];
+                const next = rawSegments[i + 2];
+                if (prev?.type === 'text' && current?.type === 'token' && next?.type === 'text') {
+                    const open = prev.value.match(/^(.*)([([])\s*$/);
+                    const close = next.value.match(/^\s*([)\]])(.*)$/);
+                    const pairs = { '(': ')', '[': ']' };
+                    if (open && close && pairs[open[2]] === close[1]) {
+                        if (open[1]) {
+                            segments.push({ type: 'text', value: open[1], label: open[1] });
+                        }
+                        segments.push({
+                            type: 'token',
+                            value: `${open[2]}${current.value}${close[1]}`,
+                            label: current.label,
+                        });
+                        if (close[2]) {
+                            segments.push({ type: 'text', value: close[2], label: close[2] });
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+                segments.push(rawSegments[i]);
+            }
+            return segments.flatMap((segment) => {
+                if (segment.type !== 'text') return [segment];
+                return Array.from(segment.value).map(char => ({
+                    type: 'text',
+                    value: char,
+                    label: char,
+                }));
+            });
+        }
+
+        function rebuildRenameTemplateFromSegments(type, updater) {
+            const segments = renameTemplateSegments(type);
+            const nextSegments = updater(segments);
+            setRenameTemplateDisplay(type, nextSegments.map(segment => segment.value).join(''));
+            activeRenameTemplateType.value = type;
+        }
+
+        function updateRenameTemplateSegment(type, index, value) {
+            rebuildRenameTemplateFromSegments(type, (segments) => {
+                if (!segments[index]) return segments;
+                segments[index] = { ...segments[index], value: value || '', label: value || '' };
+                return segments;
+            });
+        }
+
+        function renameTemplateLiteralLabel(value) {
+            if (value === ' ') return '空格';
+            return value || '空';
+        }
+
+        function renameTokenClass(label) {
+            const token = String(label || '');
+            if (token === '文件后缀') return 'rename-token-ext';
+            if (['中文标题', '中文剧名', '英文片名', '英文剧名'].includes(token)) return 'rename-token-title';
+            if (['公映年份', '首播年份'].includes(token)) return 'rename-token-year';
+            if (['TMDB编号'].includes(token)) return 'rename-token-id';
+            if (['介质来源', '来源平台', '介质类型'].includes(token)) return 'rename-token-source';
+            if (['处理方式', '动态范围'].includes(token)) return 'rename-token-effect';
+            if (['分辨率', '视频编码', '色深', '帧率'].includes(token)) return 'rename-token-video';
+            if (['音频规格'].includes(token)) return 'rename-token-audio';
+            if (['制作组'].includes(token)) return 'rename-token-team';
+            if (['季数集数', '季号', '集号'].includes(token)) return 'rename-token-episode';
+            if (['分Part'].includes(token)) return 'rename-token-part';
+            return 'rename-token-default';
+        }
+
+        function removeRenameTemplateSegment(type, index) {
+            rebuildRenameTemplateFromSegments(type, (segments) => {
+                if (segments[index]?.label === '文件后缀') return segments;
+                if (segments[index]?.type === 'token') {
+                    const prev = segments[index - 1];
+                    const next = segments[index + 1];
+                    const isPrevSeparator = prev?.type === 'text' && /^[\s._-]+$/.test(prev.value);
+                    const isNextSeparator = next?.type === 'text' && /^[\s._-]+$/.test(next.value);
+                    if (isPrevSeparator && isNextSeparator && prev.value === next.value) {
+                        segments.splice(index, 2);
+                        return segments;
+                    }
+                    if (isNextSeparator && index === 0) {
+                        segments.splice(index, 2);
+                        return segments;
+                    }
+                    if (isPrevSeparator) {
+                        segments.splice(index - 1, 2);
+                        return segments;
+                    }
+                }
+                segments.splice(index, 1);
+                return segments;
+            });
+        }
+
+        function onRenameTemplateDragStart(event, type, index) {
+            _renameTemplateDragState = { type, index };
+            activeRenameTemplateType.value = type;
+            event.dataTransfer.effectAllowed = 'move';
+        }
+
+        function onRenameTemplateDragOver(event, type) {
+            if (_renameTemplateDragState?.type === type) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+            }
+        }
+
+        function onRenameTemplateDrop(event, type, index) {
+            event.preventDefault();
+            if (!_renameTemplateDragState || _renameTemplateDragState.type !== type) return;
+            const from = _renameTemplateDragState.index;
+            rebuildRenameTemplateFromSegments(type, (segments) => {
+                if (from < 0 || from >= segments.length || from === index) return segments;
+                const [moved] = segments.splice(from, 1);
+                const target = index > from ? index - 1 : index;
+                segments.splice(Math.max(0, Math.min(target, segments.length)), 0, moved);
+                return segments;
+            });
+            _renameTemplateDragState = null;
+        }
+
+        function insertRenameLiteral(type, literal) {
+            const displayRef = getRenameDisplayRef(type);
+            if (!displayRef) return;
+            displayRef.value = `${displayRef.value || ''}${literal}`;
+            activeRenameTemplateType.value = type;
+        }
+
+        function insertRenameTokenForGroup(group, token) {
+            insertToken(activeRenameTemplateForGroup(group), token);
+        }
+
+        function insertRenameLiteralForGroup(group, literal) {
+            insertRenameLiteral(activeRenameTemplateForGroup(group), literal);
+        }
+
+        function onRenameTemplateDragEnd() {
+            _renameTemplateDragState = null;
+        }
+
         // 实时预览计算属性
         const moviePreviewName = computed(() =>
             renderPreview(mediaOrganizeConfig.movie_rename_format, MOVIE_PREVIEW_VARS) || '（请输入模板）'
@@ -594,20 +787,21 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                 tvFolder: tvFolderFormatRef,
                 tvEpisode: tvEpisodeFormatRef,
             };
-            const fieldMap = {
-                movie: 'movie_rename_format',
-                movieFolder: 'movie_folder_format',
-                tvFolder: 'tv_folder_format',
-                tvEpisode: 'tv_episode_format',
-            };
             const el = refMap[type]?.value;
-            const field = fieldMap[type];
-            if (!el || !field) return;
+            const displayRef = getRenameDisplayRef(type);
+            if (!displayRef) return;
+
+            if (!el) {
+                displayRef.value = `${displayRef.value || ''}${token}`;
+                activeRenameTemplateType.value = type;
+                return;
+            }
 
             const start = el.selectionStart ?? el.value.length;
             const end = el.selectionEnd ?? el.value.length;
-            let current = mediaOrganizeConfig[field] || '';
-            mediaOrganizeConfig[field] = current.slice(0, start) + token + current.slice(end);
+            const current = displayRef.value || '';
+            displayRef.value = current.slice(0, start) + token + current.slice(end);
+            activeRenameTemplateType.value = type;
 
             // 恢复光标到插入后的位置
             nextTick(() => {
@@ -1351,7 +1545,21 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         tvFolderPreviewName,
         tvEpisodePreviewName,
         insertToken,
+        insertRenameTokenForGroup,
+        insertRenameLiteralForGroup,
         resetMovieFormat,
         resetTvFormat,
+        setActiveRenameTemplate,
+        activeRenameTemplateType,
+        renameTemplateSegments,
+        renameTemplateLiteralLabel,
+        renameTokenClass,
+        updateRenameTemplateSegment,
+        removeRenameTemplateSegment,
+        insertRenameLiteral,
+        onRenameTemplateDragStart,
+        onRenameTemplateDragOver,
+        onRenameTemplateDrop,
+        onRenameTemplateDragEnd,
     };
 }

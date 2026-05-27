@@ -59,9 +59,19 @@ _CODE_MAP: dict[str, type[HDHiveAPIError]] = {
     "INVALID_API_KEY": HDHiveAuthError,
     "DISABLED_API_KEY": HDHiveAuthError,
     "EXPIRED_API_KEY": HDHiveAuthError,
+    "INVALID_OPENAPI_USER_TOKEN": HDHiveAuthError,
+    "OPENAPI_REFRESH_REQUIRED": HDHiveAuthError,
+    "OPENAPI_REAUTH_REQUIRED": HDHiveAuthError,
+    "OPENAPI_USER_REQUIRED": HDHiveAuthError,
     "VIP_REQUIRED": HDHiveForbiddenError,
+    "SCOPE_NOT_ALLOWED": HDHiveForbiddenError,
+    "USER_SCOPE_NOT_ALLOWED": HDHiveForbiddenError,
     "ENDPOINT_DISABLED": HDHiveForbiddenError,
     "ENDPOINT_QUOTA_EXCEEDED": HDHiveRateLimitError,
+    "GLOBAL_RATE_LIMIT_EXCEEDED": HDHiveRateLimitError,
+    "APP_RATE_LIMIT_EXCEEDED": HDHiveRateLimitError,
+    "USER_RATE_LIMIT_EXCEEDED": HDHiveRateLimitError,
+    "OPENAPI_COOLDOWN": HDHiveRateLimitError,
     "RATE_LIMIT_EXCEEDED": HDHiveRateLimitError,
     "INSUFFICIENT_POINTS": HDHiveInsufficientPointsError,
 }
@@ -96,13 +106,18 @@ class HDHiveOpenClient:
         self,
         api_key: str,
         *,
+        access_token: str | None = None,
         timeout: float = 30.0,
     ) -> None:
         self._api_key = api_key
+        self._access_token = access_token
+        headers = {"X-API-Key": api_key}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         proxy = global_config.proxy_url or None
         self._client = httpx.Client(
             base_url=self.BASE_URL,
-            headers={"X-API-Key": api_key},
+            headers=headers,
             timeout=timeout,
             verify=False,
             proxy=proxy,

@@ -2,8 +2,8 @@
 影巢 (HDHive) 路由模块
 """
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
@@ -26,6 +26,9 @@ class AddAccountRequest(BaseModel):
     password: str = ""
     token: str = ""
     api_key: str = ""
+    openapi_client_id: str = ""
+    openapi_app_secret: str = ""
+    openapi_redirect_uri: str = ""
 
 
 class UpdateAccountRequest(BaseModel):
@@ -33,6 +36,11 @@ class UpdateAccountRequest(BaseModel):
     password: Optional[str] = None
     token: Optional[str] = None
     api_key: Optional[str] = None
+    openapi_client_id: Optional[str] = None
+    openapi_app_secret: Optional[str] = None
+    openapi_redirect_uri: Optional[str] = None
+    openapi_access_token: Optional[str] = None
+    openapi_refresh_token: Optional[str] = None
     enabled: Optional[bool] = None
     checkin_type: Optional[str] = None  # none, normal, gambler
     checkin_cron: Optional[str] = None
@@ -40,6 +48,11 @@ class UpdateAccountRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     account_id: str
+
+
+class OpenAPIAuthorizeRequest(BaseModel):
+    account_id: str
+    scope: str = "meta query unlock write"
 
 
 class CheckinRequest(BaseModel):
@@ -83,7 +96,10 @@ async def add_account(req: AddAccountRequest):
             name=req.name,
             password=req.password,
             token=req.token,
-            api_key=req.api_key
+            api_key=req.api_key,
+            openapi_client_id=req.openapi_client_id,
+            openapi_app_secret=req.openapi_app_secret,
+            openapi_redirect_uri=req.openapi_redirect_uri,
         )
         logger.info(f"[HDHive] 添加账号: {req.name}")
         return {"status": "ok", "account": account.model_dump()}
@@ -102,6 +118,11 @@ async def update_account(account_id: str, req: UpdateAccountRequest):
             password=req.password,
             token=req.token,
             api_key=req.api_key,
+            openapi_client_id=req.openapi_client_id,
+            openapi_app_secret=req.openapi_app_secret,
+            openapi_redirect_uri=req.openapi_redirect_uri,
+            openapi_access_token=req.openapi_access_token,
+            openapi_refresh_token=req.openapi_refresh_token,
             enabled=req.enabled,
             checkin_type=req.checkin_type,
             checkin_cron=req.checkin_cron
@@ -166,6 +187,56 @@ async def login(req: LoginRequest):
     except Exception as e:
         logger.error(f"[HDHive] 登录失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/openapi/authorize-url")
+async def openapi_authorize_url(req: OpenAPIAuthorizeRequest, request: Request):
+    """生成 HDHive OpenAPI 用户授权链接"""
+    try:
+        return hdhive_service.build_openapi_authorize_url(req.account_id, request, req.scope or "meta query unlock write")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[HDHive] 生成 OpenAPI 授权链接失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/openapi/refresh")
+async def openapi_refresh(req: LoginRequest):
+    """手动刷新 OpenAPI 用户 Access Token"""
+    try:
+        account = next((a for a in hdhive_service.config.accounts if a.id == req.account_id), None)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        if not hdhive_service.refresh_openapi_token(account):
+            return {"status": "error", "message": "缺少 Refresh Token 或应用 Secret"}
+        return {"status": "ok", "account": account.model_dump()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[HDHive] 刷新 OpenAPI Token 失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/openapi/callback")
+async def openapi_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    """HDHive OAuth 回调入口"""
+    if error:
+        return HTMLResponse(f"<h3>HDHive OpenAPI 授权失败</h3><p>{error}</p>", status_code=400)
+    if not code or not state:
+        return HTMLResponse("<h3>HDHive OpenAPI 授权失败</h3><p>缺少 code 或 state。</p>", status_code=400)
+    try:
+        account = hdhive_service.exchange_openapi_code(code, state)
+        account.status = "ok"
+        hdhive_service._save_config()
+        return HTMLResponse(
+            "<h3>HDHive OpenAPI 授权成功</h3>"
+            "<p>可以关闭此页面并返回 ChillPoster 影巢配置页。</p>"
+            "<script>setTimeout(function(){ window.close(); }, 1200);</script>"
+        )
+    except Exception as e:
+        logger.error(f"[HDHive] OpenAPI 授权回调失败: {e}")
+        return HTMLResponse(f"<h3>HDHive OpenAPI 授权失败</h3><p>{e}</p>", status_code=400)
 
 
 @router.post("/checkin")
@@ -294,10 +365,37 @@ async def get_user_info(req: LoginRequest):
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        if not account.token:
-            return {"status": "error", "message": "请先登录获取 Token"}
+        if account.openapi_access_token:
+            try:
+                user_data = hdhive_service.run_openapi_call(account, lambda client: client.get_me() or {})
+                user_meta = user_data.get("user_meta", {}) if isinstance(user_data, dict) else {}
+                result = {
+                    "success": True,
+                    "user_info": {
+                        "id": user_data.get("id", 0),
+                        "nickname": user_data.get("nickname", ""),
+                        "username": user_data.get("username", ""),
+                        "email": user_data.get("email", ""),
+                        "avatar_url": user_data.get("avatar_url", ""),
+                        "is_vip": user_data.get("is_vip", False),
+                        "vip_expiration_date": user_data.get("vip_expiration_date", ""),
+                        "last_active_at": user_data.get("last_active_at", ""),
+                        "created_at": user_data.get("created_at", ""),
+                        "telegram_user": user_data.get("telegram_user"),
+                        "points": user_meta.get("points", 0),
+                        "signin_days_total": user_meta.get("signin_days_total", 0),
+                        "share_num": user_meta.get("share_num", 0),
+                        "is_activate": user_meta.get("is_activate", False),
+                        "notification_method": user_meta.get("notification_method", ""),
+                    },
+                }
+            except Exception as e:
+                result = {"success": False, "error": str(e)}
+        elif account.token:
+            result = await hdhive_service.get_user_info(account.token)
+        else:
+            return {"status": "error", "message": "请先完成 OpenAPI 授权"}
 
-        result = await hdhive_service.get_user_info(account.token)
         if result.get("success"):
             # 更新账号的用户信息
             from app.services.hdhive_service import HDHiveUserInfo
@@ -321,10 +419,10 @@ async def get_usage(req: LoginRequest):
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        if not account.api_key:
-            return {"status": "error", "message": "请先填写 API Key"}
+        if not hdhive_service.account_has_openapi_credentials(account):
+            return {"status": "error", "message": "请先填写 OpenAPI 应用 Secret"}
 
-        result = await hdhive_service.get_usage(account.api_key)
+        result = await hdhive_service.get_usage(account)
         if result.get("success"):
             # 更新账号的用量信息
             from app.services.hdhive_service import HDHiveUsage

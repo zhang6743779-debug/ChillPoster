@@ -31,6 +31,7 @@ class UniversalImporter:
     全能榜单解析器 (V5.1 - 修复豆瓣搜索补全逻辑)
     已同步 custom_collection.py 的 ListImporter 核心逻辑
     """
+    _last_logged_proxy_url = None
     
     # 增强版季号匹配正则，支持 (第二季) [第2季] 等格式
     SEASON_PATTERN = re.compile(r'(.*?)\s*[（(]?\s*(第?[一二三四五六七八九十百]+)\s*季\s*[)）]?')
@@ -64,7 +65,9 @@ class UniversalImporter:
         if proxy_url:
             self.proxies = {"http": proxy_url, "https": proxy_url}
             self.session.proxies.update(self.proxies)
-            logger.info(f"Importer 已启用代理: {proxy_url}")
+            if proxy_url != UniversalImporter._last_logged_proxy_url:
+                logger.info(f"Importer 已启用代理: {proxy_url}")
+                UniversalImporter._last_logged_proxy_url = proxy_url
         else:
             self.proxies = None
 

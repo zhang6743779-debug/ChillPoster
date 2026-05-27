@@ -964,10 +964,13 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             return `title:${mediaType}:${String(title).trim()}:${String(year).slice(0, 4)}`;
         };
 
-        const markLibraryExists = async (items = []) => {
+        const shouldResolveLibraryStatus = () => !!String(activeSourceFilters.value?.[LIBRARY_STATUS_FILTER_KEY] ?? '');
+
+        const markLibraryExists = async (items = [], options = {}) => {
             const candidates = (items || []).filter(item => getItemExistenceKey(item));
             if (!candidates.length) return;
             try {
+                const resolveMissing = !!options.resolveMissing;
                 const payload = candidates.map(item => ({
                     tmdb_id: getItemTmdbId(item),
                     title: item.title || item.name || '',
@@ -977,10 +980,20 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     id: item.id || '',
                     _existence_key: getItemExistenceKey(item),
                 }));
-                const res = await axios.post('/api/discover/library/exists', payload);
+                const res = await axios.post(
+                    '/api/discover/library/exists',
+                    payload,
+                    resolveMissing ? { params: { resolve_missing: 1 } } : undefined,
+                );
                 const results = res.data?.results || {};
+                const tmdbIds = res.data?.tmdb_ids || {};
                 candidates.forEach(item => {
-                    item.exists_in_library = !!results[getItemExistenceKey(item)];
+                    const key = getItemExistenceKey(item);
+                    item.exists_in_library = !!results[key];
+                    if (tmdbIds[key]) {
+                        item._tmdb_id = tmdbIds[key];
+                        if (!item.tmdb_id) item.tmdb_id = tmdbIds[key];
+                    }
                 });
             } catch (e) {
                 console.error('检查媒体库存在状态失败:', e);
@@ -1326,7 +1339,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const prepareDisplayableMainGridItems = async (items = []) => {
             const displayable = getDisplayableMainGridItems(items);
-            await markLibraryExists(displayable);
+            await markLibraryExists(displayable, { resolveMissing: shouldResolveLibraryStatus() });
             return applyLibraryStatusFilter(displayable);
         };
 
@@ -1526,7 +1539,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const episodes = getLibrarySeasonEpisodes(season.season_number);
             const total = Number(season.episode_count || 0);
             const count = episodes.length;
-            if (!count) return { status: 'missing', label: '未入库', count, total };
+            if (!count) return { status: 'missing', label: total ? `未入库 ${count}/${total}` : '未入库', count, total };
             if (total && count < total) return { status: 'partial', label: `部分入库 ${count}/${total}`, count, total };
             return { status: 'exists', label: total ? `已入库 ${count}/${total}` : '已入库', count, total };
         };
@@ -2225,7 +2238,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 const params = row.source === 'douban' ? { start: 0, count: 30 } : { page: 1 };
                 const res = await axios.get(row.endpoint, { params });
                 const items = res.data.items || [];
-                await markLibraryExists(items);
+                await markLibraryExists(items, { resolveMissing: shouldResolveLibraryStatus() });
                 gridModal.items = applyLibraryStatusFilter(items);
                 gridModal.totalPages = res.data.total_pages || 1;
             } catch (e) {
@@ -2247,7 +2260,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 const params = row.source === 'douban' ? { start: (gridModal.page - 1) * 30, count: 30 } : { page: gridModal.page };
                 const res = await axios.get(row.endpoint, { params });
                 const newItems = res.data.items || [];
-                await markLibraryExists(newItems);
+                await markLibraryExists(newItems, { resolveMissing: shouldResolveLibraryStatus() });
                 gridModal.totalPages = res.data.total_pages || 1;
                 gridModal.items.push(...applyLibraryStatusFilter(newItems));
             } catch (e) {

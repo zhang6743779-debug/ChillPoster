@@ -2929,10 +2929,13 @@
                             <div class="module-card mb-20">
                                 <div class="mc-header">
                                     <div class="mc-title"><i class="fa-solid fa-pen-fancy"></i> 重命名模板</div>
+                                    <button class="btn btn-green btn-sm" @click="saveMediaOrganizeConfig" :disabled="needs115Setup">
+                                        <i class="fa-solid fa-save"></i> 保存模板
+                                    </button>
                                 </div>
                                 <div class="mc-body">
                                     <div class="organize-hint">
-                                        点击 Token 按钮插入到光标位置。变量为空时自动删除对应片段（含周围分隔符）。资源信息字段优先由 ffprobe 从媒体流获取，未安装时 fallback 到文件名解析。
+                                        模板字段可拖拽排序，也可点击字段右侧删除。变量为空时自动删除对应片段（含周围分隔符）。资源信息字段优先由 ffprobe 从媒体流获取，未安装时 fallback 到文件名解析。
                                     </div>
 
                                     <div class="rename-editor-card mb-16">
@@ -2943,42 +2946,92 @@
                                         <div class="rename-editor-layout">
                                             <div>
                                                 <label class="rename-label">电影文件夹格式</label>
-                                                <textarea ref="movieFolderFormatRef" v-model="movieFolderFormatDisplay"
-                                                    class="rename-textarea" rows="2"
-                                                    placeholder="{中文标题} ({公映年份}) {TMDB编号}">
-                                                </textarea>
+                                                <div class="rename-capsule-editor" :class="{ active: activeRenameTemplateType === 'movieFolder' }"
+                                                    @click="setActiveRenameTemplate('movieFolder')" @dragover="onRenameTemplateDragOver($event, 'movieFolder')" @drop="onRenameTemplateDrop($event, 'movieFolder', renameTemplateSegments('movieFolder').length)">
+                                                    <template v-for="(segment, idx) in renameTemplateSegments('movieFolder')" :key="'movieFolder-' + idx + '-' + segment.value">
+                                                        <span v-if="segment.type === 'token'" class="rename-template-pill" :class="renameTokenClass(segment.label)" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'movieFolder', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'movieFolder')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'movieFolder', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ segment.label }}
+                                                            <button v-if="segment.label !== '文件后缀'" type="button" @click.stop="removeRenameTemplateSegment('movieFolder', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                        <span v-else class="rename-template-pill rename-template-char-pill" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'movieFolder', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'movieFolder')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'movieFolder', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ renameTemplateLiteralLabel(segment.value) }}
+                                                            <button type="button" @click.stop="removeRenameTemplateSegment('movieFolder', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                    </template>
+                                                    <span v-if="renameTemplateSegments('movieFolder').length === 0" class="rename-capsule-placeholder">点击下方字段插入</span>
+                                                </div>
+                                                <div class="rename-inline-preview">
+                                                    <span class="rename-inline-preview-label">电影文件夹预览</span>
+                                                    <span class="rename-inline-preview-value">{{ movieFolderPreviewName }}</span>
+                                                </div>
                                                 <label class="rename-label rename-label-spaced">电影文件名格式</label>
-                                                <textarea ref="movieFormatRef" v-model="movieFormatDisplay"
-                                                    class="rename-textarea" rows="2"
-                                                    placeholder="{英文片名}.{公映年份}.{分辨率}.{介质来源}.{处理方式}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}">
-                                                </textarea>
+                                                <div class="rename-capsule-editor" :class="{ active: activeRenameTemplateType === 'movie' }"
+                                                    @click="setActiveRenameTemplate('movie')" @dragover="onRenameTemplateDragOver($event, 'movie')" @drop="onRenameTemplateDrop($event, 'movie', renameTemplateSegments('movie').length)">
+                                                    <template v-for="(segment, idx) in renameTemplateSegments('movie')" :key="'movie-' + idx + '-' + segment.value">
+                                                        <span v-if="segment.type === 'token'" class="rename-template-pill" :class="renameTokenClass(segment.label)" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'movie', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'movie')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'movie', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ segment.label }}
+                                                            <button v-if="segment.label !== '文件后缀'" type="button" @click.stop="removeRenameTemplateSegment('movie', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                        <span v-else class="rename-template-pill rename-template-char-pill" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'movie', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'movie')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'movie', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ renameTemplateLiteralLabel(segment.value) }}
+                                                            <button type="button" @click.stop="removeRenameTemplateSegment('movie', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                    </template>
+                                                    <span v-if="renameTemplateSegments('movie').length === 0" class="rename-capsule-placeholder">点击下方字段插入</span>
+                                                </div>
+                                                <div class="rename-inline-preview">
+                                                    <span class="rename-inline-preview-label">电影文件名预览</span>
+                                                    <span class="rename-inline-preview-value">{{ moviePreviewName }}.mkv</span>
+                                                </div>
                                                 <div class="token-row">
                                                     <span class="token-row-label">基础信息</span>
-                                                    <span class="token-chip" @click="insertToken('movieFolder', '{中文标题}')">中文标题</span>
-                                                    <span class="token-chip" @click="insertToken('movie', '{英文片名}')">英文片名</span>
-                                                    <span class="token-chip" @click="insertToken('movieFolder', '{公映年份}')">公映年份</span>
-                                                    <span class="token-chip" @click="insertToken('movieFolder', '{TMDB编号}')">TMDB编号</span>
-                                                    <span class="token-chip" @click="insertToken('movie', '{介质来源}')">介质来源</span>
-                                                    <span class="token-chip" @click="insertToken('movie', '{处理方式}')">处理方式</span>
-                                                    <span class="token-chip" @click="insertToken('movie', '{制作组}')">制作组</span>
-                                                    <span class="token-chip" @click="insertToken('movie', '{part}')">分Part</span>
+                                                    <span class="token-chip" :class="renameTokenClass('中文标题')" @click="insertRenameTokenForGroup('movie', '{中文标题}')">中文标题</span>
+                                                    <span class="token-chip" :class="renameTokenClass('英文片名')" @click="insertRenameTokenForGroup('movie', '{英文片名}')">英文片名</span>
+                                                    <span class="token-chip" :class="renameTokenClass('公映年份')" @click="insertRenameTokenForGroup('movie', '{公映年份}')">公映年份</span>
+                                                    <span class="token-chip" :class="renameTokenClass('TMDB编号')" @click="insertRenameTokenForGroup('movie', '{TMDB编号}')">TMDB编号</span>
+                                                    <span class="token-chip" :class="renameTokenClass('介质来源')" @click="insertRenameTokenForGroup('movie', '{介质来源}')">介质来源</span>
+                                                    <span class="token-chip" :class="renameTokenClass('处理方式')" @click="insertRenameTokenForGroup('movie', '{处理方式}')">处理方式</span>
+                                                    <span class="token-chip" :class="renameTokenClass('制作组')" @click="insertRenameTokenForGroup('movie', '{制作组}')">制作组</span>
+                                                    <span class="token-chip" :class="renameTokenClass('分Part')" @click="insertRenameTokenForGroup('movie', '{分Part}')">分Part</span>
                                                 </div>
                                                 <div class="token-row">
                                                     <span class="token-row-label">资源信息</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{分辨率}')">分辨率</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{视频编码}')">视频编码</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{色深}')">色深</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{动态范围}')">动态范围</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{帧率}')">帧率</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('movie', '{音频规格}')">音频规格</span>
+                                                    <span class="token-chip" :class="renameTokenClass('分辨率')" @click="insertRenameTokenForGroup('movie', '{分辨率}')">分辨率</span>
+                                                    <span class="token-chip" :class="renameTokenClass('视频编码')" @click="insertRenameTokenForGroup('movie', '{视频编码}')">视频编码</span>
+                                                    <span class="token-chip" :class="renameTokenClass('色深')" @click="insertRenameTokenForGroup('movie', '{色深}')">色深</span>
+                                                    <span class="token-chip" :class="renameTokenClass('动态范围')" @click="insertRenameTokenForGroup('movie', '{动态范围}')">动态范围</span>
+                                                    <span class="token-chip" :class="renameTokenClass('帧率')" @click="insertRenameTokenForGroup('movie', '{帧率}')">帧率</span>
+                                                    <span class="token-chip" :class="renameTokenClass('音频规格')" @click="insertRenameTokenForGroup('movie', '{音频规格}')">音频规格</span>
                                                 </div>
-                                            </div>
-                                            <div class="rename-preview-panel">
-                                                <div class="rename-preview-title">预览示例</div>
-                                                <div class="rename-preview-caption">文件夹</div>
-                                                <div class="preview-path">{{ movieFolderPreviewName }}</div>
-                                                <div class="rename-preview-caption rename-preview-caption-spaced">文件名</div>
-                                                <div class="preview-path">{{ moviePreviewName }}.mkv</div>
+                                                <div class="token-row token-row-characters">
+                                                    <span class="token-row-label">字符库</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', ' ')">空格</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '.')">.</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '-')">-</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '_')">_</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '(')">(</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', ')')">)</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '[')">[</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', ']')">]</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '{')">{</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('movie', '}')">}</span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -2991,48 +3044,98 @@
                                         <div class="rename-editor-layout">
                                             <div>
                                                 <label class="rename-label">剧集文件夹格式</label>
-                                                <textarea ref="tvFolderFormatRef" v-model="tvFolderFormatDisplay"
-                                                    class="rename-textarea" rows="2"
-                                                    placeholder="{中文剧名} ({首播年份}) {TMDB编号}">
-                                                </textarea>
+                                                <div class="rename-capsule-editor" :class="{ active: activeRenameTemplateType === 'tvFolder' }"
+                                                    @click="setActiveRenameTemplate('tvFolder')" @dragover="onRenameTemplateDragOver($event, 'tvFolder')" @drop="onRenameTemplateDrop($event, 'tvFolder', renameTemplateSegments('tvFolder').length)">
+                                                    <template v-for="(segment, idx) in renameTemplateSegments('tvFolder')" :key="'tvFolder-' + idx + '-' + segment.value">
+                                                        <span v-if="segment.type === 'token'" class="rename-template-pill" :class="renameTokenClass(segment.label)" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'tvFolder', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'tvFolder')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'tvFolder', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ segment.label }}
+                                                            <button v-if="segment.label !== '文件后缀'" type="button" @click.stop="removeRenameTemplateSegment('tvFolder', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                        <span v-else class="rename-template-pill rename-template-char-pill" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'tvFolder', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'tvFolder')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'tvFolder', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ renameTemplateLiteralLabel(segment.value) }}
+                                                            <button type="button" @click.stop="removeRenameTemplateSegment('tvFolder', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                    </template>
+                                                    <span v-if="renameTemplateSegments('tvFolder').length === 0" class="rename-capsule-placeholder">点击下方字段插入</span>
+                                                </div>
+                                                <div class="rename-inline-preview">
+                                                    <span class="rename-inline-preview-label">剧集文件夹预览</span>
+                                                    <span class="rename-inline-preview-value">{{ tvFolderPreviewName }}</span>
+                                                </div>
                                                 <label class="rename-label rename-label-spaced">剧集文件名格式</label>
-                                                <textarea ref="tvEpisodeFormatRef" v-model="tvEpisodeFormatDisplay"
-                                                    class="rename-textarea" rows="2"
-                                                    placeholder="{英文剧名}.{季数集数}.{首播年份}.{分辨率}.{来源平台}.{介质类型}.{视频编码}.{色深}.{动态范围}.{帧率}.{音频规格}-{制作组}">
-                                                </textarea>
+                                                <div class="rename-capsule-editor" :class="{ active: activeRenameTemplateType === 'tvEpisode' }"
+                                                    @click="setActiveRenameTemplate('tvEpisode')" @dragover="onRenameTemplateDragOver($event, 'tvEpisode')" @drop="onRenameTemplateDrop($event, 'tvEpisode', renameTemplateSegments('tvEpisode').length)">
+                                                    <template v-for="(segment, idx) in renameTemplateSegments('tvEpisode')" :key="'tvEpisode-' + idx + '-' + segment.value">
+                                                        <span v-if="segment.type === 'token'" class="rename-template-pill" :class="renameTokenClass(segment.label)" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'tvEpisode', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'tvEpisode')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'tvEpisode', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ segment.label }}
+                                                            <button v-if="segment.label !== '文件后缀'" type="button" @click.stop="removeRenameTemplateSegment('tvEpisode', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                        <span v-else class="rename-template-pill rename-template-char-pill" draggable="true"
+                                                            @dragstart="onRenameTemplateDragStart($event, 'tvEpisode', idx)"
+                                                            @dragover="onRenameTemplateDragOver($event, 'tvEpisode')"
+                                                            @drop.stop="onRenameTemplateDrop($event, 'tvEpisode', idx)"
+                                                            @dragend="onRenameTemplateDragEnd">
+                                                            {{ renameTemplateLiteralLabel(segment.value) }}
+                                                            <button type="button" @click.stop="removeRenameTemplateSegment('tvEpisode', idx)"><i class="fa-solid fa-xmark"></i></button>
+                                                        </span>
+                                                    </template>
+                                                    <span v-if="renameTemplateSegments('tvEpisode').length === 0" class="rename-capsule-placeholder">点击下方字段插入</span>
+                                                </div>
+                                                <div class="rename-inline-preview">
+                                                    <span class="rename-inline-preview-label">剧集文件名预览</span>
+                                                    <span class="rename-inline-preview-value">Season 01 / {{ tvEpisodePreviewName }}.mkv</span>
+                                                </div>
                                                 <div class="token-row">
                                                     <span class="token-row-label">基础信息</span>
-                                                    <span class="token-chip" @click="insertToken('tvFolder', '{中文剧名}')">中文剧名</span>
-                                                    <span class="token-chip" @click="insertToken('tvEpisode', '{英文剧名}')">英文剧名</span>
-                                                    <span class="token-chip" @click="insertToken('tvFolder', '{首播年份}')">首播年份</span>
-                                                    <span class="token-chip" @click="insertToken('tvFolder', '{TMDB编号}')">TMDB编号</span>
-                                                    <span class="token-chip" @click="insertToken('tvEpisode', '{来源平台}')">来源平台</span>
-                                                    <span class="token-chip" @click="insertToken('tvEpisode', '{介质类型}')">介质类型</span>
-                                                    <span class="token-chip" @click="insertToken('tvEpisode', '{制作组}')">制作组</span>
-                                                    <span class="token-chip" @click="insertToken('tvEpisode', '{part}')">分Part</span>
+                                                    <span class="token-chip" :class="renameTokenClass('中文剧名')" @click="insertRenameTokenForGroup('tv', '{中文剧名}')">中文剧名</span>
+                                                    <span class="token-chip" :class="renameTokenClass('英文剧名')" @click="insertRenameTokenForGroup('tv', '{英文剧名}')">英文剧名</span>
+                                                    <span class="token-chip" :class="renameTokenClass('首播年份')" @click="insertRenameTokenForGroup('tv', '{首播年份}')">首播年份</span>
+                                                    <span class="token-chip" :class="renameTokenClass('TMDB编号')" @click="insertRenameTokenForGroup('tv', '{TMDB编号}')">TMDB编号</span>
+                                                    <span class="token-chip" :class="renameTokenClass('来源平台')" @click="insertRenameTokenForGroup('tv', '{来源平台}')">来源平台</span>
+                                                    <span class="token-chip" :class="renameTokenClass('介质类型')" @click="insertRenameTokenForGroup('tv', '{介质类型}')">介质类型</span>
+                                                    <span class="token-chip" :class="renameTokenClass('制作组')" @click="insertRenameTokenForGroup('tv', '{制作组}')">制作组</span>
+                                                    <span class="token-chip" :class="renameTokenClass('分Part')" @click="insertRenameTokenForGroup('tv', '{分Part}')">分Part</span>
                                                 </div>
                                                 <div class="token-row">
                                                     <span class="token-row-label">剧集专属</span>
-                                                    <span class="token-chip token-chip-tv" @click="insertToken('tvEpisode', '{季数集数}')">季数集数</span>
-                                                    <span class="token-chip token-chip-tv" @click="insertToken('tvEpisode', '{season_num}')">季号</span>
-                                                    <span class="token-chip token-chip-tv" @click="insertToken('tvEpisode', '{episode_num}')">集号</span>
+                                                    <span class="token-chip" :class="renameTokenClass('季数集数')" @click="insertRenameTokenForGroup('tv', '{季数集数}')">季数集数</span>
+                                                    <span class="token-chip" :class="renameTokenClass('季号')" @click="insertRenameTokenForGroup('tv', '{季号}')">季号</span>
+                                                    <span class="token-chip" :class="renameTokenClass('集号')" @click="insertRenameTokenForGroup('tv', '{集号}')">集号</span>
                                                 </div>
                                                 <div class="token-row">
                                                     <span class="token-row-label">资源信息</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{分辨率}')">分辨率</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{视频编码}')">视频编码</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{色深}')">色深</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{动态范围}')">动态范围</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{帧率}')">帧率</span>
-                                                    <span class="token-chip token-chip-resource" @click="insertToken('tvEpisode', '{音频规格}')">音频规格</span>
+                                                    <span class="token-chip" :class="renameTokenClass('分辨率')" @click="insertRenameTokenForGroup('tv', '{分辨率}')">分辨率</span>
+                                                    <span class="token-chip" :class="renameTokenClass('视频编码')" @click="insertRenameTokenForGroup('tv', '{视频编码}')">视频编码</span>
+                                                    <span class="token-chip" :class="renameTokenClass('色深')" @click="insertRenameTokenForGroup('tv', '{色深}')">色深</span>
+                                                    <span class="token-chip" :class="renameTokenClass('动态范围')" @click="insertRenameTokenForGroup('tv', '{动态范围}')">动态范围</span>
+                                                    <span class="token-chip" :class="renameTokenClass('帧率')" @click="insertRenameTokenForGroup('tv', '{帧率}')">帧率</span>
+                                                    <span class="token-chip" :class="renameTokenClass('音频规格')" @click="insertRenameTokenForGroup('tv', '{音频规格}')">音频规格</span>
                                                 </div>
-                                            </div>
-                                            <div class="rename-preview-panel">
-                                                <div class="rename-preview-title">预览示例</div>
-                                                <div class="rename-preview-caption">文件夹</div>
-                                                <div class="preview-path">{{ tvFolderPreviewName }}</div>
-                                                <div class="rename-preview-caption rename-preview-caption-spaced">Season 01 / 文件名</div>
-                                                <div class="preview-path">{{ tvEpisodePreviewName }}.mkv</div>
+                                                <div class="token-row token-row-characters">
+                                                    <span class="token-row-label">字符库</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', ' ')">空格</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '.')">.</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '-')">-</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '_')">_</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '(')">(</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', ')')">)</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '[')">[</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', ']')">]</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '{')">{</span>
+                                                    <span class="token-chip token-chip-character" @click="insertRenameLiteralForGroup('tv', '}')">}</span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -4515,9 +4618,9 @@
                                         <div>
                                             <label>影巢账号</label>
                                             <select v-model="forwardHdhiveConfig.account_id">
-                                                <option value="">自动选择可用 API Key</option>
-                                                <option v-for="account in forwardHdhiveConfig.accounts" :key="account.id" :value="account.id" :disabled="!account.has_api_key">
-                                                    {{ account.name }} {{ account.has_api_key ? '' : '(无 API Key)' }}
+                                                <option value="">自动选择已授权账号</option>
+                                                <option v-for="account in forwardHdhiveConfig.accounts" :key="account.id" :value="account.id" :disabled="!account.has_openapi_authorization">
+                                                    {{ account.name }} {{ account.has_openapi_authorization ? '' : '(未授权 OpenAPI)' }}
                                                 </option>
                                             </select>
                                         </div>
@@ -4703,9 +4806,6 @@
                                                 <button class="icon-btn icon-btn-blue" @click="testHdhiveAccount(account.id)" :disabled="account.testing" title="测试连接">
                                                     <i class="fa-solid" :class="account.testing ? 'fa-spinner fa-spin' : 'fa-plug'"></i>
                                                 </button>
-                                                <button class="icon-btn icon-btn-amber" @click="loginHdhive(account.id)" :disabled="account.logging" title="获取Token">
-                                                    <i class="fa-solid" :class="account.logging ? 'fa-spinner fa-spin' : 'fa-key'"></i>
-                                                </button>
                                                 <button class="icon-btn icon-btn-green" @click="checkinHdhive(account.id)" :disabled="account.checking" title="立即签到">
                                                     <i class="fa-solid" :class="account.checking ? 'fa-spinner fa-spin' : 'fa-check'"></i>
                                                 </button>
@@ -4724,32 +4824,36 @@
                                                     <div>
                                                         <label>密码</label>
                                                         <div class="form-row-tight">
-                                                            <input :type="account.showPassword ? 'text' : 'password'" v-model="account.password" placeholder="留空则使用Token" class="form-row-grow">
+                                                            <input :type="account.showPassword ? 'text' : 'password'" v-model="account.password" placeholder="可选，仅用于站内签到兜底" class="form-row-grow">
                                                             <button class="icon-btn" @click="account.showPassword = !account.showPassword" :class="account.showPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
                                                                 <i class="fa-solid" :class="account.showPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
                                                             </button>
                                                         </div>
                                                     </div>
                                                 </div>
-                                                <div class="mt-15">
-                                                    <label>Token <span class="text-muted-2xs">(可手动填写或点击钥匙图标自动获取)</span></label>
-                                                    <div class="form-row-tight">
-                                                        <input :type="account.showToken ? 'text' : 'password'" v-model="account.token" placeholder="Bearer Token" class="form-row-grow">
-                                                        <button class="icon-btn" @click="account.showToken = !account.showToken" :class="account.showToken ? 'btn-accent-ghost' : 'icon-action-hidden'">
-                                                            <i class="fa-solid" :class="account.showToken ? 'fa-eye-slash' : 'fa-eye'"></i>
-                                                        </button>
+                                                <div class="section-top-divider">
+                                                    <div class="inline-label-row">
+                                                        <label>OpenAPI 应用授权</label>
+                                                        <div class="pill-group">
+                                                            <button class="pill-btn pill-btn-accent-green" :class="{ active: !!account.openapi_access_token }" @click="authorizeHdhiveOpenApi(account.id)" :disabled="account.authorizingOpenApi">
+                                                                <i class="fa-solid" :class="account.authorizingOpenApi ? 'fa-spinner fa-spin' : 'fa-arrow-up-right-from-square'"></i>
+                                                                {{ account.openapi_access_token ? '重新授权' : '授权账号' }}
+                                                            </button>
+                                                            <button class="pill-btn" @click="refreshHdhiveOpenApiToken(account.id)" :disabled="account.refreshingOpenApi || !account.openapi_refresh_token">
+                                                                <i class="fa-solid" :class="account.refreshingOpenApi ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新授权
+                                                            </button>
+                                                            <button class="pill-btn" @click="refreshHdhiveUsage(account.id)" :disabled="account.refreshingUsage">
+                                                                <i class="fa-solid" :class="account.refreshingUsage ? 'fa-spinner fa-spin' : 'fa-chart-pie'"></i> 获取用量
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                </div>
-                                                <div class="mt-15">
-                                                    <label>API Key <span class="text-muted-2xs">(从 /manager/api-keys 获取，用于查询用量)</span></label>
-                                                    <div class="form-row-tight">
-                                                        <input :type="account.showApiKey ? 'text' : 'password'" v-model="account.api_key" placeholder="API Key (可选)" class="form-row-grow">
-                                                        <button class="icon-btn" @click="account.showApiKey = !account.showApiKey" :class="account.showApiKey ? 'btn-accent-ghost' : 'icon-action-hidden'">
-                                                            <i class="fa-solid" :class="account.showApiKey ? 'fa-eye-slash' : 'fa-eye'"></i>
-                                                        </button>
-                                                        <button class="btn btn-ghost btn-sm" @click="refreshHdhiveUsage(account.id)" :disabled="account.refreshingUsage || !account.api_key" title="获取用量">
-                                                            <i class="fa-solid" :class="account.refreshingUsage ? 'fa-spinner fa-spin' : 'fa-chart-pie'"></i>
-                                                        </button>
+                                                    <div class="mt-15">
+                                                        <label>回调地址 <span class="text-muted-2xs">(需与影巢应用配置一致，留空会自动生成)</span></label>
+                                                        <input type="text" v-model="account.openapi_redirect_uri" placeholder="https://你的域名/api/hdhive/openapi/callback">
+                                                    </div>
+                                                    <div v-if="account.openapi_authorized_at || account.openapi_scope" class="text-muted-xs mt-10">
+                                                        授权时间: <strong>{{ account.openapi_authorized_at || '-' }}</strong>
+                                                        <span class="ml-10">Scope: <strong>{{ account.openapi_scope || '-' }}</strong></span>
                                                     </div>
                                                 </div>
 
@@ -4883,9 +4987,9 @@
                                     <i class="fa-solid fa-circle-info"></i>
                                     <div class="info-content">
                                         <div class="info-alert-box-title">使用说明</div>
-                                        1. <b>自动获取Token</b>：填写账号密码后，点击钥匙图标自动登录获取。<br>
-                                        2. <b>手动获取Token</b>：登录 hdhive.com 后，从浏览器开发者工具 (F12 → Network → 找请求 → Authorization) 中复制 Token。<br>
-                                        3. <b>定时签到</b>：每个账号可独立设置自动签到和签到时间。
+                                        1. <b>OpenAPI 应用</b>：点击授权账号即可完成影巢授权，授权会请求 meta/query/unlock/write。<br>
+                                        2. <b>搜索与播放</b>：影巢资源查询和 Forward 解锁播放都需要完成 OpenAPI 授权。<br>
+                                        3. <b>API 签到</b>：授权包含 write 后，普通签到和赌狗签到都会优先使用 OpenAPI。
                                     </div>
                                 </div>
                             </div>
@@ -6031,7 +6135,7 @@
                                     <div v-if="detailModal.detail.media_type === 'tv' && detailModal.detail.seasons && detailModal.detail.seasons.filter(s => s.season_number > 0).length" class="detail-section detail-section-flat detail-season-panel">
                                         <div class="detail-section-title">分季信息</div>
                                         <div class="detail-season-chips">
-                                            <button v-for="s in detailModal.detail.seasons.filter(s => s.season_number > 0)" :key="'chip_' + s.season_number" class="detail-season-chip" :class="{ active: detailModal.selectedSeason === s.season_number, exists: getSeasonLibraryState(s).status === 'exists', partial: getSeasonLibraryState(s).status === 'partial' }" @click="setDetailSeason(s.season_number)">
+                                            <button v-for="s in detailModal.detail.seasons.filter(s => s.season_number > 0)" :key="'chip_' + s.season_number" class="detail-season-chip" :class="{ active: detailModal.selectedSeason === s.season_number, exists: getSeasonLibraryState(s).status === 'exists', partial: getSeasonLibraryState(s).status === 'partial', missing: getSeasonLibraryState(s).status === 'missing' }" @click="setDetailSeason(s.season_number)">
                                                 <span>第 {{ s.season_number }} 季</span>
                                                 <span class="detail-season-chip-status">{{ getSeasonLibraryState(s).label }}</span>
                                             </button>

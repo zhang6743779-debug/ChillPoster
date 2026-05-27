@@ -6,8 +6,11 @@ import os
 import json
 import asyncio
 import httpx
+import time
+import uuid
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Any, Callable, Optional, List, Dict
+from urllib.parse import urlencode
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel
@@ -26,6 +29,8 @@ from app.services.hdhive_playwright_client import (
 
 CONFIG_DIR = "config"
 HDHIVE_CONFIG_PATH = os.path.join(CONFIG_DIR, "hdhive.json")
+DEFAULT_OPENAPI_CLIENT_ID = "app_9f2C01307386e5b289ee9d28"
+DEFAULT_OPENAPI_APP_SECRET = "451984025101c539dfb5d14256bcae1e"
 
 
 class HDHiveUserInfo(BaseModel):
@@ -60,6 +65,16 @@ class HDHiveAccount(BaseModel):
     password: Optional[str] = ""
     token: str = ""
     api_key: Optional[str] = ""
+    openapi_client_id: Optional[str] = ""
+    openapi_app_secret: Optional[str] = ""
+    openapi_redirect_uri: Optional[str] = ""
+    openapi_access_token: Optional[str] = ""
+    openapi_refresh_token: Optional[str] = ""
+    openapi_token_expires_at: Optional[int] = 0
+    openapi_refresh_expires_at: Optional[int] = 0
+    openapi_scope: Optional[str] = ""
+    openapi_oauth_state: Optional[str] = ""
+    openapi_authorized_at: Optional[str] = ""
     status: str = "unknown"
     last_checkin: str = ""
     checkin_count: int = 0
@@ -134,6 +149,188 @@ class HDHiveService:
         if proxy:
             kwargs["proxy"] = proxy
         return httpx.AsyncClient(**kwargs)
+
+    def _openapi_secret_for_account(self, account: HDHiveAccount) -> str:
+        return str(account.openapi_app_secret or DEFAULT_OPENAPI_APP_SECRET).strip()
+
+    def _openapi_client_id_for_account(self, account: HDHiveAccount) -> str:
+        return str(account.openapi_client_id or DEFAULT_OPENAPI_CLIENT_ID).strip()
+
+    def account_has_openapi_credentials(self, account: HDHiveAccount) -> bool:
+        return bool(self._openapi_secret_for_account(account))
+
+    def account_has_openapi_user_token(self, account: HDHiveAccount) -> bool:
+        return bool(str(account.openapi_access_token or "").strip())
+
+    def account_can_query_openapi(self, account: HDHiveAccount) -> bool:
+        return bool(self._openapi_secret_for_account(account) and account.openapi_access_token)
+
+    def infer_openapi_redirect_uri(self, request) -> str:
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        if host:
+            base = f"{proto}://{host}".rstrip("/")
+        else:
+            base = str(request.base_url).rstrip("/")
+        return f"{base}/api/hdhive/openapi/callback"
+
+    def build_openapi_authorize_url(self, account_id: str, request, scope: str = "meta query unlock write") -> dict:
+        account = next((a for a in self.config.accounts if a.id == account_id), None)
+        if not account:
+            raise ValueError("账号不存在")
+        client_id = self._openapi_client_id_for_account(account)
+        if not client_id:
+            raise ValueError("缺少 OpenAPI Client ID")
+        redirect_uri = str(account.openapi_redirect_uri or "").strip() or self.infer_openapi_redirect_uri(request)
+        state = uuid.uuid4().hex
+        account.openapi_redirect_uri = redirect_uri
+        account.openapi_oauth_state = state
+        self._save_config()
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scope,
+            "state": state,
+        }
+        return {
+            "url": f"{self.BASE_URL}/openapi/authorize?{urlencode(params)}",
+            "redirect_uri": redirect_uri,
+            "scope": scope,
+            "state": state,
+        }
+
+    def _oauth_request(self, path: str, app_secret: str, body: dict[str, Any]) -> dict[str, Any]:
+        proxy = self._get_proxy() or None
+        with httpx.Client(
+            base_url=f"{self.BASE_URL}/api/public/openapi/oauth",
+            headers={"X-API-Key": app_secret, "Content-Type": "application/json"},
+            timeout=30.0,
+            verify=False,
+            proxy=proxy,
+        ) as client:
+            resp = client.post(path, json=body)
+            try:
+                payload = resp.json()
+            except Exception:
+                resp.raise_for_status()
+                raise
+            if not payload.get("success"):
+                raise HDHiveAPIError(
+                    code=str(payload.get("code", resp.status_code)),
+                    message=str(payload.get("message", "OpenAPI OAuth failed")),
+                    description=payload.get("description"),
+                    http_status=resp.status_code,
+                )
+            data = payload.get("data")
+            return data if isinstance(data, dict) else {}
+
+    def exchange_openapi_code(self, code: str, state: str) -> HDHiveAccount:
+        account = next((a for a in self.config.accounts if a.openapi_oauth_state and a.openapi_oauth_state == state), None)
+        if not account:
+            raise ValueError("授权 state 无效或已过期")
+        app_secret = self._openapi_secret_for_account(account)
+        redirect_uri = str(account.openapi_redirect_uri or "").strip()
+        if not redirect_uri:
+            raise ValueError("缺少 OpenAPI 回调地址，请先在配置中保存回调地址")
+        data = self._oauth_request(
+            "/token",
+            app_secret,
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+        self._apply_openapi_token(account, data)
+        account.openapi_oauth_state = ""
+        self._save_config()
+        return account
+
+    def _apply_openapi_token(self, account: HDHiveAccount, data: dict[str, Any]) -> None:
+        now = int(time.time())
+        account.openapi_access_token = str(data.get("access_token") or "")
+        account.openapi_refresh_token = str(data.get("refresh_token") or account.openapi_refresh_token or "")
+        try:
+            account.openapi_token_expires_at = now + max(0, int(data.get("expires_in") or 0))
+        except Exception:
+            account.openapi_token_expires_at = 0
+        try:
+            refresh_expires = int(data.get("refresh_expires_in") or 0)
+            if refresh_expires > 0:
+                account.openapi_refresh_expires_at = now + refresh_expires
+        except Exception:
+            pass
+        scopes = data.get("scopes")
+        if isinstance(scopes, list):
+            account.openapi_scope = " ".join(str(item) for item in scopes if item)
+        elif data.get("scope"):
+            account.openapi_scope = str(data.get("scope") or "")
+        account.openapi_authorized_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def refresh_openapi_token(self, account: HDHiveAccount) -> bool:
+        app_secret = self._openapi_secret_for_account(account)
+        refresh_token = str(account.openapi_refresh_token or "").strip()
+        if not app_secret or not refresh_token:
+            return False
+        data = self._oauth_request("/refresh", app_secret, {"refresh_token": refresh_token})
+        self._apply_openapi_token(account, data)
+        self._save_config()
+        return True
+
+    def ensure_openapi_token_fresh(self, account: HDHiveAccount) -> bool:
+        expires_at = int(account.openapi_token_expires_at or 0)
+        if self._openapi_secret_for_account(account) and account.openapi_refresh_token and expires_at and expires_at <= int(time.time()) + 60:
+            return self.refresh_openapi_token(account)
+        return False
+
+    def run_openapi_call(self, account: HDHiveAccount, callback: Callable[[HDHiveOpenClient], Any]) -> Any:
+        secret = self._openapi_secret_for_account(account)
+        if not secret:
+            raise HDHiveAPIError("MISSING_API_KEY", "请先填写 OpenAPI 应用 Secret", http_status=401)
+        self.ensure_openapi_token_fresh(account)
+        access_token = str(account.openapi_access_token or "").strip()
+        try:
+            with HDHiveOpenClient(secret, access_token=access_token) as client:
+                return callback(client)
+        except HDHiveAPIError as e:
+            if e.code == "OPENAPI_REFRESH_REQUIRED" and self.refresh_openapi_token(account):
+                with HDHiveOpenClient(secret, access_token=str(account.openapi_access_token or "").strip()) as client:
+                    return callback(client)
+            raise
+
+    def _has_openapi_scope(self, account: HDHiveAccount, scope: str) -> bool:
+        scopes = {part.strip() for part in str(account.openapi_scope or "").split() if part.strip()}
+        return scope in scopes
+
+    def _can_use_openapi_checkin(self, account: HDHiveAccount) -> bool:
+        return bool(self._openapi_secret_for_account(account) and account.openapi_access_token)
+
+    async def _openapi_checkin(self, account: HDHiveAccount, is_gambler: bool = False) -> dict:
+        if not self._can_use_openapi_checkin(account):
+            return {"success": False, "error": "请先完成 OpenAPI 授权"}
+        if account.openapi_scope and not self._has_openapi_scope(account, "write"):
+            return {"success": False, "error": "OpenAPI 授权缺少 write scope，请重新授权"}
+        try:
+            data = await asyncio.to_thread(
+                lambda: self.run_openapi_call(account, lambda client: client.checkin(is_gambler=is_gambler))
+            )
+            message = str(data.get("message") or data.get("msg") or "签到成功") if isinstance(data, dict) else "签到成功"
+            already = any(k in message for k in ["已签到", "已经签到", "明天再来", "签到过"])
+            return {
+                "success": True,
+                "message": message,
+                "already_checked_in": already,
+                "data": data if isinstance(data, dict) else {},
+                "via": "openapi",
+            }
+        except HDHiveAPIError as e:
+            if e.code in {"SCOPE_NOT_ALLOWED", "USER_SCOPE_NOT_ALLOWED"}:
+                return {"success": False, "error": "OpenAPI 授权缺少 write scope，请重新授权", "code": e.code}
+            if e.code in {"OPENAPI_USER_REQUIRED", "OPENAPI_REAUTH_REQUIRED", "INVALID_OPENAPI_USER_TOKEN"}:
+                return {"success": False, "error": "OpenAPI 授权已失效，请重新授权", "code": e.code}
+            return {"success": False, "error": str(e), "code": e.code}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def _load_config(self):
         if os.path.exists(HDHIVE_CONFIG_PATH):
@@ -310,6 +507,16 @@ class HDHiveService:
         if not account:
             return {"success": False, "message": "账号不存在"}
 
+        if self._can_use_openapi_checkin(account):
+            result = await self._openapi_checkin(account, is_gambler=False)
+            if result.get("success"):
+                return await self._finalize_checkin_success(account, result, is_gambler=False)
+            if account.openapi_scope or result.get("code"):
+                account.status = "error"
+                self._save_config()
+                err = result.get("error", "OpenAPI 签到失败")
+                return {"success": False, "message": err, "error": err, "code": result.get("code")}
+
         refreshed = await self._ensure_valid_token(account)
         if refreshed:
             self._save_config()
@@ -339,6 +546,16 @@ class HDHiveService:
         account = next((a for a in self.config.accounts if a.id == account_id), None)
         if not account:
             return {"success": False, "message": "账号不存在"}
+
+        if self._can_use_openapi_checkin(account):
+            result = await self._openapi_checkin(account, is_gambler=True)
+            if result.get("success"):
+                return await self._finalize_checkin_success(account, result, is_gambler=True)
+            if account.openapi_scope or result.get("code"):
+                account.status = "error"
+                self._save_config()
+                err = result.get("error", "OpenAPI 签到失败")
+                return {"success": False, "message": err, "error": err, "code": result.get("code")}
 
         refreshed = await self._ensure_valid_token(account)
         if refreshed:
@@ -444,15 +661,20 @@ class HDHiveService:
             except Exception as e:
                 return {"success": False, "error": str(e)}
 
-    async def get_usage(self, api_key: str) -> dict:
+    async def get_usage(self, account: HDHiveAccount) -> dict:
         try:
             def _run_open_usage():
-                with HDHiveOpenClient(api_key) as client:
-                    quota = client.get_quota() or {}
-                    usage = client.get_usage() or {}
-                    today = client.get_usage_today() or {}
-                    user = client.get_me() or {}
-                    return quota, usage, today, user
+                quota = self.run_openapi_call(account, lambda client: client.get_quota() or {})
+                usage = self.run_openapi_call(account, lambda client: client.get_usage() or {})
+                today = self.run_openapi_call(account, lambda client: client.get_usage_today() or {})
+                user = {}
+                if account.openapi_access_token:
+                    try:
+                        user = self.run_openapi_call(account, lambda client: client.get_me() or {})
+                    except HDHiveAPIError as e:
+                        if e.code not in {"OPENAPI_USER_REQUIRED", "USER_SCOPE_NOT_ALLOWED", "SCOPE_NOT_ALLOWED"}:
+                            raise
+                return quota, usage, today, user
 
             quota_data, usage_data, today_data, user_data = await asyncio.to_thread(_run_open_usage)
 
@@ -460,9 +682,9 @@ class HDHiveService:
             return {
                 "success": True,
                 "usage": {
-                    "quota": quota_data.get("quota", 0),
-                    "used": usage_data.get("total", 0),
-                    "today_used": today_data.get("total", 0),
+                    "quota": quota_data.get("quota") or quota_data.get("endpoint_limit") or 0,
+                    "used": usage_data.get("total") or usage_data.get("total_calls") or 0,
+                    "today_used": today_data.get("total") or today_data.get("total_calls") or 0,
                 },
                 "user_detail": {
                     "id": user_data.get("id", 0),
@@ -496,15 +718,15 @@ class HDHiveService:
         if not account:
             return {"success": False, "message": "账号不存在"}
 
-        if account.api_key:
-            usage_result = await self.get_usage(account.api_key)
+        if self.account_has_openapi_credentials(account):
+            usage_result = await self.get_usage(account)
             if usage_result.get("success"):
                 account.status = "ok"
                 if usage_result.get("user_detail"):
                     account.user_info = HDHiveUserInfo(**usage_result["user_detail"])
                 account.usage = HDHiveUsage(**usage_result.get("usage", {}))
                 self._save_config()
-                return {"success": True, "message": "API Key 有效"}
+                return {"success": True, "message": "OpenAPI 凭证有效"}
 
         refreshed = await self._ensure_valid_token(account)
         if refreshed:
@@ -530,7 +752,16 @@ class HDHiveService:
         self._save_config()
         return {"success": False, "message": "请填写密码或手动输入 Token"}
 
-    def add_account(self, name: str, password: str = "", token: str = "", api_key: str = "") -> HDHiveAccount:
+    def add_account(
+        self,
+        name: str,
+        password: str = "",
+        token: str = "",
+        api_key: str = "",
+        openapi_client_id: str = "",
+        openapi_app_secret: str = "",
+        openapi_redirect_uri: str = "",
+    ) -> HDHiveAccount:
         import uuid
 
         account = HDHiveAccount(
@@ -539,6 +770,9 @@ class HDHiveService:
             password=password,
             token=token,
             api_key=api_key,
+            openapi_client_id=openapi_client_id,
+            openapi_app_secret=openapi_app_secret,
+            openapi_redirect_uri=openapi_redirect_uri,
         )
         self.config.accounts.append(account)
         self._save_config()
@@ -595,10 +829,6 @@ class HDHiveService:
 
         for account in candidates:
             account_name = account.name or account.id
-
-            # 有 API Key 说明可直接使用 OpenAPI，不做 token 自动修复
-            if account.api_key:
-                continue
 
             # 无 token：仅在可自动登录时修复
             if not account.token:

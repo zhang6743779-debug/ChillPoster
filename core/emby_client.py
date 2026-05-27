@@ -221,17 +221,16 @@ class EmbyClient:
                 return False
             except: return False
 
-        # --- 执行流程 (逻辑与 emby_client 速度快.py 保持一致) ---
-        
-        # 1. 优先尝试直接上传
-        if _try_binary_upload(item_id): return True
+        # Emby 4.10 beta expects a base64 image body for this endpoint. Sending
+        # raw bytes first works on some servers but causes noisy 500 errors here.
         if _try_base64_upload(item_id): return True
+        if _try_binary_upload(item_id): return True
         
         # 2. 如果失败，尝试反查真实 ID
         real_id = self._resolve_real_id(item_id)
         if real_id and str(real_id) != str(item_id):
-            if _try_binary_upload(real_id): return True
             if _try_base64_upload(real_id): return True
+            if _try_binary_upload(real_id): return True
             
         return False
 

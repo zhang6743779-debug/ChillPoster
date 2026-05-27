@@ -13,9 +13,9 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
             Object.assign(hdhiveConfig, res.data);
             hdhiveConfig.accounts.forEach(acc => {
                 if (acc.showPassword === undefined) acc.showPassword = false;
-                if (acc.showToken === undefined) acc.showToken = false;
                 if (acc.showApiKey === undefined) acc.showApiKey = false;
                 if (acc.saving === undefined) acc.saving = false;
+                if (acc.openapi_scope === undefined) acc.openapi_scope = '';
                 if (acc.checkin_type === undefined) {
                     if (acc.auto_checkin === true) {
                         acc.checkin_type = 'normal';
@@ -43,38 +43,16 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
             await axios.post('/api/hdhive/account/update?account_id=' + accountId, {
                 name: account.name,
                 password: account.password,
-                token: account.token,
-                api_key: account.api_key,
+                openapi_redirect_uri: account.openapi_redirect_uri,
                 enabled: account.enabled,
                 checkin_type: account.checkin_type,
                 checkin_cron: account.checkin_cron
             });
 
-            if (account.password && !account.token) {
-                try {
-                    const loginRes = await axios.post('/api/hdhive/login', { account_id: accountId });
-                    if (loginRes.data.status === 'ok') {
-                        account.token = loginRes.data.token;
-                    }
-                } catch (e) {
-                    console.log('自动获取Token失败:', e);
-                }
-            }
-
-            if (account.token) {
-                try {
-                    await axios.post('/api/hdhive/user-info', { account_id: accountId });
-                } catch (e) {
-                    console.log('自动获取用户信息失败:', e);
-                }
-            }
-
-            if (account.api_key) {
-                try {
-                    await axios.post('/api/hdhive/usage', { account_id: accountId });
-                } catch (e) {
+            if (account.openapi_access_token) {
+                await axios.post('/api/hdhive/usage', { account_id: accountId }).catch((e) => {
                     console.log('自动获取用量信息失败:', e);
-                }
+                });
             }
 
             await fetchHdhiveConfig();
@@ -108,12 +86,10 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
         try {
             const res = await axios.post('/api/hdhive/account/add', {
                 name: '',
-                password: '',
-                token: ''
+                password: ''
             });
             const newAccount = res.data.account;
             newAccount.showPassword = false;
-            newAccount.showToken = false;
             newAccount.showApiKey = false;
             newAccount.saving = false;
             newAccount.checkin_type = newAccount.checkin_type || 'none';
@@ -147,7 +123,7 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
             await axios.post('/api/hdhive/account/update?account_id=' + accountId, {
                 name: account.name,
                 password: account.password,
-                token: account.token
+                openapi_redirect_uri: account.openapi_redirect_uri
             });
             const res = await axios.post('/api/hdhive/account/test', { account_id: accountId });
             if (res.data.success) {
@@ -194,14 +170,11 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
     const checkinHdhive = async (accountId) => {
         const account = hdhiveConfig.accounts.find(a => a.id === accountId);
         if (!account) return;
-        if (!account.token) {
-            return showToast('请先获取 Token', 'error');
+        if (!account.openapi_access_token && !account.token) {
+            return showToast('请先授权 OpenAPI', 'error');
         }
         account.checking = true;
         try {
-            await axios.post('/api/hdhive/account/update?account_id=' + accountId, {
-                token: account.token
-            });
             const res = await axios.post('/api/hdhive/checkin', { account_id: accountId });
             if (res.data.success) {
                 if (!res.data.already_checked_in) {
@@ -222,8 +195,8 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
     const gamblerCheckinHdhive = async (accountId) => {
         const account = hdhiveConfig.accounts.find(a => a.id === accountId);
         if (!account) return;
-        if (!account.token) {
-            return showToast('请先获取 Token', 'error');
+        if (!account.openapi_access_token && !account.token) {
+            return showToast('请先授权 OpenAPI', 'error');
         }
         account.gambler_checking = true;
         try {
@@ -321,6 +294,49 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
         }
     };
 
+    const authorizeHdhiveOpenApi = async (accountId) => {
+        const account = hdhiveConfig.accounts.find(a => a.id === accountId);
+        if (!account) return;
+        account.authorizingOpenApi = true;
+        try {
+            await axios.post('/api/hdhive/account/update?account_id=' + accountId, {
+                openapi_redirect_uri: account.openapi_redirect_uri
+            });
+            const res = await axios.post('/api/hdhive/openapi/authorize-url', {
+                account_id: accountId,
+                scope: 'meta query unlock write'
+            });
+            if (res.data?.redirect_uri) {
+                account.openapi_redirect_uri = res.data.redirect_uri;
+            }
+            window.open(res.data.url, '_blank', 'noopener,noreferrer,width=720,height=760');
+            showToast('已打开影巢授权页，授权完成后回到这里刷新配置', 'success');
+        } catch (e) {
+            showToast('生成授权链接失败: ' + (e.response?.data?.detail || e.message), 'error');
+        } finally {
+            account.authorizingOpenApi = false;
+        }
+    };
+
+    const refreshHdhiveOpenApiToken = async (accountId) => {
+        const account = hdhiveConfig.accounts.find(a => a.id === accountId);
+        if (!account) return;
+        account.refreshingOpenApi = true;
+        try {
+            const res = await axios.post('/api/hdhive/openapi/refresh', { account_id: accountId });
+            if (res.data.status === 'ok') {
+                Object.assign(account, res.data.account || {});
+                showToast('OpenAPI 授权已刷新', 'success');
+            } else {
+                showToast(res.data.message || '刷新失败', 'error');
+            }
+        } catch (e) {
+            showToast('刷新 OpenAPI 授权失败: ' + (e.response?.data?.detail || e.message), 'error');
+        } finally {
+            account.refreshingOpenApi = false;
+        }
+    };
+
     return {
         hdhiveConfig,
         hdhiveChecking,
@@ -336,5 +352,7 @@ export function useHdhiveConfig({ showToast, showConfirm }) {
         checkinAllHdhive,
         refreshHdhiveUserInfo,
         refreshHdhiveUsage,
+        authorizeHdhiveOpenApi,
+        refreshHdhiveOpenApiToken,
     };
 }

@@ -15,7 +15,7 @@ from p115client.util import share_extract_payload
 
 from app.routers.config_302 import get_config_302
 from app.services.drive115_service import drive115_service
-from app.services.hdhive_openapi_client import HDHiveAPIError, HDHiveOpenClient
+from app.services.hdhive_openapi_client import HDHiveAPIError
 from app.services.hdhive_service import hdhive_service
 from app.services.media_organize_115_ops import _get_115_fs, run_115_write_request
 from app.services.media_organize_state import VIDEO_EXTS
@@ -87,12 +87,13 @@ class ForwardHDHiveService:
     def get_account_options(self) -> list[dict[str, Any]]:
         accounts = []
         for account in hdhive_service.config.accounts:
+            has_openapi_authorization = hdhive_service.account_can_query_openapi(account)
             accounts.append({
                 "id": account.id,
                 "name": account.name or account.id,
                 "enabled": account.enabled,
                 "status": account.status,
-                "has_api_key": bool(account.api_key),
+                "has_openapi_authorization": has_openapi_authorization,
             })
         return accounts
 
@@ -123,8 +124,8 @@ class ForwardHDHiveService:
         account_id = str(self.config.get("account_id") or "").strip()
         selected_account = next((item for item in accounts if str(item.get("id") or "") == account_id), None) if account_id else None
         has_hdhive_account = bool(
-            selected_account.get("has_api_key") if selected_account
-            else any(item.get("has_api_key") for item in accounts)
+            selected_account.get("has_openapi_authorization") if selected_account
+            else any(item.get("has_openapi_authorization") for item in accounts)
         )
         if has_hdhive_account:
             options.append({
@@ -224,17 +225,17 @@ class ForwardHDHiveService:
         if expected and str(token or "").strip() != expected:
             raise HTTPException(status_code=403, detail="Forward 模块 Token 无效")
 
-    def _get_api_key(self, *, require_enabled: bool = True) -> str:
+    def _get_openapi_account(self, *, require_enabled: bool = True):
         account_id = str(self.config.get("account_id") or "").strip()
         accounts = list(hdhive_service.config.accounts)
         selected = None
         if account_id:
             selected = next((a for a in accounts if a.id == account_id and (a.enabled or not require_enabled)), None)
         if selected is None:
-            selected = next((a for a in accounts if (a.enabled or not require_enabled) and a.api_key), None)
-        if selected is None or not selected.api_key:
-            raise HTTPException(status_code=400, detail="请先在影巢配置中填写可用 API Key")
-        return selected.api_key
+            selected = next((a for a in accounts if (a.enabled or not require_enabled) and hdhive_service.account_can_query_openapi(a)), None)
+        if selected is None or not hdhive_service.account_can_query_openapi(selected):
+            raise HTTPException(status_code=400, detail="请先在影巢配置中完成新版 OpenAPI 授权")
+        return selected
 
     def _cache_key(self, media_type: str, tmdb_id: str | int) -> str:
         return f"{media_type}:{tmdb_id}"
@@ -410,10 +411,12 @@ class ForwardHDHiveService:
         cached = self._resource_cache.get(key)
         if use_cache and cached and cached[0] > now:
             return cached[1]
-        api_key = self._get_api_key(require_enabled=require_enabled)
         try:
-            with HDHiveOpenClient(api_key) as client:
-                resources = client.get_resources(normalized_type, str(tmdb_id))
+            account = self._get_openapi_account(require_enabled=require_enabled)
+            resources = hdhive_service.run_openapi_call(
+                account,
+                lambda client: client.get_resources(normalized_type, str(tmdb_id)),
+            )
         except HDHiveAPIError as e:
             raise HTTPException(status_code=e.http_status or 502, detail=str(e)) from e
         except Exception as e:
@@ -706,10 +709,9 @@ class ForwardHDHiveService:
         return None
 
     def _unlock_resource(self, slug: str) -> dict[str, Any]:
-        api_key = self._get_api_key()
         try:
-            with HDHiveOpenClient(api_key) as client:
-                return client.unlock_resources(slug=slug)
+            account = self._get_openapi_account()
+            return hdhive_service.run_openapi_call(account, lambda client: client.unlock_resources(slug=slug))
         except HDHiveAPIError as e:
             raise HTTPException(status_code=e.http_status or 502, detail=str(e)) from e
         except Exception as e:

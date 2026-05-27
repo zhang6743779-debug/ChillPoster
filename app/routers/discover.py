@@ -67,6 +67,11 @@ async def discover_realtime_events():
 # ========== 内存缓存 ==========
 _cache: Dict[str, tuple] = {}  # key -> (data, expiry_timestamp)
 CACHE_TTL = 1800  # 30 分钟
+EXTERNAL_TMDB_SOURCE_ID_MAP_TTL = 10 * 365 * 24 * 60 * 60
+EXTERNAL_TMDB_TITLE_MAP_TTL = 30 * 24 * 60 * 60
+EXTERNAL_TMDB_RESOLVE_CONCURRENCY = 8
+_external_tmdb_map_db_ready = False
+_external_tmdb_map_db_lock = threading.RLock()
 
 def _cache_get(key: str):
     if key in _cache:
@@ -138,11 +143,157 @@ def _extract_season_from_title(value: Any) -> tuple[str, int | None]:
     return text, None
 
 
+def _normalize_external_resolve_title(value: Any) -> tuple[str, int | None]:
+    raw_title = str(value or "").strip()
+    title, season_num = _extract_season_from_title(raw_title)
+    title = title or raw_title
+    for prefix in ("电视剧", "电影", "纪录片", "综艺节目", "综艺"):
+        if title.startswith(prefix):
+            title = title[len(prefix):].strip()
+            break
+    normalized_search_title = _normalize_library_title(title)
+    if normalized_search_title:
+        title = normalized_search_title
+    return title, season_num
+
+
+def _get_external_map_identity(item: dict) -> tuple[str, str, str, str, str, str] | None:
+    if not isinstance(item, dict):
+        return None
+    source_key = str(item.get("_source_key") or item.get("source") or "").strip()
+    if not source_key or source_key in {"tmdb", "themoviedb"}:
+        return None
+    media_type = _normalize_discover_media_type(item.get("media_type"))
+    source_media_id = str(
+        item.get("_source_media_id")
+        or item.get("source_media_id")
+        or item.get("media_id")
+        or item.get("id")
+        or ""
+    ).strip()
+    title = str(item.get("title") or item.get("name") or "").strip()
+    year = str(item.get("year") or "")[:4]
+    if source_media_id:
+        cache_key = f"source:{source_key}:{source_media_id}:{media_type}"
+    else:
+        normalized_title, _ = _normalize_external_resolve_title(title)
+        if not normalized_title:
+            return None
+        cache_key = f"title:{source_key}:{media_type}:{normalized_title}:{year}"
+    return cache_key, source_key, source_media_id, media_type, title, year
+
+
+def _external_tmdb_map_ttl(source_media_id: str = "") -> int:
+    return EXTERNAL_TMDB_SOURCE_ID_MAP_TTL if str(source_media_id or "").strip() else EXTERNAL_TMDB_TITLE_MAP_TTL
+
+
+def _ensure_external_tmdb_map_schema() -> None:
+    global _external_tmdb_map_db_ready
+    if _external_tmdb_map_db_ready:
+        return
+    with _external_tmdb_map_db_lock:
+        if _external_tmdb_map_db_ready:
+            return
+        with cache_db(write=True) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discover_external_tmdb_map (
+                    cache_key TEXT PRIMARY KEY,
+                    source_key TEXT NOT NULL DEFAULT '',
+                    source_media_id TEXT NOT NULL DEFAULT '',
+                    media_type TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    year TEXT NOT NULL DEFAULT '',
+                    tmdb_id TEXT NOT NULL DEFAULT '',
+                    rating REAL,
+                    updated_at REAL NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_discover_external_tmdb_map_source
+                ON discover_external_tmdb_map(source_key, source_media_id, media_type)
+                """
+            )
+        _external_tmdb_map_db_ready = True
+
+
+def _get_cached_external_tmdb_mapping(item: dict) -> tuple[str | None, float | None]:
+    identity = _get_external_map_identity(item)
+    if not identity:
+        return None, None
+    cache_key, _source_key, source_media_id, *_ = identity
+    try:
+        _ensure_external_tmdb_map_schema()
+        with cache_db() as conn:
+            row = conn.execute(
+                """
+                SELECT tmdb_id, rating, updated_at
+                FROM discover_external_tmdb_map
+                WHERE cache_key = ?
+                LIMIT 1
+                """,
+                (cache_key,),
+            ).fetchone()
+        if not row:
+            return None, None
+        updated_at = float(row["updated_at"] or 0)
+        if updated_at and time.time() - updated_at > _external_tmdb_map_ttl(source_media_id):
+            return None, None
+        return str(row["tmdb_id"] or "").strip() or None, row["rating"]
+    except Exception as e:
+        logger.debug(f"[discover] 查询外部源 TMDB 映射缓存失败: {e}")
+        return None, None
+
+
+def _save_external_tmdb_mapping(item: dict, tmdb_id: Any, rating: Any = None) -> None:
+    tmdb_id = str(tmdb_id or "").strip()
+    if not tmdb_id:
+        return
+    identity = _get_external_map_identity(item)
+    if not identity:
+        return
+    cache_key, source_key, source_media_id, media_type, title, year = identity
+    try:
+        rating_value = float(rating) if rating not in (None, "") else None
+    except Exception:
+        rating_value = None
+    try:
+        _ensure_external_tmdb_map_schema()
+        with cache_db(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO discover_external_tmdb_map(
+                    cache_key, source_key, source_media_id, media_type, title, year, tmdb_id, rating, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    source_key = excluded.source_key,
+                    source_media_id = excluded.source_media_id,
+                    media_type = excluded.media_type,
+                    title = excluded.title,
+                    year = excluded.year,
+                    tmdb_id = excluded.tmdb_id,
+                    rating = excluded.rating,
+                    updated_at = excluded.updated_at
+                """,
+                (cache_key, source_key, source_media_id, media_type, title, year, tmdb_id, rating_value, time.time()),
+            )
+    except Exception as e:
+        logger.debug(f"[discover] 写入外部源 TMDB 映射缓存失败: {e}")
+
+
 def _item_exists_in_discover_index(item: dict) -> bool:
     media_type = _normalize_discover_media_type(item.get("media_type"))
     tmdb_id = item.get("_tmdb_id") or item.get("tmdb_id")
     if not tmdb_id and item.get("source") in {"tmdb", "themoviedb"}:
         tmdb_id = item.get("id")
+    if not tmdb_id:
+        cached_tmdb_id, _ = _get_cached_external_tmdb_mapping(item)
+        if cached_tmdb_id:
+            tmdb_id = cached_tmdb_id
+            item["_tmdb_id"] = cached_tmdb_id
+            item["tmdb_id"] = cached_tmdb_id
     if discover_tmdb_id_exists(tmdb_id, media_type):
         return True
     raw_title = item.get("title") or item.get("name") or ""
@@ -3448,12 +3599,106 @@ def search_media(query: str = Query(..., min_length=1), type: str = Query("movie
     return {"items": items, "total_pages": data.get("total_pages", 1), "page": page}
 
 
+async def _resolve_item_to_tmdb(item: dict, api_key: str = "", use_cache: bool = True) -> tuple[Any, Any]:
+    if not isinstance(item, dict):
+        return None, None
+    media_type = _normalize_discover_media_type(item.get("media_type", "movie"))
+    tmdb_id = str(item.get("tmdb_id") or item.get("_tmdb_id") or "").strip()
+    if not tmdb_id and item.get("source") in {"tmdb", "themoviedb"}:
+        tmdb_id = str(item.get("id") or "").strip()
+    if tmdb_id:
+        return tmdb_id, None
+
+    if use_cache:
+        cached_tmdb_id, cached_rating = _get_cached_external_tmdb_mapping(item)
+        if cached_tmdb_id:
+            return cached_tmdb_id, cached_rating
+
+    raw_title = item.get("title", "") or item.get("name", "")
+    title, season_num = _normalize_external_resolve_title(raw_title)
+    year = str(item.get("year", "") or "")[:4]
+    if not title:
+        return None, None
+
+    emby_tmdb_id = lookup_discover_tmdb_id(title, year, media_type)
+    if emby_tmdb_id:
+        _save_external_tmdb_mapping(item, emby_tmdb_id)
+        return int(emby_tmdb_id) if str(emby_tmdb_id).isdigit() else emby_tmdb_id, None
+
+    if not api_key:
+        return None, None
+
+    loop = asyncio.get_running_loop()
+    data = await loop.run_in_executor(
+        None,
+        lambda: tmdb.search_media_for_discover(title, api_key, item_type=media_type, page=1)
+    )
+    if not data or not data.get("results"):
+        return None, None
+    results = data["results"]
+
+    def _remember(tmdb_value, rating_value):
+        if tmdb_value:
+            _save_external_tmdb_mapping(item, tmdb_value, rating_value)
+        return tmdb_value, rating_value
+
+    if year and year.isdigit():
+        year_val = int(year)
+        if media_type == "movie":
+            for cand in results:
+                cand_date = cand.get("release_date", "")
+                if cand_date and len(cand_date) >= 4:
+                    try:
+                        if int(cand_date[:4]) == year_val:
+                            return _remember(cand.get("id"), cand.get("vote_average"))
+                    except ValueError:
+                        pass
+            return None, None
+
+        if season_num:
+            for cand in results[:3]:
+                cand_id = cand.get("id")
+                if not cand_id:
+                    continue
+                season_data = await loop.run_in_executor(
+                    None,
+                    lambda sid=cand_id: tmdb.get_season_details_tmdb(sid, season_num, api_key, append_to_response=None)
+                )
+                if season_data:
+                    season_date = season_data.get("air_date", "")
+                    if season_date and len(season_date) >= 4:
+                        try:
+                            if int(season_date[:4]) == year_val:
+                                return _remember(cand_id, cand.get("vote_average"))
+                        except ValueError:
+                            pass
+            return None, None
+
+        for cand in results:
+            cand_date = cand.get("first_air_date", "")
+            if cand_date and len(cand_date) >= 4:
+                try:
+                    if int(cand_date[:4]) == year_val:
+                        return _remember(cand.get("id"), cand.get("vote_average"))
+                except ValueError:
+                    pass
+        return None, None
+
+    first = results[0]
+    return _remember(first.get("id"), first.get("vote_average"))
+
+
 @router.post("/library/exists")
-def check_library_exists(items: list[dict]):
+async def check_library_exists(items: list[dict], resolve_missing: bool = Query(False)):
     results = {}
-    for item in items or []:
+    tmdb_ids = {}
+    ratings = {}
+    api_key = _get_tmdb_key() if resolve_missing else ""
+    semaphore = asyncio.Semaphore(EXTERNAL_TMDB_RESOLVE_CONCURRENCY)
+
+    async def _check_one(item: dict):
         if not isinstance(item, dict):
-            continue
+            return None
         media_type = _normalize_discover_media_type(item.get("media_type"))
         key = item.get("_existence_key")
         tmdb_id = str(item.get("tmdb_id") or item.get("_tmdb_id") or "").strip()
@@ -3461,9 +3706,45 @@ def check_library_exists(items: list[dict]):
             tmdb_id = str(item.get("id") or "").strip()
         if not key:
             key = f"{tmdb_id}:{media_type}" if tmdb_id else ""
+        if not key:
+            return None
+
+        item_for_check = dict(item)
+        exists = _item_exists_in_discover_index(item_for_check)
+        tmdb_id = str(item_for_check.get("tmdb_id") or item_for_check.get("_tmdb_id") or tmdb_id or "").strip()
+        rating = None
+
+        if not exists:
+            resolved_tmdb_id, rating = await _resolve_item_to_tmdb(item_for_check, api_key="", use_cache=True)
+            if resolved_tmdb_id:
+                tmdb_id = str(resolved_tmdb_id).strip()
+                item_for_check["tmdb_id"] = tmdb_id
+                item_for_check["_tmdb_id"] = tmdb_id
+                exists = discover_tmdb_id_exists(tmdb_id, media_type)
+
+        if not exists and resolve_missing:
+            async with semaphore:
+                resolved_tmdb_id, rating = await _resolve_item_to_tmdb(item_for_check, api_key=api_key, use_cache=True)
+            if resolved_tmdb_id:
+                tmdb_id = str(resolved_tmdb_id).strip()
+                item_for_check["tmdb_id"] = tmdb_id
+                item_for_check["_tmdb_id"] = tmdb_id
+                exists = discover_tmdb_id_exists(tmdb_id, media_type)
+
+        return key, exists, tmdb_id, rating
+
+    checked = await asyncio.gather(*[_check_one(item) for item in (items or [])], return_exceptions=True)
+    for entry in checked:
+        if isinstance(entry, Exception) or not entry:
+            continue
+        key, exists, tmdb_id, rating = entry
         if key:
-            results[key] = _item_exists_in_discover_index(item)
-    return {"results": results}
+            results[key] = bool(exists)
+            if tmdb_id:
+                tmdb_ids[key] = tmdb_id
+            if rating not in (None, ""):
+                ratings[key] = rating
+    return {"results": results, "tmdb_ids": tmdb_ids, "ratings": ratings}
 
 # ========== 外部来源→TMDB 批量解析 ==========
 
@@ -3474,80 +3755,18 @@ async def resolve_douban_to_tmdb(items: list[dict]):
     输入: [{"title": "xxx", "year": "2024", "media_type": "movie"}, ...]
     返回: {"results": {"xxx_2024": 12345, ...}}
     """
-    import asyncio
     api_key = _get_tmdb_key()
     if not api_key:
         return {"results": {}}
 
-    async def _resolve_one(item):
-        raw_title = item.get("title", "") or item.get("name", "")
-        title, season_num = _extract_season_from_title(raw_title)
-        title = title or raw_title
-        for prefix in ("电视剧", "电影", "纪录片", "综艺节目", "综艺"):
-            if title.startswith(prefix):
-                title = title[len(prefix):].strip()
-                break
-        normalized_search_title = _normalize_library_title(title)
-        if normalized_search_title:
-            title = normalized_search_title
-        year = str(item.get("year", "") or "")[:4]
-        media_type = _normalize_discover_media_type(item.get("media_type", "movie"))
-        if not title:
-            return None, None, None
-        emby_tmdb_id = lookup_discover_tmdb_id(title, year, media_type)
-        if emby_tmdb_id:
-            return item.get("_key"), int(emby_tmdb_id), None
-        loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(
-            None,
-            lambda: tmdb.search_media_for_discover(title, api_key, item_type=media_type, page=1)
-        )
-        if not data or not data.get("results"):
-            return item.get("_key"), None, None
-        results = data["results"]
-        if year and year.isdigit():
-            year_val = int(year)
-            if media_type == "movie":
-                for cand in results:
-                    cand_date = cand.get("release_date", "")
-                    if cand_date and len(cand_date) >= 4:
-                        try:
-                            if int(cand_date[:4]) == year_val:
-                                return item.get("_key"), cand.get("id"), cand.get("vote_average")
-                        except ValueError:
-                            pass
-                return item.get("_key"), None, None
-            else:
-                if season_num:
-                    for cand in results[:3]:
-                        cand_id = cand.get("id")
-                        if not cand_id:
-                            continue
-                        season_data = await loop.run_in_executor(
-                            None,
-                            lambda sid=cand_id: tmdb.get_season_details_tmdb(sid, season_num, api_key, append_to_response=None)
-                        )
-                        if season_data:
-                            season_date = season_data.get("air_date", "")
-                            if season_date and len(season_date) >= 4:
-                                try:
-                                    if int(season_date[:4]) == year_val:
-                                        return item.get("_key"), cand_id, cand.get("vote_average")
-                                except ValueError:
-                                    pass
-                    return item.get("_key"), None, None
-                for cand in results:
-                    cand_date = cand.get("first_air_date", "")
-                    if cand_date and len(cand_date) >= 4:
-                        try:
-                            if int(cand_date[:4]) == year_val:
-                                return item.get("_key"), cand.get("id"), cand.get("vote_average")
-                        except ValueError:
-                            pass
-                return item.get("_key"), None, None
-        return item.get("_key"), results[0].get("id"), results[0].get("vote_average")
+    semaphore = asyncio.Semaphore(EXTERNAL_TMDB_RESOLVE_CONCURRENCY)
 
-    tasks = [_resolve_one(item) for item in items[:30]]
+    async def _resolve_one(item):
+        async with semaphore:
+            tmdb_id, rating = await _resolve_item_to_tmdb(item, api_key=api_key, use_cache=True)
+        return item.get("_key"), tmdb_id, rating
+
+    tasks = [_resolve_one(item) for item in (items or [])[:30] if isinstance(item, dict)]
     results_list = await asyncio.gather(*tasks, return_exceptions=True)
     results = {}
     ratings = {}

@@ -752,8 +752,22 @@ createApp({
             tvFolderPreviewName,
             tvEpisodePreviewName,
             insertToken,
+            insertRenameTokenForGroup,
+            insertRenameLiteralForGroup,
             resetMovieFormat,
             resetTvFormat,
+            setActiveRenameTemplate,
+            activeRenameTemplateType,
+            renameTemplateSegments,
+            renameTemplateLiteralLabel,
+            renameTokenClass,
+            updateRenameTemplateSegment,
+            removeRenameTemplateSegment,
+            insertRenameLiteral,
+            onRenameTemplateDragStart,
+            onRenameTemplateDragOver,
+            onRenameTemplateDrop,
+            onRenameTemplateDragEnd,
         } = useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, showToast, showNumberDialog });
 
         const runDashboardTaskCategory = async (category) => {
@@ -824,6 +838,8 @@ createApp({
             checkinAllHdhive,
             refreshHdhiveUserInfo,
             refreshHdhiveUsage,
+            authorizeHdhiveOpenApi,
+            refreshHdhiveOpenApiToken,
         } = useHdhiveConfig({ showToast, showConfirm });
 
         const {
@@ -2001,6 +2017,8 @@ createApp({
             toggleHdhiveCheckin,
             refreshHdhiveUserInfo,
             refreshHdhiveUsage,
+            authorizeHdhiveOpenApi,
+            refreshHdhiveOpenApiToken,
 
             // [新增] Forward 模块
             forwardHdhiveConfig, forwardHdhiveSaving, forwardHdhiveTesting,
@@ -2118,7 +2136,11 @@ createApp({
             movieFormatRef, movieFolderFormatRef, tvFolderFormatRef, tvEpisodeFormatRef,
             movieFolderFormatDisplay, tvFolderFormatDisplay, movieFormatDisplay, tvEpisodeFormatDisplay,
             moviePreviewName, movieFolderPreviewName, tvFolderPreviewName, tvEpisodePreviewName,
-            insertToken, resetMovieFormat, resetTvFormat,
+            insertToken, insertRenameTokenForGroup, insertRenameLiteralForGroup, resetMovieFormat, resetTvFormat,
+            setActiveRenameTemplate, activeRenameTemplateType, renameTemplateSegments, renameTemplateLiteralLabel,
+            renameTokenClass,
+            updateRenameTemplateSegment, removeRenameTemplateSegment, insertRenameLiteral,
+            onRenameTemplateDragStart, onRenameTemplateDragOver, onRenameTemplateDrop, onRenameTemplateDragEnd,
         }
         
     }
