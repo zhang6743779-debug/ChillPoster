@@ -102,6 +102,7 @@ _WASH_CODEC_MULTIPLIERS = {
     "H265": 1.6,
     "VP9": 1.6,
     "AV1": 1.7,
+    "MPEG2VIDEO": 0.7,
     "MPEG4": 0.6,
     "XVID": 0.6,
     "DIVX": 0.6,
@@ -551,6 +552,8 @@ def _normalize_wash_codec(value: str) -> str:
         return "XVID"
     if "DIVX" in text:
         return "DIVX"
+    if "MPEG2VIDEO" in text or "MPEG2" in text or "MPG2" in text:
+        return "MPEG2VIDEO"
     if "MPEG4" in text or text == "MPEG4":
         return "MPEG4"
     return ""
@@ -3877,8 +3880,15 @@ def _send_wash_notify(payload: dict):
     if not payload:
         return
     try:
-        source_path = payload.get("new_file_path", "")
-        target_path = payload.get("target_file_path", "") or payload.get("old_file_path", "") or payload.get("library_location", "")
+        old_resource = payload.get("old_resource") or {}
+        new_resource = payload.get("new_resource") or {}
+        old_size = str(old_resource.get("size") or "").strip()
+        new_size = str(new_resource.get("size") or "").strip()
+        size_parts = []
+        if old_size:
+            size_parts.append(f"原文件 {old_size}")
+        if new_size:
+            size_parts.append(f"新文件 {new_size}")
         append_organize_history({
             "category": "wash_success" if payload.get("status") == "success" else "wash_failed",
             "status": payload.get("status_text", ""),
@@ -3888,12 +3898,12 @@ def _send_wash_notify(payload: dict):
             "media_type": payload.get("media_type", ""),
             "tmdb_id": payload.get("tmdb_id", ""),
             "library_location": payload.get("library_location", ""),
-            "source_file": payload.get("new_file_name", ""),
-            "target_file": payload.get("old_file_name", ""),
-            "source_path": source_path,
-            "target_path": target_path,
+            "source_file": payload.get("old_file_name", ""),
+            "target_file": payload.get("new_file_name", ""),
+            "source_path": payload.get("old_file_path", ""),
+            "target_path": payload.get("new_file_path", ""),
             "quality": payload.get("new_summary", ""),
-            "size": (payload.get("new_resource") or {}).get("size", ""),
+            "size": " / ".join(size_parts) or new_size or old_size,
             "reason": payload.get("reason_text", ""),
             "decision": payload.get("decision_text", ""),
             "summary": payload.get("decision_text", ""),
@@ -3954,6 +3964,8 @@ def _append_strm_generated_history(payload: dict) -> None:
     result = (payload or {}).get("result") or {}
     media_type = str((payload or {}).get("media_type", "") or "")
     renamed_file = str(result.get("renamed_file", "") or "")
+    title = str((payload or {}).get("title") or result.get("title") or "").strip()
+    season_episode = str((payload or {}).get("season_episode") or result.get("season_episode") or "").strip()
     target_path = _join_remote_path(
         str((payload or {}).get("target_base", "") or ""),
         str(result.get("target_folder", "") or ""),
@@ -3964,7 +3976,9 @@ def _append_strm_generated_history(payload: dict) -> None:
         append_organize_history({
             "category": "strm_generated",
             "status": "success",
-            "title": renamed_file or "STRM生成",
+            "title": title or renamed_file or "STRM生成",
+            "year": str((payload or {}).get("year") or result.get("year") or ""),
+            "season_episode": season_episode,
             "media_type": media_type,
             "target_file": renamed_file,
             "target_path": target_path,
@@ -4219,6 +4233,9 @@ def _finalize_organize_result(
                     "sha1": vf.get("sha1", ""),
                 },
                 "media_type": strm_ctx.get("media_type", media_type),
+                "title": variables.get("title") or parsed.get("title", ""),
+                "year": variables.get("year", ""),
+                "season_episode": season_episode,
                 "pickcode": strm_ctx.get("pickcode", ""),
                 "category_path": strm_ctx.get("category_path", ""),
                 "target_base": target_base,

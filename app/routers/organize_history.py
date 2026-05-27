@@ -219,16 +219,18 @@ def _normalize_structured_record(record: dict) -> dict | None:
     target_file = str(record.get("target_file") or "")
     if (
         category in {"wash_success", "wash_failed"}
-        and "媒体目录" in source_path
-        and "转存目录" in target_path
+        and "转存目录" in source_path
+        and "媒体目录" in target_path
     ):
         source_path, target_path = target_path, source_path
         source_file, target_file = target_file, source_file
     subtitle_parts = [part for part in (year, season_episode, target_path or source_path) if part]
     detail_lines = []
+    source_path_label = "原文件" if category in {"wash_success", "wash_failed"} else "源路径"
+    target_path_label = "新文件" if category in {"wash_success", "wash_failed"} else "目标路径"
     for label, key in (
-        ("目标路径", "target_path"),
-        ("源路径", "source_path"),
+        (target_path_label, "target_path"),
+        (source_path_label, "source_path"),
         ("原因", "reason"),
         ("决策", "decision"),
         ("画质", "quality"),

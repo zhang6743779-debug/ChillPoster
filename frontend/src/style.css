@@ -9695,7 +9695,7 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     background: rgba(255,255,255,0.025);
     border-radius: 14px;
     padding: 10px;
-    overflow: hidden;
+    overflow: visible;
 }
 .missing-episode-control-panel .missing-episode-filter-strip {
     grid-template-columns: 1fr;
@@ -10805,7 +10805,13 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
         padding: 0 12px;
     }
     .missing-episode-page,
-    #app[data-v-app] .content-area:not(.panel-mode) > .scroll-view.missing-episode-page { padding: 16px 12px 96px; overflow-y: auto; }
+    #app[data-v-app] .content-area:not(.panel-mode) > .scroll-view.missing-episode-page {
+        height: auto;
+        min-height: 100%;
+        padding: 16px 12px 96px;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
     .missing-episode-shell { width: 100%; height: auto; min-height: calc(100vh - 112px); overflow: visible; }
     .missing-episode-workspace { grid-template-columns: 1fr; }
     .missing-episode-sidebar,
@@ -18201,14 +18207,17 @@ html[data-theme="light"] .network-connectivity-skeleton {
         radial-gradient(circle at 12% 8%, rgba(34, 197, 94, 0.12), transparent 28%),
         radial-gradient(circle at 88% 14%, rgba(59, 130, 246, 0.10), transparent 30%),
         var(--color-bg);
+    padding: 52px 24px 96px !important;
+    box-sizing: border-box;
 }
 
 .content-shell.organize-history-shell {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    width: min(1760px, calc(100vw - 72px)) !important;
-    max-width: min(1760px, calc(100vw - 72px)) !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
 }
 
 .organize-history-header {

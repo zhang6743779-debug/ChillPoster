@@ -1961,6 +1961,10 @@
                                             完结缺集
                                             <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
                                         </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
+                                            异常入库
+                                            <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
+                                        </button>
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'complete'}" @click="setMissingEpisodeFilter('complete')">
                                             完整入库
                                             <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
@@ -1968,10 +1972,6 @@
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'manual_complete'}" @click="setMissingEpisodeFilter('manual_complete')">
                                             已标记完整
                                             <strong>{{ missingEpisodeActiveSummary.manualCompleteCount || 0 }}</strong>
-                                        </button>
-                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
-                                            异常入库
-                                            <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
                                         </button>
                                     </div>
                                 </div>
@@ -2065,6 +2065,10 @@
                                                 完结缺集
                                                 <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
                                             </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
+                                                异常入库
+                                                <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
+                                            </button>
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'complete'}" @click="setMissingEpisodeFilter('complete')">
                                                 完整入库
                                                 <strong>{{ missingEpisodeActiveSummary.completeCount || 0 }}</strong>
@@ -2072,10 +2076,6 @@
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'manual_complete'}" @click="setMissingEpisodeFilter('manual_complete')">
                                                 已标记完整
                                                 <strong>{{ missingEpisodeActiveSummary.manualCompleteCount || 0 }}</strong>
-                                            </button>
-                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
-                                                异常入库
-                                                <strong>{{ missingEpisodeActiveErrorCount || 0 }}</strong>
                                             </button>
                                         </div>
                                         <div class="missing-episode-panel-title">排序</div>
@@ -2445,10 +2445,10 @@
                                                     </td>
                                                     <td class="history-col-path">
                                                         <div v-if="record.source_path" class="history-path-line" :title="record.source_path">
-                                                            <span>源路径：</span>{{ record.source_path }}
+                                                            <span>{{ ['wash_success', 'wash_failed'].includes(record.category) ? '原文件' : '源路径' }}：</span>{{ record.source_path }}
                                                         </div>
                                                         <div v-if="record.target_path" class="history-path-line" :title="record.target_path">
-                                                            <span>目标路径：</span>{{ record.target_path }}
+                                                            <span>{{ ['wash_success', 'wash_failed'].includes(record.category) ? '新文件' : '目标路径' }}：</span>{{ record.target_path }}
                                                         </div>
                                                         <div v-if="record.reason && ['organize_failed', 'wash_failed', 'skipped'].includes(record.category)" class="history-path-line history-reason-line" :title="record.reason">
                                                             <span>原因：</span>{{ record.reason }}
