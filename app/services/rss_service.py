@@ -8,7 +8,6 @@ from apscheduler.triggers.cron import CronTrigger
 from core.importer import UniversalImporter
 from core.emby_client import EmbyClient
 from app.routers.config_302 import get_emby_config_by_index_sync
-from app.services.emby_library_cache import refresh_server_libraries
 from core.linker import HardLinkManager
 from core.configs import RSS_TASKS_FILE, RSS_CONFIG_FILE, CONFIG_FILE
 from core.logger import logger
@@ -19,6 +18,21 @@ from app.dependencies import (
 )
 
 RUNTIME_STATE_KEYS = {"last_entries", "entry_tmdb_map", "last_sync_at"}
+
+
+def _notify_emby_path_updates(client: EmbyClient, created_paths: list[str], deleted_paths: list[str], log_prefix: str):
+    created_paths = [path for path in created_paths or [] if path]
+    deleted_paths = [path for path in deleted_paths or [] if path]
+    if created_paths:
+        if client.notify_media_updates(created_paths, update_type="Created"):
+            logger.info(f"{log_prefix} 已按路径通知 Emby 更新: 新增/变更 {len(created_paths)} 个目录")
+        else:
+            logger.warning(f"{log_prefix} 按路径通知 Emby 更新失败: 新增/变更 {len(created_paths)} 个目录")
+    if deleted_paths:
+        if client.notify_media_updates(deleted_paths, update_type="Deleted"):
+            logger.info(f"{log_prefix} 已按路径通知 Emby 删除: {len(deleted_paths)} 个目录")
+        else:
+            logger.warning(f"{log_prefix} 按路径通知 Emby 删除失败: {len(deleted_paths)} 个目录")
 
 
 def _read_json(path, default):
@@ -85,10 +99,22 @@ def _recognize_entries(importer, entry_keys, entry_to_raw):
         raw = entry_to_raw.get(key)
         if not raw:
             continue
-        matched = importer._process_items_with_precision([raw])
+        matched = _recognize_raw_entry(importer, raw)
         if matched:
             recognized_map[key] = matched
     return recognized_map
+
+
+def _recognize_raw_entry(importer, raw):
+    tmdb_id = str((raw or {}).get('tmdb_id') or '').strip()
+    if tmdb_id:
+        return [{
+            'tmdb_id': tmdb_id,
+            'type': (raw or {}).get('type') or 'Movie',
+            'title': (raw or {}).get('title') or '',
+            'year': (raw or {}).get('year') or '',
+        }]
+    return importer._process_items_with_precision([raw])
 
 
 def _flatten_items(entry_tmdb_map, active_entry_keys):
@@ -102,6 +128,160 @@ def _flatten_items(entry_tmdb_map, active_entry_keys):
             seen.add(dedupe_key)
             items.append(item)
     return items
+
+
+def _normalize_tmdb_id(value) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_media_type(value) -> str:
+    text = str(value or "").strip()
+    if text in {"Series", "Episode", "Season", "tv", "tvshows", "series"}:
+        return "Series"
+    return "Movie"
+
+
+def _task_accepts_media_type(task: dict, media_type: str) -> bool:
+    content_type = str(task.get('content_type') or 'movies')
+    is_series_task = content_type in {'tv', 'tvshows', 'series', 'Season', 'Episode'}
+    return is_series_task if media_type == "Series" else not is_series_task
+
+
+def _filter_items_by_tmdb(items: list[dict], tmdb_id: str, media_type: str) -> list[dict]:
+    target_tmdb = _normalize_tmdb_id(tmdb_id)
+    target_type = _normalize_media_type(media_type)
+    matches = []
+    seen = set()
+    for item in items or []:
+        if _normalize_tmdb_id(item.get('tmdb_id')) != target_tmdb:
+            continue
+        if _normalize_media_type(item.get('type')) != target_type:
+            continue
+        key = f"{item.get('type')}-{item.get('tmdb_id')}-{item.get('season')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(item)
+    return matches
+
+
+def _find_rss_matches_for_tmdb(task: dict, importer: UniversalImporter, tmdb_id: str, media_type: str):
+    raw_items = importer._get_from_rss(
+        task['rss_url'],
+        default_type='Series' if media_type == "Series" else 'Movie',
+    )
+    current_entries, entry_to_raw = _collect_current_entries(raw_items)
+    entry_tmdb_map = task.get('entry_tmdb_map') or {}
+    if not isinstance(entry_tmdb_map, dict):
+        entry_tmdb_map = {}
+
+    stale_entries = set(entry_tmdb_map.keys()) - current_entries
+    for entry_key in stale_entries:
+        entry_tmdb_map.pop(entry_key, None)
+
+    mapped_items = _flatten_items(entry_tmdb_map, sorted(list(current_entries)))
+    matches = _filter_items_by_tmdb(mapped_items, tmdb_id, media_type)
+
+    recognized_changed = bool(stale_entries)
+    if not matches:
+        missing_entries = [key for key in sorted(list(current_entries)) if key not in entry_tmdb_map]
+        for entry_key in missing_entries:
+            raw = entry_to_raw.get(entry_key)
+            if not raw:
+                continue
+            matched = _recognize_raw_entry(importer, raw)
+            if matched:
+                entry_tmdb_map[entry_key] = matched
+                recognized_changed = True
+                matches = _filter_items_by_tmdb(matched, tmdb_id, media_type)
+                if matches:
+                    break
+
+    return matches, current_entries, entry_tmdb_map, recognized_changed
+
+
+def sync_webhook_rss_item(tmdb_id: str, media_type: str, server_idx: int | None = None) -> dict:
+    tmdb_id = _normalize_tmdb_id(tmdb_id)
+    media_type = _normalize_media_type(media_type)
+    if not tmdb_id:
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    tasks = _read_json(RSS_TASKS_FILE, [])
+    config = _read_json(RSS_CONFIG_FILE, {})
+    link_root_base = config.get('link_root')
+    settings = _read_json(CONFIG_FILE, {})
+    tmdb_key = settings.get('tmdb_key', '')
+    proxy_url = settings.get('proxy_url', '')
+
+    if not isinstance(tasks, list) or not link_root_base:
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    matched_count = 0
+    synced_count = 0
+    notified_count = 0
+    state_changed = False
+
+    for task in tasks:
+        if not task.get('enabled', True):
+            continue
+        if server_idx is not None and int(task.get('target_server_idx', 0) or 0) != int(server_idx):
+            continue
+        if not _task_accepts_media_type(task, media_type):
+            continue
+
+        try:
+            importer = UniversalImporter(tmdb_api_key=tmdb_key, proxy_url=proxy_url)
+            matches, current_entries, entry_tmdb_map, recognized_changed = _find_rss_matches_for_tmdb(
+                task,
+                importer,
+                tmdb_id,
+                media_type,
+            )
+            if recognized_changed:
+                task['last_entries'] = sorted(list(current_entries))
+                task['entry_tmdb_map'] = entry_tmdb_map
+                task['last_sync_at'] = time.time()
+                state_changed = True
+
+            if not matches:
+                continue
+
+            server = get_emby_config_by_index_sync(task.get('target_server_idx', 0))
+            if not server or not server.get('enabled', True):
+                continue
+
+            matched_count += len(matches)
+            current_link_root = os.path.join(link_root_base, task['name'])
+            client = EmbyClient(server['url'], server['key'], server.get('public_host'))
+            try:
+                linker = HardLinkManager(current_link_root)
+                synced = linker.sync_items(matches, client, cleanup_stale=False)
+                synced_count += synced
+                if synced > 0:
+                    target_lib_id, _ = client.ensure_library_exists(
+                        name=task['name'],
+                        path=current_link_root,
+                        collection_type=task.get('content_type', 'movies'),
+                        refresh_on_path_add=False,
+                    )
+                    if target_lib_id:
+                        paths = getattr(linker, "last_synced_dirs", [])
+                        _notify_emby_path_updates(client, paths, [], "[RSS Webhook]")
+                        notified_count += len(paths or [])
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"[RSS Webhook] 增量同步失败: task={task.get('name') or task.get('id')} tmdb={tmdb_id} error={e}")
+
+    if state_changed:
+        _save_rss_tasks(tasks)
+
+    if matched_count:
+        logger.info(f"[RSS Webhook] 命中 RSS 条目并增量同步: TMDB={tmdb_id} type={media_type} matched={matched_count} synced={synced_count}")
+    return {"matched": matched_count, "synced": synced_count, "notified": notified_count}
 
 
 # ==========================================
@@ -204,23 +384,25 @@ def execute_rss_job(task_id):
 
         logger.info(f"[RSS] 同步完成: 成功链接 {success_count} 项")
 
-        update_task_progress(run_id, "刷新 Emby 媒体库...", 90, "running")
+        update_task_progress(run_id, "通知 Emby 更新媒体目录...", 90, "running")
 
         c_type = task.get('content_type', 'movies')
         target_lib_id, _ = client.ensure_library_exists(
             name=target_dir_name,
             path=current_link_root,
-            collection_type=c_type
+            collection_type=c_type,
+            refresh_on_path_add=False,
         )
 
         if target_lib_id:
-            client.refresh_library(target_lib_id)
-            try:
-                refresh_server_libraries(task['target_server_idx'])
-            except Exception:
-                pass
+            _notify_emby_path_updates(
+                client,
+                getattr(linker, "last_synced_dirs", []),
+                getattr(linker, "last_removed_dirs", []),
+                "[RSS]",
+            )
         else:
-            logger.warning("[RSS] 无法获取/创建库 ID，跳过刷新")
+            logger.warning("[RSS] 无法获取/创建库 ID，跳过 Emby 路径通知")
 
         _update_task_runtime_state(task_id, current_entries, entry_tmdb_map)
         update_task_progress(run_id, f"完成 (同步 {success_count} 项)", 100, "finished")

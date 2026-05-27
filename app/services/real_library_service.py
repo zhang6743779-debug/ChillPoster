@@ -23,6 +23,21 @@ REAL_LIBRARY_JOB_QUEUE: queue.Queue[Any] = queue.Queue()
 RUNTIME_STATE_KEYS = {"last_entries", "entry_tmdb_map", "last_sync_at"}
 
 
+def _notify_emby_path_updates(client: EmbyClient, created_paths: list[str], deleted_paths: list[str], log_prefix: str):
+    created_paths = [path for path in created_paths or [] if path]
+    deleted_paths = [path for path in deleted_paths or [] if path]
+    if created_paths:
+        if client.notify_media_updates(created_paths, update_type="Created"):
+            logger.info(f"{log_prefix} 已按路径通知 Emby 更新: 新增/变更 {len(created_paths)} 个目录")
+        else:
+            logger.warning(f"{log_prefix} 按路径通知 Emby 更新失败: 新增/变更 {len(created_paths)} 个目录")
+    if deleted_paths:
+        if client.notify_media_updates(deleted_paths, update_type="Deleted"):
+            logger.info(f"{log_prefix} 已按路径通知 Emby 删除: {len(deleted_paths)} 个目录")
+        else:
+            logger.warning(f"{log_prefix} 按路径通知 Emby 删除失败: {len(deleted_paths)} 个目录")
+
+
 def _read_json(path: str, default: Any):
     if not os.path.exists(path):
         return default
@@ -126,10 +141,22 @@ def _recognize_entries(importer, entry_keys, entry_to_raw):
         raw = entry_to_raw.get(key)
         if not raw:
             continue
-        matched = importer._process_items_with_precision([raw])
+        matched = _recognize_raw_entry(importer, raw)
         if matched:
             recognized_map[key] = matched
     return recognized_map
+
+
+def _recognize_raw_entry(importer, raw):
+    tmdb_id = str((raw or {}).get("tmdb_id") or "").strip()
+    if tmdb_id:
+        return [{
+            "tmdb_id": tmdb_id,
+            "type": (raw or {}).get("type") or "Movie",
+            "title": (raw or {}).get("title") or "",
+            "year": (raw or {}).get("year") or "",
+        }]
+    return importer._process_items_with_precision([raw])
 
 
 def _flatten_items(entry_tmdb_map, active_entry_keys):
@@ -143,6 +170,76 @@ def _flatten_items(entry_tmdb_map, active_entry_keys):
             seen.add(dedupe_key)
             items.append(item)
     return items
+
+
+def _normalize_tmdb_id(value) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_media_type(value) -> str:
+    text = str(value or "").strip()
+    if text in {"Series", "Episode", "Season", "tv", "tvshows", "series"}:
+        return "Series"
+    return "Movie"
+
+
+def _task_accepts_media_type(task: dict, media_type: str) -> bool:
+    content_type = str(task.get("content_type") or "movies")
+    is_series_task = content_type in {"tv", "tvshows", "series", "Season", "Episode"}
+    return is_series_task if media_type == "Series" else not is_series_task
+
+
+def _filter_items_by_tmdb(items: list[dict], tmdb_id: str, media_type: str) -> list[dict]:
+    target_tmdb = _normalize_tmdb_id(tmdb_id)
+    target_type = _normalize_media_type(media_type)
+    matches = []
+    seen = set()
+    for item in items or []:
+        if _normalize_tmdb_id(item.get("tmdb_id")) != target_tmdb:
+            continue
+        if _normalize_media_type(item.get("type")) != target_type:
+            continue
+        key = f"{item.get('type')}-{item.get('tmdb_id')}-{item.get('season')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        matches.append(item)
+    return matches
+
+
+def _find_rss_matches_for_tmdb(task: dict, importer: UniversalImporter, tmdb_id: str, media_type: str):
+    raw_items = importer._get_from_rss(
+        task["rss_url"],
+        default_type="Series" if media_type == "Series" else "Movie",
+    )
+    current_entries, entry_to_raw = _collect_current_entries(raw_items)
+    entry_tmdb_map = task.get("entry_tmdb_map") or {}
+    if not isinstance(entry_tmdb_map, dict):
+        entry_tmdb_map = {}
+
+    stale_entries = set(entry_tmdb_map.keys()) - current_entries
+    for entry_key in stale_entries:
+        entry_tmdb_map.pop(entry_key, None)
+
+    mapped_items = _flatten_items(entry_tmdb_map, sorted(list(current_entries)))
+    matches = _filter_items_by_tmdb(mapped_items, tmdb_id, media_type)
+
+    recognized_changed = bool(stale_entries)
+    if not matches:
+        missing_entries = [key for key in sorted(list(current_entries)) if key not in entry_tmdb_map]
+        for entry_key in missing_entries:
+            raw = entry_to_raw.get(entry_key)
+            if not raw:
+                continue
+            matched = _recognize_raw_entry(importer, raw)
+            if matched:
+                entry_tmdb_map[entry_key] = matched
+                recognized_changed = True
+                matches = _filter_items_by_tmdb(matched, tmdb_id, media_type)
+                if matches:
+                    break
+
+    return matches, current_entries, entry_tmdb_map, recognized_changed
 
 
 def _normalize_slash_path(path: str) -> str:
@@ -316,6 +413,95 @@ def validate_paths(config: dict) -> dict:
     return {"status": status, "checks": checks}
 
 
+def sync_webhook_real_library_item(tmdb_id: str, media_type: str) -> dict:
+    tmdb_id = _normalize_tmdb_id(tmdb_id)
+    media_type = _normalize_media_type(media_type)
+    if not tmdb_id:
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    config = load_config()
+    if not config.get("enabled", True):
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    link_root_base = str(config.get("link_root") or "").strip()
+    if not link_root_base:
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    client = _build_emby_client(config)
+    if not client:
+        return {"matched": 0, "synced": 0, "notified": 0}
+
+    tasks = load_tasks()
+    matched_count = 0
+    synced_count = 0
+    notified_count = 0
+    state_changed = False
+
+    try:
+        mapped_client = SourceMappedEmbyClient(client, str(config.get("source_root") or "").strip())
+        tmdb_key = str(config.get("tmdb_key") or "").strip()
+        proxy_url = str(config.get("proxy_url") or "").strip()
+
+        for task in tasks:
+            if not task.get("enabled", True):
+                continue
+            if not _task_accepts_media_type(task, media_type):
+                continue
+
+            try:
+                importer = UniversalImporter(tmdb_api_key=tmdb_key, proxy_url=proxy_url)
+                matches, current_entries, entry_tmdb_map, recognized_changed = _find_rss_matches_for_tmdb(
+                    task,
+                    importer,
+                    tmdb_id,
+                    media_type,
+                )
+                if recognized_changed:
+                    task["last_entries"] = sorted(list(current_entries))
+                    task["entry_tmdb_map"] = entry_tmdb_map
+                    task["last_sync_at"] = time.time()
+                    state_changed = True
+
+                if not matches:
+                    continue
+
+                matched_count += len(matches)
+                current_link_root = os.path.join(link_root_base, task["name"])
+                linker = HardLinkManager(current_link_root)
+                synced = linker.sync_items(matches, mapped_client, cleanup_stale=False)
+                synced_count += synced
+                if synced <= 0:
+                    continue
+
+                target_lib_id, _ = client.ensure_library_exists(
+                    name=task["name"],
+                    path=current_link_root,
+                    collection_type=task.get("content_type", "movies"),
+                    refresh_on_path_add=False,
+                )
+                if target_lib_id:
+                    paths = getattr(linker, "last_synced_dirs", [])
+                    _notify_emby_path_updates(client, paths, [], "[RealLibrary Webhook]")
+                    notified_count += len(paths or [])
+            except Exception as e:
+                logger.warning(f"[RealLibrary Webhook] 增量同步失败: task={task.get('name') or task.get('id')} tmdb={tmdb_id} error={e}")
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+    if state_changed:
+        save_tasks(tasks)
+
+    if matched_count:
+        logger.info(
+            f"[RealLibrary Webhook] 命中 RSS 条目并增量同步: "
+            f"TMDB={tmdb_id} type={media_type} matched={matched_count} synced={synced_count}"
+        )
+    return {"matched": matched_count, "synced": synced_count, "notified": notified_count}
+
+
 def execute_real_library_job(task_id: str, run_id: str | None = None):
     logger.info(f"[RealLibrary] 开始执行任务: {task_id}")
     run_id = run_id or f"real_library_run_{task_id}_{int(time.time())}"
@@ -415,16 +601,22 @@ def execute_real_library_job(task_id: str, run_id: str | None = None):
             )
             return
 
-        update_task_progress(run_id, "刷新 Emby 媒体库", 90, "running")
+        update_task_progress(run_id, "通知 Emby 更新媒体目录", 90, "running")
         target_lib_id, _ = client.ensure_library_exists(
             name=task["name"],
             path=current_link_root,
             collection_type=task.get("content_type", "movies"),
+            refresh_on_path_add=False,
         )
         if target_lib_id:
-            client.refresh_library(target_lib_id)
+            _notify_emby_path_updates(
+                client,
+                getattr(linker, "last_synced_dirs", []),
+                getattr(linker, "last_removed_dirs", []),
+                "[RealLibrary]",
+            )
         else:
-            logger.warning("[RealLibrary] 无法获取或创建 Emby 媒体库，跳过刷新")
+            logger.warning("[RealLibrary] 无法获取或创建 Emby 媒体库，跳过路径通知")
 
         _update_task_runtime_state(task_id, current_entries, entry_tmdb_map)
         update_task_progress(run_id, f"完成: 已同步 {success_count} 项", 100, "finished")

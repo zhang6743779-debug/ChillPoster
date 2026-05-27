@@ -24,6 +24,7 @@ from app.routers.config_302 import get_config_302
 from app.services.wechat_service import wechat_notify_service
 from app.services.telegram_service import telegram_notify_service
 from core.logger import logger
+from app.services.realtime_events import publish_realtime_event
 
 _115_READ_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS = 10
@@ -607,12 +608,18 @@ class Drive115Service:
     def update_playback_topology_sessions(self, emby_index: int, emby_cfg: dict, sessions: list):
         idx = int(emby_index or 0)
         safe_sessions = sessions if isinstance(sessions, list) else []
+        active_count = len([sess for sess in safe_sessions if isinstance(sess, dict) and self._session_now_playing_item_id(sess)])
         self._topology_sessions[idx] = {
             "sessions": safe_sessions,
             "emby_cfg": dict(emby_cfg or {}),
             "updated_at": time.time(),
         }
-        if self._has_active_playback_sessions(safe_sessions):
+        publish_realtime_event("playback_topology_updated", {
+            "emby_index": idx,
+            "emby_name": (emby_cfg or {}).get("name") or f"Emby[{idx}]",
+            "active_sessions": active_count,
+        })
+        if active_count:
             self._ensure_topology_polling(idx)
 
     def _ensure_topology_polling(self, emby_index: int):
@@ -658,6 +665,13 @@ class Drive115Service:
         except Exception as e:
             logger.debug(f"[Topology] 刷新 Emby Sessions 失败: {type(e).__name__} {repr(e)}")
         return []
+
+    async def refresh_playback_topology_from_emby_async(self, emby_index: int, emby_cfg: dict, delay: float = 0.0) -> int:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        sessions = await self._fetch_topology_emby_sessions(emby_cfg)
+        self.update_playback_topology_sessions(emby_index, emby_cfg, sessions)
+        return len([sess for sess in sessions if isinstance(sess, dict) and self._session_now_playing_item_id(sess)])
 
     def _format_topology_time(self, ticks) -> str:
         try:

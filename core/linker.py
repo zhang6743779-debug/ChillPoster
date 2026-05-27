@@ -24,22 +24,28 @@ class HardLinkManager:
 
     def __init__(self, link_root: str):
         self.link_root = link_root
+        self.last_synced_dirs: List[str] = []
+        self.last_removed_dirs: List[str] = []
         if not os.path.exists(self.link_root):
             try:
                 os.makedirs(self.link_root)
             except Exception as e:
                 logger.error(f"无法创建根目录 {self.link_root}: {e}")
 
-    def sync_items(self, items: List[Dict], emby_client) -> int:
+    def sync_items(self, items: List[Dict], emby_client, cleanup_stale: bool = True) -> int:
         """
         执行同步的主入口
         """
         logger.info(f"开始同步 {len(items)} 个项目到: {self.link_root}")
+        self.last_synced_dirs = []
+        self.last_removed_dirs = []
         
         # --- [熔断保护预检查] ---
         skip_cleanup = False
         if len(items) == 0:
             logger.warning("  [熔断警告] 本次同步列表为空！为防止误删，将跳过清理(Cleanup)步骤。")
+            skip_cleanup = True
+        if not cleanup_stale:
             skip_cleanup = True
 
         active_folders = set()
@@ -86,6 +92,7 @@ class HardLinkManager:
             # 3. 执行硬链接
             try:
                 if self._process_link(source_path, target_dir):
+                    self.last_synced_dirs.append(os.path.normpath(target_dir))
                     success_count += 1
             except Exception as e:
                 logger.error(f"  [错误] 链接失败 {title}: {e}")
@@ -100,7 +107,9 @@ class HardLinkManager:
 
         # 4. 过期清理
         if not skip_cleanup:
-            self._cleanup_stale_folders(active_folders)
+            self.last_removed_dirs = self._cleanup_stale_folders(active_folders)
+        elif not cleanup_stale:
+            logger.info("  [增量同步] 跳过榜单过期目录清理。")
         else:
             logger.info("  [熔断生效] 跳过清理步骤，现有硬链接已保留。")
 
@@ -179,7 +188,9 @@ class HardLinkManager:
             return False
 
     def _cleanup_stale_folders(self, active_folders: Set[str]):
-        if not os.path.exists(self.link_root): return
+        removed_dirs = []
+        if not os.path.exists(self.link_root):
+            return removed_dirs
 
         current_dirs = [d for d in os.listdir(self.link_root) if os.path.isdir(os.path.join(self.link_root, d))]
         
@@ -189,8 +200,10 @@ class HardLinkManager:
                 logger.info(f"  [清理] 榜单已移除，删除本地硬链: {d}")
                 try:
                     shutil.rmtree(full_path)
+                    removed_dirs.append(os.path.normpath(full_path))
                 except Exception as e:
                     logger.error(f"  [清理失败] {d}: {e}")
+        return removed_dirs
 
     def _check_same_filesystem(self, path1, path2):
         try:

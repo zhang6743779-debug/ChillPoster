@@ -760,7 +760,7 @@ class EmbyClient:
             logger.warning(f"批量获取媒体库剧集集数失败 (Library:{library_id}): {e}")
             return {}
 
-    def ensure_library_exists(self, name, path, collection_type="movies", enable_scrapers=False):
+    def ensure_library_exists(self, name, path, collection_type="movies", enable_scrapers=False, refresh_on_path_add=True):
         """
         自动建库逻辑 - 返回 (lib_id, is_new)。is_new=True 表示新建的库。
         """
@@ -782,7 +782,7 @@ class EmbyClient:
                 logger.warning(f"检查库路径失败，将尝试直接添加: {e}")
 
             try:
-                params = { "Name": name, "Path": path, "Refresh": "true" }
+                params = { "Name": name, "Path": path, "Refresh": "true" if refresh_on_path_add else "false" }
                 self._request("POST", "emby/Library/VirtualFolders/Paths", params=params)
             except: pass
             return target_lib['id'], False
@@ -1148,15 +1148,32 @@ class EmbyClient:
         path = str(path or "").strip()
         if not path:
             return False
+        return self.notify_media_updates([path], update_type=update_type)
+
+    def notify_media_updates(self, paths, update_type="Created"):
+        updates = []
+        seen = set()
+        for path in paths or []:
+            path = str(path or "").strip()
+            if not path:
+                continue
+            key = path.replace("\\", "/").rstrip("/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            updates.append({"Path": path, "UpdateType": update_type or "Created"})
+
+        if not updates:
+            return False
         try:
             self._request(
                 "POST",
                 "emby/Library/Media/Updated",
-                json={"Updates": [{"Path": path, "UpdateType": update_type or "Created"}]},
+                json={"Updates": updates},
             )
             return True
         except Exception as e:
-            logger.warning(f"通知 Emby 路径更新失败: {path} | {e}")
+            logger.warning(f"通知 Emby 路径更新失败: {len(updates)} 个路径 | {e}")
             return False
 
     def _parse_emby_datetime(self, value):

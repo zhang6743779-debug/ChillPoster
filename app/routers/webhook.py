@@ -2,15 +2,18 @@
 import os
 import json
 import re
+import asyncio
+import threading
 from fastapi import APIRouter, Request, HTTPException
 
 from app.schemas import WebhookConfigModel
 from app.dependencies import webhook_debouncer
 from app.routers.config_302 import get_emby_configs_sync
+from app.services.drive115_service import drive115_service
 from app.services.task_service import execute_task_logic
 from app.services.webhook_queue import enqueue_webhook_payload, get_webhook_queue_stats
 from app.services.wechat_service import wechat_notify_service
-from core.configs import WEBHOOK_CONFIG_FILE
+from core.configs import RSS_CONFIG_FILE, RSS_TASKS_FILE, WEBHOOK_CONFIG_FILE
 from core.emby_client import EmbyClient
 from core.logger import logger
 
@@ -38,6 +41,9 @@ def _is_emby_test_notification(data: dict) -> bool:
         return False
     values = [
         data.get("Event"),
+        data.get("NotificationType"),
+        data.get("EventType"),
+        data.get("Type"),
         data.get("Title"),
         data.get("Description"),
         data.get("Name"),
@@ -46,9 +52,95 @@ def _is_emby_test_notification(data: dict) -> bool:
     text = " ".join(str(value or "") for value in values).lower()
     if "test" in text or "测试" in text:
         return True
-    if not data.get("Item") and not data.get("Event"):
+    has_event_name = any(str(data.get(key) or "").strip() for key in ("Event", "NotificationType", "EventType", "Type"))
+    if not data.get("Item") and not has_event_name:
         return True
     return False
+
+
+PLAYBACK_TOPOLOGY_EVENTS = {
+    "playback.start",
+    "playback.pause",
+    "playback.unpause",
+    "playback.stop",
+    "playback.resume",
+    "playbackprogress",
+    "playback.starting",
+}
+
+
+def _normalize_webhook_event_name(event_type: str) -> str:
+    return re.sub(r"[\s_\-]+", ".", str(event_type or "").strip().lower())
+
+
+def _extract_webhook_event_type(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for key in ("Event", "NotificationType", "EventType", "Type"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _is_playback_topology_event(event_type: str) -> bool:
+    normalized = _normalize_webhook_event_name(event_type)
+    if normalized in PLAYBACK_TOPOLOGY_EVENTS:
+        return True
+    compact = normalized.replace(".", "")
+    return compact in {
+        "playbackstart",
+        "playbackpause",
+        "playbackunpause",
+        "playbackresume",
+        "playbackstop",
+    }
+
+
+async def _refresh_playback_topology_for_webhook(event_type: str, delay: float = 0.0) -> int:
+    refreshed = 0
+    servers = get_emby_configs_sync()
+    tasks = []
+    for svr_idx, svr in enumerate(servers):
+        if not isinstance(svr, dict) or not svr.get("enabled", True):
+            continue
+        if not str(svr.get("url") or "").strip() or not str(svr.get("key") or "").strip():
+            continue
+        tasks.append(
+            drive115_service.refresh_playback_topology_from_emby_async(
+                svr_idx,
+                svr,
+                delay=delay,
+            )
+        )
+    if not tasks:
+        return 0
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.debug(f"[Webhook] 播放拓扑刷新失败: event={event_type} error={result}")
+            continue
+        refreshed += 1
+    return refreshed
+
+
+def _schedule_playback_topology_refresh(event_type: str):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        threading.Thread(
+            target=lambda: asyncio.run(_refresh_playback_topology_for_webhook(event_type, delay=0)),
+            name="webhook-playback-topology-refresh",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=lambda: asyncio.run(_refresh_playback_topology_for_webhook(event_type, delay=1.0)),
+            name="webhook-playback-topology-refresh-delayed",
+            daemon=True,
+        ).start()
+        return
+    loop.create_task(_refresh_playback_topology_for_webhook(event_type, delay=0))
+    loop.create_task(_refresh_playback_topology_for_webhook(event_type, delay=1.0))
 
 
 def _extract_tmdb_id_from_webhook_item(item_data: dict) -> str:
@@ -62,6 +154,125 @@ def _extract_tmdb_id_from_webhook_item(item_data: dict) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def _normalize_path_for_compare(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").rstrip("/").lower()
+
+
+def _load_json_file(path: str, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _get_real_library_webhook_filter() -> tuple[list[str], set[str]]:
+    roots = []
+    names = set()
+
+    rss_cfg = _load_json_file(RSS_CONFIG_FILE, {})
+    if isinstance(rss_cfg, dict) and rss_cfg.get("link_root"):
+        roots.append(str(rss_cfg.get("link_root") or ""))
+
+    rss_tasks = _load_json_file(RSS_TASKS_FILE, [])
+    if isinstance(rss_tasks, list):
+        for task in rss_tasks:
+            name = str((task or {}).get("name") or "").strip()
+            if name:
+                names.add(name)
+
+    try:
+        from app.services.real_library_service import load_config as load_real_library_config
+        from app.services.real_library_service import load_tasks as load_real_library_tasks
+
+        real_cfg = load_real_library_config()
+        if isinstance(real_cfg, dict) and real_cfg.get("link_root"):
+            roots.append(str(real_cfg.get("link_root") or ""))
+        for task in load_real_library_tasks():
+            name = str((task or {}).get("name") or "").strip()
+            if name:
+                names.add(name)
+    except Exception as e:
+        logger.debug(f"[Webhook] 读取真实库过滤配置失败: {e}")
+
+    norm_roots = []
+    seen_roots = set()
+    for root in roots:
+        norm = _normalize_path_for_compare(root)
+        if norm and norm not in seen_roots:
+            seen_roots.add(norm)
+            norm_roots.append(norm)
+    return norm_roots, names
+
+
+def _is_real_library_webhook_source(item_path: str = "", library_name: str = "") -> bool:
+    roots, names = _get_real_library_webhook_filter()
+    norm_item_path = _normalize_path_for_compare(item_path)
+    if norm_item_path:
+        for root in roots:
+            if norm_item_path == root or norm_item_path.startswith(root + "/"):
+                return True
+    return bool(library_name and library_name in names)
+
+
+def _extract_webhook_media_identity(client: EmbyClient, item_data: dict, target_item_id: str | None) -> tuple[str, str]:
+    item_type = str(item_data.get("Type") or "")
+    lookup_id = str(target_item_id or "")
+    media_type = ""
+
+    if item_type == "Episode":
+        lookup_id = str(item_data.get("SeriesId") or "")
+        media_type = "Series"
+    elif item_type == "Series":
+        media_type = "Series"
+    elif item_type == "Movie":
+        media_type = "Movie"
+    else:
+        return "", ""
+
+    tmdb_id = ""
+    if item_type != "Episode":
+        tmdb_id = _extract_tmdb_id_from_webhook_item(item_data)
+
+    if not tmdb_id and lookup_id:
+        try:
+            item_info = client.get_item_info(lookup_id)
+            tmdb_id = str((item_info or {}).get("tmdb_id") or "").strip()
+        except Exception as e:
+            logger.debug(f"[Webhook] 读取入库媒体 TMDB 失败: item={lookup_id} error={e}")
+
+    return tmdb_id, media_type
+
+
+def _sync_real_libraries_for_webhook_item(client: EmbyClient, item_data: dict, target_item_id: str | None, server_idx: int) -> dict:
+    tmdb_id, media_type = _extract_webhook_media_identity(client, item_data, target_item_id)
+    if not tmdb_id or media_type not in {"Movie", "Series"}:
+        return {"tmdb_id": tmdb_id, "media_type": media_type, "rss": {}, "real_library": {}}
+
+    rss_result = {}
+    real_library_result = {}
+    try:
+        from app.services.rss_service import sync_webhook_rss_item
+        rss_result = sync_webhook_rss_item(tmdb_id, media_type, server_idx=server_idx)
+    except Exception as e:
+        logger.warning(f"[Webhook] RSS 真实库增量同步失败: TMDB={tmdb_id} type={media_type} error={e}")
+
+    try:
+        from app.services.real_library_service import sync_webhook_real_library_item
+        real_library_result = sync_webhook_real_library_item(tmdb_id, media_type)
+    except Exception as e:
+        logger.warning(f"[Webhook] 独立真实库增量同步失败: TMDB={tmdb_id} type={media_type} error={e}")
+
+    return {
+        "tmdb_id": tmdb_id,
+        "media_type": media_type,
+        "rss": rss_result,
+        "real_library": real_library_result,
+    }
 
 
 def _sync_missing_episode_stats_for_series(client: EmbyClient, matched_lib: dict, server_idx: int, series_id: str, series_info: dict | None = None) -> bool:
@@ -223,7 +434,7 @@ async def emby_webhook_trigger(request: Request):
     except Exception as e:
         return {"status": "error", "reason": f"Payload Error: {e}"}
 
-    event_type = data.get("Event", "")
+    event_type = _extract_webhook_event_type(data)
     item_data = data.get("Item", {}) if isinstance(data.get("Item", {}), dict) else {}
     target_item_id = item_data.get("Id")
 
@@ -234,6 +445,11 @@ async def emby_webhook_trigger(request: Request):
             f"description={str(data.get('Description', ''))[:120]}"
         )
         return {"status": "ok", "action": "emby_test_notification"}
+
+    if _is_playback_topology_event(event_type):
+        _schedule_playback_topology_refresh(event_type)
+        logger.info(f"[Webhook] 播放状态通知触发拓扑刷新: event={event_type}")
+        return {"status": "ok", "action": "playback_topology_refresh", "event": event_type}
 
     allowed_events = ["library.new", "item.added", "library.scan_complete"]
     delete_events = ["item.removed", "library.deleted", "deep.delete"]
@@ -254,7 +470,7 @@ def get_webhook_queue():
 
 
 def process_webhook_payload(data: dict):
-    event_type = data.get("Event", "")
+    event_type = _extract_webhook_event_type(data)
 
     if _is_emby_test_notification(data):
         logger.info(
@@ -263,6 +479,11 @@ def process_webhook_payload(data: dict):
             f"description={str(data.get('Description', ''))[:120]}"
         )
         return {"status": "ok", "action": "emby_test_notification"}
+
+    if _is_playback_topology_event(event_type):
+        _schedule_playback_topology_refresh(event_type)
+        logger.info(f"[Webhook] 队列收到播放状态通知，已触发拓扑刷新: event={event_type}")
+        return {"status": "ok", "action": "playback_topology_refresh", "event": event_type}
 
     wh_config = _default_webhook_config()
     if os.path.exists(WEBHOOK_CONFIG_FILE):
@@ -285,6 +506,13 @@ def process_webhook_payload(data: dict):
     item_data = data.get("Item", {})
     target_item_id = item_data.get("Id")
     item_path = item_data.get("Path") 
+
+    if event_type in allowed_events and _is_real_library_webhook_source(item_path):
+        logger.info(
+            "[Webhook] 忽略真实库自身入库事件，避免循环触发: "
+            f"type={item_data.get('Type', '')} name={item_data.get('Name', '')} path={item_path or ''}"
+        )
+        return {"status": "ignored", "reason": "real_library_self_webhook"}
 
     if event_type in delete_events:
         logger.info(
@@ -346,6 +574,7 @@ def process_webhook_payload(data: dict):
     servers = get_emby_configs_sync()
     stats_patched_count = 0
     discover_index_patched_count = 0
+    real_library_sync_results = []
 
     preset_name = wh_config.get("preset")
 
@@ -376,6 +605,13 @@ def process_webhook_payload(data: dict):
                     full_info = client._request("GET", f"emby/Items/{target_item_id}")
                     fetched_path = full_info.get("Path")
                     if fetched_path:
+                        item_path = fetched_path
+                        if _is_real_library_webhook_source(item_path):
+                            logger.info(
+                                "[Webhook] 忽略真实库自身入库事件，避免循环触发: "
+                                f"type={item_data.get('Type', '')} name={item_data.get('Name', '')} path={item_path or ''}"
+                            )
+                            return {"status": "ignored", "reason": "real_library_self_webhook"}
                         norm_fetched = fetched_path.replace('\\', '/')
                         matched_lib = next(
                             (lib for lib in server_libs if lib.get('paths') and 
@@ -385,6 +621,25 @@ def process_webhook_payload(data: dict):
                 except: pass
 
             if matched_lib:
+                if _is_real_library_webhook_source(item_path, matched_lib.get("name", "")):
+                    logger.info(
+                        "[Webhook] 忽略真实库自身入库事件，避免循环触发: "
+                        f"library={matched_lib.get('name', '')} type={item_data.get('Type', '')} "
+                        f"name={item_data.get('Name', '')} path={item_path or ''}"
+                    )
+                    return {"status": "ignored", "reason": "real_library_self_webhook"}
+
+                sync_result = _sync_real_libraries_for_webhook_item(client, item_data, target_item_id, svr_idx)
+                rss_synced = int((sync_result.get("rss") or {}).get("synced") or 0)
+                real_synced = int((sync_result.get("real_library") or {}).get("synced") or 0)
+                if rss_synced or real_synced:
+                    real_library_sync_results.append(sync_result)
+                    logger.info(
+                        "[Webhook] 已触发真实库入库增量同步: "
+                        f"TMDB={sync_result.get('tmdb_id') or ''} type={sync_result.get('media_type') or ''} "
+                        f"rss={rss_synced} real={real_synced}"
+                    )
+
                 item_type_for_stats = item_data.get("Type", "")
                 try:
                     series_id_for_stats = ""
@@ -626,6 +881,7 @@ def process_webhook_payload(data: dict):
             "targets_matched": len(targets),
             "stats_patched": stats_patched_count,
             "discover_index_patched": discover_index_patched_count,
+            "real_library_sync": real_library_sync_results,
             "reason": "No Preset Selected",
         }
 
@@ -636,6 +892,7 @@ def process_webhook_payload(data: dict):
             "targets_matched": len(targets),
             "stats_patched": stats_patched_count,
             "discover_index_patched": discover_index_patched_count,
+            "real_library_sync": real_library_sync_results,
         }
 
     mode = wh_config.get("mode", "random")
@@ -659,4 +916,5 @@ def process_webhook_payload(data: dict):
         "targets_debounced": triggered_count,
         "stats_patched": stats_patched_count,
         "discover_index_patched": discover_index_patched_count,
+        "real_library_sync": real_library_sync_results,
     }

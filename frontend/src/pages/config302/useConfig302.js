@@ -587,11 +587,12 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             try {
                 const res = await axios.get('/api/config_302/playback_topology');
                 const data = res.data || {};
+                const nextAccounts = Array.isArray(data.accounts) ? data.accounts : [];
                 playbackTopology.loaded = true;
                 playbackTopology.polling = !!data.polling;
                 playbackTopology.updated_at = data.updated_at || 0;
                 playbackTopology.total_sessions = data.total_sessions || 0;
-                playbackTopology.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+                playbackTopology.accounts = nextAccounts;
             } catch (e) {
                 playbackTopology.error = e.response?.data?.detail || e.message;
             } finally {
@@ -616,11 +617,11 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         const scheduleTopologyRefresh = () => {
             clearTopologyRefreshTimer();
             if (tab.value !== 'config_115') return;
-            if (!playbackTopology.polling && !playbackTopology.total_sessions) return;
+            const delay = (playbackTopology.polling || playbackTopology.total_sessions) ? 5000 : 10000;
             topologyRefreshTimer = setTimeout(async () => {
                 await fetchPlaybackTopology();
                 scheduleTopologyRefresh();
-            }, 30000);
+            }, delay);
         };
 
         watch(() => tab.value, async (value) => {
@@ -631,6 +632,29 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
                 clearTopologyRefreshTimer();
             }
         });
+
+        let topologyEventSource = null;
+        let topologyEventRefreshTimer = null;
+        const schedulePlaybackTopologyEventRefresh = () => {
+            if (tab.value !== 'config_115') return;
+            if (topologyEventRefreshTimer) clearTimeout(topologyEventRefreshTimer);
+            topologyEventRefreshTimer = setTimeout(async () => {
+                topologyEventRefreshTimer = null;
+                await fetchPlaybackTopology();
+                scheduleTopologyRefresh();
+            }, 250);
+        };
+        const setupPlaybackTopologyEvents = () => {
+            if (topologyEventSource || typeof EventSource === 'undefined') return;
+            topologyEventSource = new EventSource('/api/config_302/events');
+            topologyEventSource.addEventListener('playback_topology_updated', schedulePlaybackTopologyEventRefresh);
+            topologyEventSource.onerror = () => {
+                topologyEventSource.close();
+                topologyEventSource = null;
+                setTimeout(setupPlaybackTopologyEvents, 5000);
+            };
+        };
+        setupPlaybackTopologyEvents();
 
         // 保存 302 配置
         const save302Config = async () => {

@@ -1,13 +1,17 @@
 import os
 import json
 import base64
+import asyncio
+import queue
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Any
 from p115client import P115Client
 
 # [新增] 引入日志模块，用于打印配置状态
 from core.logger import logger
+from app.services.realtime_events import format_sse_event, subscribe_realtime_events
 from app.services.drive115_auth_probe import format_115_login_app_label, probe_115_cookie
 from app.services.media_organize_115_ops import _get_115_client, run_115_write_request_sync
 
@@ -21,6 +25,28 @@ CONFIG_FILE = "config/config_302.json"
 # ==========================================
 # 1. 定义数据模型 (顺序很重要)
 # ==========================================
+
+
+@router.get("/events")
+async def config_302_realtime_events():
+    async def event_generator():
+        with subscribe_realtime_events() as q:
+            yield "event: init\ndata: {}\n\n"
+            while True:
+                try:
+                    event = await asyncio.to_thread(q.get, True, 25)
+                    yield format_sse_event(event)
+                except queue.Empty:
+                    yield ": ping\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 # [第一步] 先定义基础配置类
 class Drive115Config(BaseModel):
