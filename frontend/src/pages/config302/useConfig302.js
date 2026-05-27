@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { computed, reactive } from 'vue';
+import { computed, reactive, watch } from 'vue';
 
 export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncServersFrom302, showToast, showConfirm, refreshLinkedConfigs }) {
         // ==========================================
@@ -49,6 +49,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             remote_root_name: '影视库',
 
             rapid_mode: 'auto',
+            rapid_concurrency_limit: 0,
             rapid_accounts: [],
 
             auto_delete: true,
@@ -112,6 +113,16 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             value: '',
             saving: false,
             error: ''
+        });
+
+        const playbackTopology = reactive({
+            loading: false,
+            loaded: false,
+            error: '',
+            polling: false,
+            updated_at: 0,
+            total_sessions: 0,
+            accounts: []
         });
 
         const defaultEmby302 = {
@@ -504,6 +515,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             ...drive,
             enable_standard_topology: true,
             remote_root_name: drive?.remote_root_name || '影视库',
+            rapid_concurrency_limit: Math.max(0, parseInt(drive?.rapid_concurrency_limit ?? 0, 10) || 0),
             testing: false,
             qr_loading: false,
             status: drive?.status || 'unknown',
@@ -516,6 +528,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             delete drive.qr_loading;
             drive.transfer_drive_index = 0;
             drive.enable_standard_topology = true;
+            drive.rapid_concurrency_limit = Math.max(0, parseInt(drive.rapid_concurrency_limit ?? 0, 10) || 0);
             drive.rapid_accounts = Array.isArray(drive.rapid_accounts)
                 ? drive.rapid_accounts.map((acc) => ({
                     name: acc?.name || '',
@@ -560,12 +573,64 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
                     ensureSingle302Emby();
                     syncServersFrom302();
                 }
+                fetchPlaybackTopology();
             } catch (e) {
                 ensureSingle302Drive();
                 ensureSingle302Emby();
                 syncServersFrom302();
             }
         };
+
+        const fetchPlaybackTopology = async () => {
+            playbackTopology.loading = true;
+            playbackTopology.error = '';
+            try {
+                const res = await axios.get('/api/config_302/playback_topology');
+                const data = res.data || {};
+                playbackTopology.loaded = true;
+                playbackTopology.polling = !!data.polling;
+                playbackTopology.updated_at = data.updated_at || 0;
+                playbackTopology.total_sessions = data.total_sessions || 0;
+                playbackTopology.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+            } catch (e) {
+                playbackTopology.error = e.response?.data?.detail || e.message;
+            } finally {
+                playbackTopology.loading = false;
+            }
+        };
+
+        const formatTopologyUpdatedAt = (timestamp) => {
+            if (!timestamp) return '尚未刷新';
+            const date = new Date(Number(timestamp) * 1000);
+            if (Number.isNaN(date.getTime())) return '尚未刷新';
+            return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        };
+
+        let topologyRefreshTimer = null;
+        const clearTopologyRefreshTimer = () => {
+            if (topologyRefreshTimer) {
+                clearTimeout(topologyRefreshTimer);
+                topologyRefreshTimer = null;
+            }
+        };
+        const scheduleTopologyRefresh = () => {
+            clearTopologyRefreshTimer();
+            if (tab.value !== 'config_115') return;
+            if (!playbackTopology.polling && !playbackTopology.total_sessions) return;
+            topologyRefreshTimer = setTimeout(async () => {
+                await fetchPlaybackTopology();
+                scheduleTopologyRefresh();
+            }, 30000);
+        };
+
+        watch(() => tab.value, async (value) => {
+            if (value === 'config_115') {
+                await fetchPlaybackTopology();
+                scheduleTopologyRefresh();
+            } else {
+                clearTopologyRefreshTimer();
+            }
+        });
 
         // 保存 302 配置
         const save302Config = async () => {
@@ -673,6 +738,9 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         closeManual115CookieDialog,
         saveManual115Cookie,
         manualCleanup115,
+        playbackTopology,
+        fetchPlaybackTopology,
+        formatTopologyUpdatedAt,
         build302Payload,
         fetch302Config,
         save302Config,

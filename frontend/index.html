@@ -3629,8 +3629,8 @@
                     </div>
 
                     <div v-else-if="tab === 'config_115'" key="config_115" class="scroll-view">
-                        <div class="content-shell shell-xxl">
-                            <div class="col-302">
+                        <div class="content-shell shell-xxl config-115-shell">
+                            <div class="col-302 config-115-board">
                             <div class="server-toolbar">
                                 <div class="server-toolbar-title">
                                     <i class="fa-solid fa-cloud toolbar-icon-cloud"></i>
@@ -3638,6 +3638,86 @@
                                 </div>
                                 <div class="server-toolbar-actions">
                                     <button class="btn btn-green btn-sm" @click="save302Config"><i class="fa-solid fa-save"></i> 保存配置</button>
+                                </div>
+                            </div>
+
+                            <div class="playback-topology-panel">
+                                <div class="playback-topology-header">
+                                    <div>
+                                        <div class="playback-topology-title"><i class="fa-solid fa-diagram-project"></i> 播放线路拓扑</div>
+                                        <div class="playback-topology-meta">
+                                            {{ playbackTopology.total_sessions || 0 }} 个播放会话 · {{ playbackTopology.polling ? '后台刷新中' : '空闲' }} · {{ formatTopologyUpdatedAt(playbackTopology.updated_at) }}
+                                        </div>
+                                    </div>
+                                    <button class="icon-btn" @click="fetchPlaybackTopology" :disabled="playbackTopology.loading" title="刷新拓扑">
+                                        <i class="fa-solid" :class="playbackTopology.loading ? 'fa-spinner fa-spin' : 'fa-rotate'"></i>
+                                    </button>
+                                </div>
+
+                                <div v-if="playbackTopology.error" class="topology-empty topology-error">
+                                    <i class="fa-solid fa-triangle-exclamation"></i>
+                                    {{ playbackTopology.error }}
+                                </div>
+
+                                <div v-else class="topology-tree-grid">
+                                    <div v-for="account in playbackTopology.accounts" :key="account.key" class="topology-tree-column">
+                                        <div class="topology-root-node">
+                                            <div class="topology-root-icon">
+                                                <i class="fa-solid" :class="account.type === 'main' ? 'fa-server' : 'fa-user-shield'"></i>
+                                            </div>
+                                            <div class="topology-root-text">
+                                                <div class="topology-root-name">{{ account.name }}</div>
+                                                <div class="topology-root-meta">{{ account.type === 'main' ? '主账号' : '秒传小号' }} · {{ account.sessions.length }} 路</div>
+                                            </div>
+                                        </div>
+
+                                        <div class="topology-trunk" :class="{'is-empty': !account.sessions.length}">
+                                            <div v-if="account.sessions.length" class="topology-branch-list">
+                                                <div v-for="session in account.sessions" :key="session.id" class="topology-play-card">
+                                                    <div class="topology-play-head">
+                                                        <div class="topology-poster">
+                                                            <img v-if="session.image_url" :src="session.image_url" :alt="session.title" loading="lazy">
+                                                            <i v-else class="fa-solid fa-film"></i>
+                                                        </div>
+                                                        <div class="topology-play-title-area">
+                                                            <div class="topology-play-title">{{ session.title }}</div>
+                                                            <div class="topology-play-year">{{ session.year || '' }}</div>
+                                                            <div class="topology-play-time">{{ session.position }} / {{ session.duration }}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="topology-progress">
+                                                        <span :style="{ width: (session.percent || 0) + '%' }"></span>
+                                                    </div>
+                                                    <div class="topology-info-row topology-device-row">
+                                                        <i class="fa-solid fa-display"></i>
+                                                        <div>
+                                                            <div>{{ session.client || '未知客户端' }}</div>
+                                                            <div>{{ session.device || '未知设备' }}</div>
+                                                            <div>{{ session.remote_endpoint || '' }}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="topology-info-row" v-if="session.media">
+                                                        <span>流媒体</span>
+                                                        <div>{{ session.media }}<br><b>→</b> {{ session.media_method || '直接播放' }}</div>
+                                                    </div>
+                                                    <div class="topology-info-row" v-if="session.video">
+                                                        <span>视频</span>
+                                                        <div>{{ session.video }}<br><b>→</b> {{ session.video_method || '直接播放' }}</div>
+                                                    </div>
+                                                    <div class="topology-info-row" v-if="session.audio">
+                                                        <span>音频</span>
+                                                        <div>{{ session.audio }}<br><b>→</b> {{ session.audio_method || '直接播放' }}</div>
+                                                    </div>
+                                                    <div class="topology-user-row">{{ session.user_name || '未知用户' }}</div>
+                                                </div>
+                                            </div>
+
+                                            <div v-else class="topology-empty">
+                                                <i class="fa-regular fa-circle"></i>
+                                                当前无播放
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
 
@@ -3699,6 +3779,11 @@
                                                         <span class="ios-slider"></span>
                                                     </label>
                                                     <span class="switch-row-label">启用秒传</span>
+                                                </div>
+                                                <div class="rapid-limit-field" title="单个小号允许同时承载的播放路数，0 表示不限制">
+                                                    <i class="fa-solid fa-gauge-high"></i>
+                                                    <span>小号并发</span>
+                                                    <input type="number" min="0" step="1" v-model.number="config302.drives[0].rapid_concurrency_limit">
                                                 </div>
                                             </div>
 

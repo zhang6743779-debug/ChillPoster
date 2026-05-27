@@ -64,6 +64,9 @@ class Drive115Service:
         # === [第五级缓存] Pickcode -> SHA1信息（用于秒传） ===
         self._sha1_cache = TTLCache(maxsize=1000, ttl=3600)  # SHA1 缓存
 
+        # === [秒传播放调度] 原始 Pickcode + Emby 用户 -> 小号线路 ===
+        self._rapid_assignments = TTLCache(maxsize=2000, ttl=7200)
+
         # === [小号池轮询计数器] ===
         self._rapid_account_index = 0  # 当前轮询到的账号索引
 
@@ -76,6 +79,8 @@ class Drive115Service:
         self._gateway_direct_url_queues: dict[int, asyncio.PriorityQueue] = {}
         self._gateway_direct_url_workers: dict[int, asyncio.Task] = {}
         self._last_gateway_direct_url_at: dict[int, float] = {}
+        self._topology_sessions: dict[int, dict] = {}
+        self._topology_poll_tasks: dict[int, asyncio.Task] = {}
 
         self._last_direct_url_batch_at = 0.0
 
@@ -470,10 +475,466 @@ class Drive115Service:
                 logger.warning(f"[115] {request_name_for_log}超时: 请求耗时={elapsed:.2f}s")
                 return {}
 
-    async def get_secondary_client(self):
+    def _rapid_assignment_key(self, pickcode: str, rapid_context: dict | None = None) -> str:
+        user_key = ""
+        if isinstance(rapid_context, dict):
+            user_key = str(rapid_context.get("user_key") or "").strip()
+        return f"{pickcode}:{user_key or 'global'}"
+
+    def _rapid_context_values(self, rapid_context: dict | None) -> tuple[str, str, str]:
+        if not isinstance(rapid_context, dict):
+            return "", "", ""
+        return (
+            str(rapid_context.get("user_key") or "").strip(),
+            str(rapid_context.get("user_name") or "").strip(),
+            str(rapid_context.get("item_id") or "").strip(),
+        )
+
+    def _remember_rapid_assignment(
+        self,
+        assignment_key: str,
+        *,
+        cache_ua: str,
+        rapid_url: str,
+        rapid_pickcode: str,
+        rapid_file_id: str | int | None,
+        rapid_cookie: str | None,
+        account_index,
+        account_name: str,
+        source_pickcode: str,
+        rapid_context: dict | None,
+    ) -> dict:
+        rapid_user_key, rapid_user_name, rapid_item_id = self._rapid_context_values(rapid_context)
+        assignment = {
+            "ua": cache_ua,
+            "url": rapid_url,
+            "pickcode": rapid_pickcode,
+            "file_id": rapid_file_id,
+            "cookie": rapid_cookie,
+            "account_index": account_index,
+            "account_name": account_name,
+            "user_key": rapid_user_key,
+            "user_name": rapid_user_name,
+            "item_id": rapid_item_id,
+            "source_pickcode": source_pickcode,
+            "updated_at": time.time(),
+        }
+        self._rapid_assignments[assignment_key] = assignment
+        return assignment
+
+    def _active_rapid_assignment_counts(self, rapid_accounts: list, rapid_context: dict | None = None) -> dict[int, int]:
+        active_user_keys = set()
+        active_item_ids = set()
+        if isinstance(rapid_context, dict):
+            active_user_keys = {
+                str(item or "").strip()
+                for item in (rapid_context.get("active_user_keys") or [])
+                if str(item or "").strip()
+            }
+            active_item_ids = {
+                str(item or "").strip()
+                for item in (rapid_context.get("active_item_ids") or [])
+                if str(item or "").strip()
+            }
+
+        if active_user_keys:
+            counts = {idx: 0 for idx in range(len(rapid_accounts))}
+            for assignment in self._rapid_assignments.values():
+                if not isinstance(assignment, dict):
+                    continue
+                user_key = str(assignment.get("user_key") or "").strip()
+                item_id = str(assignment.get("item_id") or "").strip()
+                account_index = assignment.get("account_index")
+                if user_key not in active_user_keys:
+                    continue
+                if active_item_ids and item_id and item_id not in active_item_ids:
+                    continue
+                try:
+                    account_index = int(account_index)
+                except (TypeError, ValueError):
+                    continue
+                if account_index in counts:
+                    counts[account_index] += 1
+            return counts
+        return {idx: 0 for idx in range(len(rapid_accounts))}
+
+    def _select_rapid_account_index(self, rapid_accounts: list, rapid_mode: str, rapid_context: dict | None = None, concurrency_limit: int = 0) -> int | None:
+        counts = self._active_rapid_assignment_counts(rapid_accounts, rapid_context)
+        limited = int(concurrency_limit or 0)
+        available = [
+            idx
+            for idx in range(len(rapid_accounts))
+            if limited <= 0 or counts.get(idx, 0) < limited
+        ]
+        if not available:
+            return None
+
+        if rapid_mode in [str(i) for i in range(len(rapid_accounts))]:
+            selected = int(rapid_mode)
+            return selected if selected in available else None
+
+        if counts:
+            min_count = min(counts.get(idx, 0) for idx in available)
+            candidates = [idx for idx in available if counts.get(idx, 0) == min_count]
+            return random.choice(candidates) if candidates else available[0]
+
+        if rapid_mode == "auto":
+            return random.choice(available)
+
+        return available[0]
+
+    def _topology_session_user_key(self, session: dict) -> str:
+        user_id = str((session or {}).get("UserId") or "").strip()
+        if user_id:
+            return f"user:{user_id}"
+        user_name = str((session or {}).get("UserName") or "").strip()
+        if user_name:
+            return f"name:{user_name}"
+        user = (session or {}).get("User")
+        if isinstance(user, dict):
+            user_name = str(user.get("Name") or user.get("UserName") or "").strip()
+            if user_name:
+                return f"name:{user_name}"
+        return ""
+
+    def _session_now_playing_item_id(self, session: dict) -> str:
+        item = (session or {}).get("NowPlayingItem") or {}
+        return str(item.get("Id") or "").strip() if isinstance(item, dict) else ""
+
+    def _has_active_playback_sessions(self, sessions: list) -> bool:
+        return any(self._session_now_playing_item_id(sess) for sess in (sessions or []) if isinstance(sess, dict))
+
+    def update_playback_topology_sessions(self, emby_index: int, emby_cfg: dict, sessions: list):
+        idx = int(emby_index or 0)
+        safe_sessions = sessions if isinstance(sessions, list) else []
+        self._topology_sessions[idx] = {
+            "sessions": safe_sessions,
+            "emby_cfg": dict(emby_cfg or {}),
+            "updated_at": time.time(),
+        }
+        if self._has_active_playback_sessions(safe_sessions):
+            self._ensure_topology_polling(idx)
+
+    def _ensure_topology_polling(self, emby_index: int):
+        task = self._topology_poll_tasks.get(emby_index)
+        if task is None or task.done():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._topology_poll_tasks[emby_index] = loop.create_task(
+                self._poll_topology_sessions(emby_index)
+            )
+
+    async def _poll_topology_sessions(self, emby_index: int):
+        while True:
+            await asyncio.sleep(300)
+            snapshot = self._topology_sessions.get(emby_index) or {}
+            emby_cfg = snapshot.get("emby_cfg") or {}
+            sessions = await self._fetch_topology_emby_sessions(emby_cfg)
+            self._topology_sessions[emby_index] = {
+                "sessions": sessions,
+                "emby_cfg": dict(emby_cfg or {}),
+                "updated_at": time.time(),
+            }
+            if not self._has_active_playback_sessions(sessions):
+                self._topology_poll_tasks.pop(emby_index, None)
+                return
+
+    async def _fetch_topology_emby_sessions(self, emby_cfg: dict) -> list:
+        base_url = str((emby_cfg or {}).get("url") or "").rstrip("/")
+        api_key = str((emby_cfg or {}).get("key") or "")
+        if not base_url or not api_key:
+            return []
+        try:
+            resp = await self._get_http_client().get(
+                f"{base_url}/emby/Sessions",
+                headers={"X-Emby-Token": api_key},
+                timeout=5.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json() or []
+                return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.debug(f"[Topology] 刷新 Emby Sessions 失败: {type(e).__name__} {repr(e)}")
+        return []
+
+    def _format_topology_time(self, ticks) -> str:
+        try:
+            total_seconds = int(float(ticks or 0) / 10_000_000)
+        except (TypeError, ValueError):
+            total_seconds = 0
+        if total_seconds <= 0:
+            return "0:00"
+        hours, rem = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    def _build_topology_image_url(self, emby_cfg: dict, item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        host = str((emby_cfg or {}).get("public_host") or (emby_cfg or {}).get("url") or "").rstrip("/")
+        item_id = str(item.get("Id") or "").strip()
+        if not host or not item_id:
+            return ""
+        backdrop_tags = item.get("BackdropImageTags") or []
+        if isinstance(backdrop_tags, list) and backdrop_tags:
+            return f"{host}/emby/Items/{item_id}/Images/Backdrop/0?tag={backdrop_tags[0]}&quality=90&maxWidth=640"
+        image_tags = item.get("ImageTags") or {}
+        if isinstance(image_tags, dict) and image_tags.get("Backdrop"):
+            return f"{host}/emby/Items/{item_id}/Images/Backdrop/0?tag={image_tags.get('Backdrop')}&quality=90&maxWidth=640"
+        if isinstance(image_tags, dict) and image_tags.get("Primary"):
+            return f"{host}/emby/Items/{item_id}/Images/Primary?tag={image_tags.get('Primary')}&quality=90&maxHeight=360"
+        return ""
+
+    def _topology_item_title(self, item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        item_type = item.get("Type")
+        if item_type == "Episode":
+            series = item.get("SeriesName") or item.get("Name") or "剧集"
+            season = item.get("ParentIndexNumber")
+            episode = item.get("IndexNumber")
+            suffix = ""
+            if season is not None and episode is not None:
+                suffix = f" S{season}E{episode}"
+            return f"{series}{suffix}"
+        return str(item.get("Name") or "").strip()
+
+    def _format_topology_bitrate(self, bitrate) -> str:
+        try:
+            value = int(float(bitrate or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            return ""
+        mbps = value / 1_000_000
+        if mbps >= 10:
+            return f"{mbps:.0f} mbps"
+        return f"{mbps:.1f}".rstrip("0").rstrip(".") + " mbps"
+
+    def _topology_media_streams(self, session: dict, item: dict) -> list:
+        streams = []
+        if isinstance(item, dict):
+            streams = item.get("MediaStreams") or []
+            if not streams:
+                sources = item.get("MediaSources") or []
+                if isinstance(sources, list) and sources:
+                    first_source = sources[0] if isinstance(sources[0], dict) else {}
+                    streams = first_source.get("MediaStreams") or []
+        if not streams and isinstance(session, dict):
+            source = session.get("NowPlayingItem") or {}
+            if isinstance(source, dict):
+                streams = source.get("MediaStreams") or []
+        return streams if isinstance(streams, list) else []
+
+    def _topology_media_source(self, item: dict) -> dict:
+        if not isinstance(item, dict):
+            return {}
+        sources = item.get("MediaSources") or []
+        if isinstance(sources, list) and sources:
+            source = sources[0]
+            return source if isinstance(source, dict) else {}
+        return {}
+
+    def _topology_stream_method(self, session: dict, stream: dict | None = None) -> str:
+        transcoding = session.get("TranscodingInfo") if isinstance(session, dict) else None
+        if isinstance(transcoding, dict) and transcoding:
+            method = str(transcoding.get("TranscodeReasons") or "").strip()
+            return "转码" if method else "转码"
+        if isinstance(stream, dict):
+            method = str(stream.get("DeliveryMethod") or "").strip()
+            if method:
+                return "直接播放" if method.lower() in {"directplay", "directstream"} else method
+        return "直接播放"
+
+    def _topology_video_label(self, stream: dict | None) -> str:
+        if not isinstance(stream, dict):
+            return ""
+        parts = []
+        height = stream.get("Height")
+        width = stream.get("Width")
+        if height:
+            try:
+                h = int(height)
+                parts.append("4K" if h >= 2000 else f"{h}p")
+            except (TypeError, ValueError):
+                if width:
+                    parts.append(f"{width}x{height}")
+        codec = str(stream.get("Codec") or "").strip().upper()
+        if codec:
+            codec_map = {"H264": "H.264", "HEVC": "HEVC", "H265": "HEVC", "AV1": "AV1", "VC1": "VC-1"}
+            parts.append(codec_map.get(codec.replace(".", ""), codec))
+        dynamic_range = str(stream.get("VideoRange") or stream.get("VideoRangeType") or stream.get("Profile") or "").strip()
+        if dynamic_range:
+            lower = dynamic_range.lower()
+            if "dolby" in lower:
+                parts.append("Dolby Vision")
+            elif "hdr" in lower:
+                parts.append(dynamic_range.upper() if dynamic_range.islower() else dynamic_range)
+        return " ".join(dict.fromkeys([part for part in parts if part]))
+
+    def _topology_audio_label(self, stream: dict | None) -> str:
+        if not isinstance(stream, dict):
+            return ""
+        parts = []
+        language = str(stream.get("DisplayLanguage") or stream.get("Language") or "").strip()
+        if language:
+            parts.append(language)
+        codec = str(stream.get("Codec") or "").strip().upper()
+        if codec:
+            codec_map = {"EAC3": "EAC3", "AC3": "AC3", "AAC": "AAC", "TRUEHD": "TrueHD", "DTS": "DTS", "FLAC": "FLAC"}
+            parts.append(codec_map.get(codec.replace("-", ""), codec))
+        layout = str(stream.get("ChannelLayout") or "").strip()
+        channels = stream.get("Channels")
+        if layout:
+            parts.append(layout)
+        elif channels:
+            channel_map = {1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}
+            try:
+                parts.append(channel_map.get(int(channels), f"{channels} ch"))
+            except (TypeError, ValueError):
+                pass
+        if stream.get("IsDefault"):
+            parts.append("(默认)")
+        return " ".join(parts)
+
+    def _topology_playback_details(self, session: dict, item: dict) -> dict:
+        streams = self._topology_media_streams(session, item)
+        video = next((stream for stream in streams if isinstance(stream, dict) and stream.get("Type") == "Video"), None)
+        audio = next((stream for stream in streams if isinstance(stream, dict) and stream.get("Type") == "Audio" and stream.get("IsDefault")), None)
+        if audio is None:
+            audio = next((stream for stream in streams if isinstance(stream, dict) and stream.get("Type") == "Audio"), None)
+        source = self._topology_media_source(item)
+        container = str(source.get("Container") or item.get("Container") or "").strip().upper()
+        bitrate = source.get("Bitrate") or item.get("Bitrate") or (video or {}).get("BitRate")
+        return {
+            "media": " ".join(part for part in [container, f"({self._format_topology_bitrate(bitrate)})" if self._format_topology_bitrate(bitrate) else ""] if part),
+            "video": self._topology_video_label(video),
+            "audio": self._topology_audio_label(audio),
+            "media_method": self._topology_stream_method(session),
+            "video_method": self._topology_stream_method(session, video),
+            "audio_method": self._topology_stream_method(session, audio),
+        }
+
+    def _topology_account_key(self, assignment: dict | None) -> str:
+        if isinstance(assignment, dict) and assignment.get("account_index") is not None:
+            try:
+                return f"rapid:{int(assignment.get('account_index'))}"
+            except (TypeError, ValueError):
+                pass
+        return "main:0"
+
+    async def get_playback_topology_async(self) -> dict:
+        cfg = await get_config_302()
+        drives = cfg.get("drives") if isinstance(cfg.get("drives"), list) else []
+        drive = drives[0] if drives else cfg.get("drive", {})
+        drive = drive if isinstance(drive, dict) else {}
+        rapid_accounts = drive.get("rapid_accounts") if isinstance(drive.get("rapid_accounts"), list) else []
+
+        accounts = [{
+            "key": "main:0",
+            "type": "main",
+            "index": 0,
+            "name": drive.get("name") or "115 主账号",
+            "icon": "fa-cloud",
+            "sessions": [],
+        }]
+        for idx, account in enumerate(rapid_accounts):
+            account = account if isinstance(account, dict) else {}
+            accounts.append({
+                "key": f"rapid:{idx}",
+                "type": "rapid",
+                "index": idx,
+                "name": account.get("name") or f"小号 {idx + 1}",
+                "icon": "fa-user",
+                "sessions": [],
+            })
+
+        account_map = {account["key"]: account for account in accounts}
+        total_sessions = 0
+        latest_updated_at = 0.0
+
+        for emby_index, snapshot in list(self._topology_sessions.items()):
+            emby_cfg = snapshot.get("emby_cfg") or {}
+            sessions = await self._fetch_topology_emby_sessions(emby_cfg)
+            snapshot = {
+                "sessions": sessions,
+                "emby_cfg": dict(emby_cfg or {}),
+                "updated_at": time.time(),
+            }
+            self._topology_sessions[emby_index] = snapshot
+            latest_updated_at = max(latest_updated_at, float(snapshot.get("updated_at") or 0))
+            for session in sessions:
+                if not isinstance(session, dict):
+                    continue
+                item = session.get("NowPlayingItem") or {}
+                item_id = str(item.get("Id") or "").strip() if isinstance(item, dict) else ""
+                if not item_id:
+                    continue
+
+                user_key = self._topology_session_user_key(session)
+                assignment = None
+                for candidate in self._rapid_assignments.values():
+                    if not isinstance(candidate, dict):
+                        continue
+                    if str(candidate.get("item_id") or "") == item_id and str(candidate.get("user_key") or "") == user_key:
+                        assignment = candidate
+                        break
+
+                account_key = self._topology_account_key(assignment)
+                account = account_map.get(account_key) or account_map["main:0"]
+                position_ticks = session.get("PlayState", {}).get("PositionTicks") if isinstance(session.get("PlayState"), dict) else 0
+                runtime_ticks = item.get("RunTimeTicks") if isinstance(item, dict) else 0
+                percent = 0
+                try:
+                    if runtime_ticks:
+                        percent = max(0, min(100, round(float(position_ticks or 0) / float(runtime_ticks) * 100, 1)))
+                except Exception:
+                    percent = 0
+
+                details = self._topology_playback_details(session, item)
+                account["sessions"].append({
+                    "id": str(session.get("Id") or f"{emby_index}:{item_id}:{user_key}"),
+                    "emby_index": emby_index,
+                    "emby_name": emby_cfg.get("name") or f"Emby[{emby_index}]",
+                    "user_key": user_key,
+                    "user_name": self._topology_session_user_key(session).replace("name:", "") if not session.get("UserName") else session.get("UserName"),
+                    "client": session.get("Client") or "",
+                    "device": session.get("DeviceName") or "",
+                    "remote_endpoint": session.get("RemoteEndPoint") or "",
+                    "item_id": item_id,
+                    "title": self._topology_item_title(item) or item_id,
+                    "year": item.get("ProductionYear") if isinstance(item, dict) else "",
+                    "image_url": self._build_topology_image_url(emby_cfg, item),
+                    "position": self._format_topology_time(position_ticks),
+                    "duration": self._format_topology_time(runtime_ticks),
+                    "percent": percent,
+                    "media": details.get("media") or "",
+                    "video": details.get("video") or "",
+                    "audio": details.get("audio") or "",
+                    "media_method": details.get("media_method") or "",
+                    "video_method": details.get("video_method") or "",
+                    "audio_method": details.get("audio_method") or "",
+                    "account_key": account_key,
+                    "account_name": account.get("name"),
+                })
+                total_sessions += 1
+
+        return {
+            "status": "ok",
+            "updated_at": int(latest_updated_at or time.time()),
+            "polling": any(task and not task.done() for task in self._topology_poll_tasks.values()),
+            "total_sessions": total_sessions,
+            "accounts": accounts,
+        }
+
+    async def get_secondary_client(self, rapid_context: dict | None = None):
         """获取或初始化小号 P115Client（用于秒传）- 支持多账号池
 
-        返回: (client, drive_cfg, rapid_cookie) 或 (None, {}, None)
+        返回: (client, drive_cfg, rapid_cookie, account_index, account_name) 或 (None, {}, None, None, None)
         """
         cfg = await get_config_302()
 
@@ -487,46 +948,44 @@ class Drive115Service:
         # 获取小号池
         rapid_accounts = drive_cfg.get("rapid_accounts", [])
         rapid_mode = drive_cfg.get("rapid_mode", "auto")
+        try:
+            rapid_concurrency_limit = max(0, int(drive_cfg.get("rapid_concurrency_limit") or 0))
+        except (TypeError, ValueError):
+            rapid_concurrency_limit = 0
 
         if not rapid_accounts:
-            return None, {}, None
+            return None, {}, None, None, None
 
         # 根据调度策略选择小号
-        selected_account = None
-        account_index = 0
-
-        if rapid_mode == "auto":
-            # 自动轮询：按顺序循环使用小号
-            account_index = self._rapid_account_index % len(rapid_accounts)
-            self._rapid_account_index += 1  # 为下次请求递增
-            selected_account = rapid_accounts[account_index]
-        elif rapid_mode in [str(i) for i in range(len(rapid_accounts))]:
-            # 指定账号（固定使用某个账号）
-            account_index = int(rapid_mode)
-            selected_account = rapid_accounts[account_index]
-        else:
-            # 无效的 rapid_mode，回退到第一个账号
-            account_index = 0
-            selected_account = rapid_accounts[0]
+        account_index = self._select_rapid_account_index(
+            rapid_accounts,
+            rapid_mode,
+            rapid_context,
+            concurrency_limit=rapid_concurrency_limit,
+        )
+        if account_index is None:
+            logger.warning(f"[Rapid] 小号并发已达上限，跳过秒传: limit={rapid_concurrency_limit}")
+            return None, {}, None, None, None
+        selected_account = rapid_accounts[account_index]
 
         rapid_cookie = selected_account.get("cookie", "")
         account_name = selected_account.get("name", f"小号{account_index + 1}")
 
         if not rapid_cookie:
-            return None, {}, None
+            return None, {}, None, None, None
 
         try:
             client = P115Client(rapid_cookie)
             logger.debug(f"[Rapid] 使用小号: {account_name} (模式: {rapid_mode}, 索引: {account_index}/{len(rapid_accounts)})")
-            return client, drive_cfg, rapid_cookie
+            return client, drive_cfg, rapid_cookie, account_index, account_name
         except Exception as e:
             logger.error(f"[Rapid] 小号登录失败 ({account_name}): {e}")
-            return None, {}, None
+            return None, {}, None, None, None
 
     # ==========================================================
     # [修改] 增加 item_name 参数，用于优化日志显示
     # ==========================================================
-    async def get_direct_url(self, item_id: str, media_source_id: str = None, user_agent: str = "", item_name: str = None, emby_index: int = 0, direct_link_context: str = "default"):
+    async def get_direct_url(self, item_id: str, media_source_id: str = None, user_agent: str = "", item_name: str = None, emby_index: int = 0, direct_link_context: str = "default", rapid_context: dict | None = None):
         """[核心入口] 获取播放直链
 
         Args:
@@ -557,22 +1016,30 @@ class Drive115Service:
                 if not pickcode:
                     return None
 
-                return await self._get_direct_url_core(
-                    client=client,
-                    drive_cfg=drive_cfg,
-                    pickcode=pickcode,
-                    user_agent=user_agent,
-                    log_name=item_name if item_name else f"ID: {item_id}",
-                    emby_index=emby_index,
-                    filename_resolver=lambda: self._resolve_filename_for_item(item_id, media_source_id, emby_index),
-                    direct_link_context=direct_link_context,
-                )
+                rapid_lock_key = f"rapid:{self._rapid_assignment_key(pickcode, rapid_context)}"
+                async with self._locks_cleanup_lock:
+                    if rapid_lock_key not in self._item_locks:
+                        self._item_locks[rapid_lock_key] = asyncio.Lock()
+                    rapid_lock = self._item_locks[rapid_lock_key]
+
+                async with rapid_lock:
+                    return await self._get_direct_url_core(
+                        client=client,
+                        drive_cfg=drive_cfg,
+                        pickcode=pickcode,
+                        user_agent=user_agent,
+                        log_name=item_name if item_name else f"ID: {item_id}",
+                        emby_index=emby_index,
+                        filename_resolver=lambda: self._resolve_filename_for_item(item_id, media_source_id, emby_index),
+                        direct_link_context=direct_link_context,
+                        rapid_context=rapid_context,
+                    )
             except Exception as e:
                 logger.error(f"[115] 获取直链异常: {e}")
                 traceback.print_exc()
                 return None
 
-    async def get_direct_url_by_pickcode(self, pickcode: str, user_agent: str = "", emby_index: int = 0, filename: str | None = None, direct_link_context: str = "default"):
+    async def get_direct_url_by_pickcode(self, pickcode: str, user_agent: str = "", emby_index: int = 0, filename: str | None = None, direct_link_context: str = "default", rapid_context: dict | None = None):
         normalized_pickcode = str(pickcode or "").strip()
         if not normalized_pickcode:
             return None
@@ -588,22 +1055,30 @@ class Drive115Service:
                 if not client:
                     return None
 
-                return await self._get_direct_url_core(
-                    client=client,
-                    drive_cfg=drive_cfg,
-                    pickcode=normalized_pickcode,
-                    user_agent=user_agent,
-                    log_name=filename or normalized_pickcode,
-                    emby_index=emby_index,
-                    filename_resolver=lambda: filename or f"{normalized_pickcode}.mkv",
-                    direct_link_context=direct_link_context,
-                )
+                rapid_lock_key = f"rapid:{self._rapid_assignment_key(normalized_pickcode, rapid_context)}"
+                async with self._locks_cleanup_lock:
+                    if rapid_lock_key not in self._item_locks:
+                        self._item_locks[rapid_lock_key] = asyncio.Lock()
+                    rapid_lock = self._item_locks[rapid_lock_key]
+
+                async with rapid_lock:
+                    return await self._get_direct_url_core(
+                        client=client,
+                        drive_cfg=drive_cfg,
+                        pickcode=normalized_pickcode,
+                        user_agent=user_agent,
+                        log_name=filename or normalized_pickcode,
+                        emby_index=emby_index,
+                        filename_resolver=lambda: filename or f"{normalized_pickcode}.mkv",
+                        direct_link_context=direct_link_context,
+                        rapid_context=rapid_context,
+                    )
             except Exception as e:
                 logger.error(f"[115] 按 Pickcode 获取直链异常: {e}")
                 traceback.print_exc()
                 return None
 
-    async def _get_direct_url_core(self, client, drive_cfg: dict, pickcode: str, user_agent: str = "", log_name: str | None = None, emby_index: int = 0, filename_resolver=None, direct_link_context: str = "default"):
+    async def _get_direct_url_core(self, client, drive_cfg: dict, pickcode: str, user_agent: str = "", log_name: str | None = None, emby_index: int = 0, filename_resolver=None, direct_link_context: str = "default", rapid_context: dict | None = None):
         drive_name = drive_cfg.get("name", f"drives[{emby_index}]")
         display_name = log_name if log_name else pickcode
 
@@ -614,7 +1089,7 @@ class Drive115Service:
         cache_key = f"{pickcode}_{cache_ua}"
         is_busy = self._is_file_busy(pickcode)
 
-        if cache_key in self._url_cache and not (enable_rapid and is_busy):
+        if cache_key in self._url_cache and not enable_rapid and not (enable_rapid and is_busy):
             if cache_key not in self._url_cache_hit_log_dedupe:
                 self._url_cache_hit_log_dedupe[cache_key] = True
                 logger.trace(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
@@ -622,24 +1097,98 @@ class Drive115Service:
 
         if enable_rapid:
             rapid_cache_key = f"rapid_{pickcode}"
+            rapid_assignment_key = self._rapid_assignment_key(pickcode, rapid_context)
+            has_user_context = isinstance(rapid_context, dict) and bool(str(rapid_context.get("user_key") or "").strip())
+            rapid_assignment = self._rapid_assignments.get(rapid_assignment_key)
+            if isinstance(rapid_assignment, dict):
+                rapid_pickcode = str(rapid_assignment.get("pickcode") or "")
+                rapid_cookie = str(rapid_assignment.get("cookie") or "")
+                rapid_cache_ua = str(rapid_assignment.get("ua") or "")
+                rapid_cache_url = str(rapid_assignment.get("url") or "")
+                if rapid_cache_url and rapid_cache_ua == cache_ua:
+                    logger.trace(f"[Rapid-{drive_name}] 命中用户秒传缓存: {display_name}")
+                    return rapid_cache_url
+                if rapid_pickcode and rapid_cookie:
+                    logger.debug(f"[Rapid-{drive_name}] 命中用户秒传文件缓存，按当前UA重新获取直链: {display_name}")
+                    rapid_url = await self._fetch_download_url(
+                        rapid_pickcode,
+                        user_agent,
+                        cookie=rapid_cookie,
+                        direct_link_context=direct_link_context,
+                    )
+                    if rapid_url:
+                        rapid_assignment.update({"ua": cache_ua, "url": rapid_url})
+                        self._rapid_assignments[rapid_assignment_key] = rapid_assignment
+                        self._url_cache[cache_key] = rapid_url
+                        return rapid_url
+                    self._rapid_assignments.pop(rapid_assignment_key, None)
+
             rapid_cache_entry = self._url_cache.get(rapid_cache_key)
             if isinstance(rapid_cache_entry, dict):
                 rapid_cache_ua = str(rapid_cache_entry.get("ua") or "")
                 rapid_cache_url = str(rapid_cache_entry.get("url") or "")
+                rapid_pickcode = str(rapid_cache_entry.get("pickcode") or "")
+                rapid_cookie = str(rapid_cache_entry.get("cookie") or "")
                 if rapid_cache_url and rapid_cache_ua == cache_ua:
                     logger.trace(f"[Rapid-{drive_name}] 命中秒传缓存: {display_name}")
+                    if has_user_context:
+                        self._remember_rapid_assignment(
+                            rapid_assignment_key,
+                            cache_ua=cache_ua,
+                            rapid_url=rapid_cache_url,
+                            rapid_pickcode=rapid_pickcode,
+                            rapid_file_id=rapid_cache_entry.get("file_id"),
+                            rapid_cookie=rapid_cookie,
+                            account_index=rapid_cache_entry.get("account_index"),
+                            account_name=str(rapid_cache_entry.get("account_name") or ""),
+                            source_pickcode=pickcode,
+                            rapid_context=rapid_context,
+                        )
                     return rapid_cache_url
+                if rapid_pickcode and rapid_cookie:
+                    logger.debug(f"[Rapid-{drive_name}] 命中秒传文件缓存，按当前UA重新获取直链: {display_name}")
+                    rapid_url = await self._fetch_download_url(
+                        rapid_pickcode,
+                        user_agent,
+                        cookie=rapid_cookie,
+                        direct_link_context=direct_link_context,
+                    )
+                    if rapid_url:
+                        self._url_cache[cache_key] = rapid_url
+                        rapid_cache_entry.update({
+                            "ua": cache_ua,
+                            "url": rapid_url,
+                        })
+                        self._url_cache[rapid_cache_key] = rapid_cache_entry
+                        if has_user_context:
+                            self._remember_rapid_assignment(
+                                rapid_assignment_key,
+                                cache_ua=cache_ua,
+                                rapid_url=rapid_url,
+                                rapid_pickcode=rapid_pickcode,
+                                rapid_file_id=rapid_cache_entry.get("file_id"),
+                                rapid_cookie=rapid_cookie,
+                                account_index=rapid_cache_entry.get("account_index"),
+                                account_name=str(rapid_cache_entry.get("account_name") or ""),
+                                source_pickcode=pickcode,
+                                rapid_context=rapid_context,
+                            )
+                        return rapid_url
+                    logger.warning(f"[Rapid-{drive_name}] 秒传文件缓存直链获取失败，重新尝试秒传: {display_name}")
+                    self._url_cache.pop(rapid_cache_key, None)
             elif rapid_cache_entry is not None:
                 self._url_cache.pop(rapid_cache_key, None)
 
             logger.debug(f"[Rapid-{drive_name}] 尝试秒传: {display_name}")
-            result = await self.get_secondary_client()
+            result = await self.get_secondary_client(rapid_context=rapid_context)
             if not result or not result[0]:
                 secondary_client = None
                 sec_cfg = {}
                 rapid_cookie = None
+                rapid_account_index = None
+                rapid_account_name = ""
             else:
-                secondary_client, sec_cfg, rapid_cookie = result
+                secondary_client, sec_cfg, rapid_cookie, rapid_account_index, rapid_account_name = result
 
             if not secondary_client:
                 logger.warning("[Rapid] 小号客户端未就绪，已跳过秒传")
@@ -669,7 +1218,24 @@ class Drive115Service:
                             self._url_cache[rapid_cache_key] = {
                                 "ua": cache_ua,
                                 "url": rapid_url,
+                                "pickcode": rapid_result.get('pickcode'),
+                                "file_id": rapid_result.get('file_id'),
+                                "cookie": rapid_cookie,
+                                "account_index": rapid_account_index,
+                                "account_name": rapid_account_name,
                             }
+                            self._remember_rapid_assignment(
+                                rapid_assignment_key,
+                                cache_ua=cache_ua,
+                                rapid_url=rapid_url,
+                                rapid_pickcode=rapid_result.get('pickcode'),
+                                rapid_file_id=rapid_result.get('file_id'),
+                                rapid_cookie=rapid_cookie,
+                                account_index=rapid_account_index,
+                                account_name=rapid_account_name,
+                                source_pickcode=pickcode,
+                                rapid_context=rapid_context,
+                            )
                             asyncio.create_task(
                                 self._delayed_remove_secondary(
                                     secondary_client,
@@ -894,8 +1460,23 @@ class Drive115Service:
         # 1. 检查缓存
         if pickcode in self._sha1_cache:
             cached = self._sha1_cache[pickcode]
-            # 如果缓存中有直链但没有使用正确的 UA，需要重新获取
-            if cached.get('direct_url'):
+            # 115 直链签名和 User-Agent 相关；只有 UA 一致时才能复用直链。
+            if cached.get('direct_url') and cached.get('direct_url_ua') == (user_agent or ""):
+                return cached
+            if cached.get('sha1') and cached.get('size'):
+                cached = dict(cached)
+                direct_url = await self._fetch_download_url(
+                    pickcode,
+                    user_agent,
+                    emby_index=emby_index,
+                    direct_link_context=direct_link_context,
+                )
+                if not direct_url:
+                    logger.error(f"[Rapid] 无法获取大号直链: {pickcode}")
+                    return None
+                cached['direct_url'] = direct_url
+                cached['direct_url_ua'] = user_agent or ""
+                self._sha1_cache[pickcode] = cached
                 return cached
 
         try:
@@ -920,7 +1501,8 @@ class Drive115Service:
             result = {
                 'sha1': sha1,
                 'size': size,
-                'direct_url': direct_url
+                'direct_url': direct_url,
+                'direct_url_ua': user_agent or "",
             }
 
             # 缓存结果
@@ -1391,7 +1973,7 @@ class Drive115Service:
             return None
 
         except Exception as e:
-            logger.warning(f"[115] Pickcode 模式解析异常: {e}")
+            logger.debug(f"[115] Pickcode 模式解析异常: {repr(e)}")
             return None
 
 

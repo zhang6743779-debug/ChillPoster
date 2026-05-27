@@ -2,9 +2,11 @@ import httpx
 import json
 import asyncio
 import re
+import hashlib
 import websockets
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import RedirectResponse, StreamingResponse, JSONResponse
+from starlette.requests import ClientDisconnect
 from cachetools import TTLCache
 from app.routers.config_302 import get_config_302
 from core.logger import logger
@@ -88,6 +90,7 @@ async def get_emby_config():
     api_key = target_emby.get("key", "")
 
     return base_url, api_key, target_emby
+
 
 # ==================================================================
 # [辅助] 生成人性化的标题
@@ -278,6 +281,110 @@ def _session_matches_client(session: dict, auth_client: str, auth_device: str, u
     return bool(ua and session_client and session_client in ua)
 
 
+def _session_user_key(session: dict) -> str:
+    value = str(session.get("UserId", "") or "").strip()
+    if value:
+        return f"user:{value}"
+    user_name = _get_session_user_name(session)
+    if user_name:
+        return f"name:{user_name}"
+    return ""
+
+
+def _fallback_user_key(auth_token: str, auth_client: str, auth_device: str, user_agent: str) -> str:
+    if auth_token:
+        digest = hashlib.sha1(auth_token.encode("utf-8", "ignore")).hexdigest()[:16]
+        return f"token:{digest}"
+    client_bits = "|".join(str(item or "").strip() for item in (auth_client, auth_device, user_agent[:80]))
+    if client_bits.strip("|"):
+        digest = hashlib.sha1(client_bits.encode("utf-8", "ignore")).hexdigest()[:16]
+        return f"client:{digest}"
+    return ""
+
+
+async def _fetch_emby_sessions(base_url: str, api_key: str) -> list:
+    if not base_url or not api_key:
+        return []
+    try:
+        resp = await proxy_client.get(
+            f"{base_url}/emby/Sessions",
+            headers={"X-Emby-Token": api_key},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or []
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        logger.debug(f"[Gateway] 获取 Emby Sessions 失败: {type(e).__name__} {repr(e)}")
+    return []
+
+
+def _match_request_session(sessions: list, item_id: str, auth_token: str, auth_client: str, auth_device: str, user_agent: str) -> dict | None:
+    if item_id:
+        for sess in sessions:
+            if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                if _session_matches_token(sess, auth_token) or _session_matches_client(sess, auth_client, auth_device, user_agent):
+                    return sess
+        for sess in sessions:
+            if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                return sess
+    for sess in sessions:
+        if _session_matches_token(sess, auth_token):
+            return sess
+    for sess in sessions:
+        if _session_matches_client(sess, auth_client, auth_device, user_agent):
+            return sess
+    return None
+
+
+async def _build_rapid_context(base_url: str, api_key: str, item_id: str, auth_token: str, auth_client: str, auth_device: str, user_agent: str) -> tuple[dict, list, dict | None]:
+    sessions = await _fetch_emby_sessions(base_url, api_key)
+    matched_session = _match_request_session(sessions, item_id, auth_token, auth_client, auth_device, user_agent)
+    user_key = _session_user_key(matched_session) if matched_session else ""
+    user_name = _get_session_user_name(matched_session) if matched_session else ""
+    if not user_key:
+        user_key = _fallback_user_key(auth_token, auth_client, auth_device, user_agent)
+
+    active_user_keys = []
+    active_item_ids = []
+    for sess in sessions:
+        if not isinstance(sess, dict) or not sess.get("NowPlayingItem"):
+            continue
+        now_playing = sess.get("NowPlayingItem") or {}
+        active_item_id = str(now_playing.get("Id", "") or "").strip()
+        if active_item_id:
+            active_item_ids.append(active_item_id)
+        active_key = _session_user_key(sess)
+        if active_key:
+            active_user_keys.append(active_key)
+
+    effective_item_id = str(item_id or "").strip()
+    if not effective_item_id and matched_session:
+        now_playing = matched_session.get("NowPlayingItem") or {}
+        if isinstance(now_playing, dict):
+            effective_item_id = str(now_playing.get("Id") or "").strip()
+
+    return {
+        "user_key": user_key,
+        "user_name": user_name,
+        "item_id": effective_item_id,
+        "active_user_keys": active_user_keys,
+        "active_item_ids": active_item_ids,
+    }, sessions, matched_session
+
+
+async def _refresh_playback_topology_later(emby_index: int, emby_cfg: dict, delay: float = 2.0):
+    try:
+        await asyncio.sleep(delay)
+        sessions = await _fetch_emby_sessions(
+            str((emby_cfg or {}).get("url") or "").rstrip("/"),
+            str((emby_cfg or {}).get("key") or ""),
+        )
+        drive115_service.update_playback_topology_sessions(emby_index, emby_cfg, sessions)
+    except Exception as e:
+        logger.debug(f"[Topology] 延迟刷新播放拓扑失败: {type(e).__name__} {repr(e)}")
+
+
 def _extract_pickcode_from_direct_path(path: str) -> tuple[str, str]:
     normalized = str(path or "").strip().lstrip("/")
     if not normalized.lower().startswith("d/"):
@@ -296,7 +403,7 @@ def _extract_pickcode_from_direct_path(path: str) -> tuple[str, str]:
 # ==================================================================
 # [辅助] 后台预加载任务
 # ==================================================================
-async def _preload_rapid_transfer(item_id: str, user_agent: str, item_name: str, emby_index: int = 0):
+async def _preload_rapid_transfer(item_id: str, user_agent: str, item_name: str, emby_index: int = 0, rapid_context: dict | None = None):
     """后台预加载任务 - 直接调用 get_direct_url 获取直链"""
     try:
         cfg = await get_config_302()
@@ -308,12 +415,13 @@ async def _preload_rapid_transfer(item_id: str, user_agent: str, item_name: str,
             media_source_id=None,
             user_agent=user_agent,
             item_name=item_name,
-            emby_index=emby_index
+            emby_index=emby_index,
+            rapid_context=rapid_context,
         )
         if result:
             logger.info(f"[预缓存-{emby_name}] 后台预加载成功: {item_name}")
         else:
-            logger.warning(f"[预缓存-{emby_name}] 后台预加载失败: {item_name}")
+            logger.debug(f"[预缓存-{emby_name}] 后台预加载未命中: {item_name}")
     except Exception as e:
         logger.warning(f"[预缓存] 后台预加载异常 ({item_name}): {e}")
 
@@ -464,6 +572,16 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                 auth_client = parsed_auth.get("client", "")
                 auth_device = parsed_auth.get("device", "")
                 auth_token = parsed_auth.get("token", "")
+                rapid_context, emby_sessions, matched_session = await _build_rapid_context(
+                    base_url,
+                    api_key,
+                    item_id or "",
+                    auth_token,
+                    auth_client,
+                    auth_device,
+                    user_agent,
+                )
+                asyncio.create_task(_refresh_playback_topology_later(emby_index, emby_cfg))
 
                 if item_id:
                     # 尝试从缓存获取媒体信息
@@ -524,7 +642,8 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                         user_agent,
                         item_name=display_name,
                         emby_index=emby_index,
-                        direct_link_context="gateway_playback"
+                        direct_link_context="gateway_playback",
+                        rapid_context=rapid_context,
                     )
 
                     if direct_url:
@@ -537,39 +656,32 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                             # 获取播放用户名（通过 Emby Sessions API）
                             play_user = ""
                             try:
-                                sessions_url = f"{base_url}/emby/Sessions"
-                                sessions_resp = await proxy_client.get(
-                                    sessions_url,
-                                    headers={"X-Emby-Token": api_key},
-                                    timeout=5
-                                )
-                                if sessions_resp.status_code == 200:
-                                    sessions = sessions_resp.json() or []
-                                    matched_session = None
+                                sessions = emby_sessions or []
+                                if sessions:
                                     for sess in sessions:
-                                        if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                                        if matched_session is None and str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
                                             matched_session = sess
                                             break
-                                    if matched_session is None:
-                                        for sess in sessions:
-                                            if _session_matches_token(sess, auth_token):
-                                                matched_session = sess
-                                                logger.debug(f"[Gateway-{emby_name}] 通过会话 token 匹配播放用户: {display_name}")
-                                                break
-                                    if matched_session is None:
-                                        for sess in sessions:
-                                            if _session_matches_client(sess, auth_client, auth_device, user_agent):
-                                                matched_session = sess
-                                                logger.debug(f"[Gateway-{emby_name}] 通过客户端信息匹配播放用户: {display_name}")
-                                                break
-                                    if matched_session is not None:
-                                        play_user = _get_session_user_name(matched_session)
-                                        if not auth_client:
-                                            auth_client = str(matched_session.get("Client", "") or "")
-                                        if not auth_device:
-                                            auth_device = str(matched_session.get("DeviceName", "") or "")
-                                    else:
-                                        logger.debug(f"[Gateway-{emby_name}] 未匹配到播放用户: item={item_id} sessions={len(sessions)} client={auth_client or '-'} device={auth_device or '-'}")
+                                if matched_session is None:
+                                    for sess in sessions:
+                                        if _session_matches_token(sess, auth_token):
+                                            matched_session = sess
+                                            logger.debug(f"[Gateway-{emby_name}] 通过会话 token 匹配播放用户: {display_name}")
+                                            break
+                                if matched_session is None:
+                                    for sess in sessions:
+                                        if _session_matches_client(sess, auth_client, auth_device, user_agent):
+                                            matched_session = sess
+                                            logger.debug(f"[Gateway-{emby_name}] 通过客户端信息匹配播放用户: {display_name}")
+                                            break
+                                if matched_session is not None:
+                                    play_user = _get_session_user_name(matched_session)
+                                    if not auth_client:
+                                        auth_client = str(matched_session.get("Client", "") or "")
+                                    if not auth_device:
+                                        auth_device = str(matched_session.get("DeviceName", "") or "")
+                                else:
+                                    logger.debug(f"[Gateway-{emby_name}] 未匹配到播放用户: item={item_id} sessions={len(sessions)} client={auth_client or '-'} device={auth_device or '-'}")
                             except Exception as e:
                                 logger.debug(f"[Gateway-{emby_name}] 获取播放用户失败: {type(e).__name__} {repr(e)}")
 
@@ -642,6 +754,18 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
         elif is_direct_pickcode_playback:
             try:
                 user_agent = request.headers.get("user-agent", "")
+                emby_auth = request.headers.get("x-emby-authorization", "")
+                parsed_auth = _parse_emby_authorization(emby_auth)
+                rapid_context, emby_sessions, _ = await _build_rapid_context(
+                    base_url,
+                    api_key,
+                    "",
+                    parsed_auth.get("token", ""),
+                    parsed_auth.get("client", ""),
+                    parsed_auth.get("device", ""),
+                    user_agent,
+                )
+                asyncio.create_task(_refresh_playback_topology_later(emby_index, emby_cfg))
                 display_name = _resolve_direct_pickcode_name(pickcode, direct_display_name or f"{pickcode}.mkv")
                 redirect_cache_key = f"{pickcode}_{user_agent or 'NoUA'}"
                 direct_url = await drive115_service.get_direct_url_by_pickcode(
@@ -650,6 +774,7 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                     emby_index=emby_index,
                     filename=display_name,
                     direct_link_context="gateway_direct",
+                    rapid_context=rapid_context,
                 )
                 if direct_url:
                     if redirect_cache_key not in strm_redirect_cache:
@@ -708,13 +833,26 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
                         if item_id and item_id not in preload_dedupe_cache:
                             preload_dedupe_cache[item_id] = True
                             ua = request.headers.get("user-agent", "")
+                            emby_auth = request.headers.get("x-emby-authorization", "")
+                            parsed_auth = _parse_emby_authorization(emby_auth)
+                            rapid_context, sessions, matched_session = await _build_rapid_context(
+                                base_url,
+                                api_key,
+                                item_id,
+                                parsed_auth.get("token", ""),
+                                parsed_auth.get("client", ""),
+                                parsed_auth.get("device", ""),
+                                ua,
+                            )
+                            drive115_service.update_playback_topology_sessions(emby_index, emby_cfg, sessions)
                             p_name = await _resolve_preload_name(item_id, emby_cfg)
+                            user_label = rapid_context.get("user_name") or rapid_context.get("user_key") or "未知用户"
 
-                            logger.info(f"[预缓存-{emby_name}] 播放信息接口触发预加载: {p_name}")
+                            logger.info(f"[预缓存-{emby_name}] 播放信息接口触发预加载: {p_name} | 用户={user_label} | 正在播放={len(rapid_context.get('active_user_keys') or [])}")
 
                             # 直接后台预加载，不等待响应
                             asyncio.create_task(
-                                _preload_rapid_transfer(item_id, ua, p_name, emby_index)
+                                _preload_rapid_transfer(item_id, ua, p_name, emby_index, rapid_context=rapid_context)
                             )
             except Exception as e:
                 logger.warning(f"[预缓存] 播放信息接口触发失败: {e}")
@@ -772,6 +910,9 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
     except (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.StreamClosed) as e:
         logger.warning(f"[Gateway-{emby_name}] 转发连接中断: {request.method} /{clean_path} -> {target_url} | {_format_proxy_error(e)}")
         return Response(f"Gateway Error: {_format_proxy_error(e)}", status_code=502)
+    except ClientDisconnect:
+        logger.debug(f"[Gateway-{emby_name}] 客户端已断开转发请求: {request.method} /{clean_path} -> {target_url}")
+        return Response(status_code=499)
     except Exception as e:
         logger.error(f"[Gateway-{emby_name}] 转发失败: {request.method} /{clean_path} -> {target_url} | {_format_proxy_error(e)}")
         return Response(f"Gateway Error: {_format_proxy_error(e)}", status_code=502)

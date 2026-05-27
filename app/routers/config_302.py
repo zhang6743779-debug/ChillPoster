@@ -43,6 +43,7 @@ class Drive115Config(BaseModel):
 
     # 秒传小号池配置（适配前端的多账号池设计）
     rapid_mode: str = 'auto'  # 调度策略: auto 自动轮询, 或指定账号索引
+    rapid_concurrency_limit: int = 0  # 单个小号并发限制，0 表示不限制
     rapid_accounts: list = []  # 小号池: [{"name": "小号1", "cookie": "xxx", "recycle_code": ""}]
 
     # 允许前端发送额外的字段，防止 422 错误
@@ -147,6 +148,10 @@ def _normalize_single_drive_config(drive: Any) -> dict:
         normalized.update(drive)
     normalized["enable_standard_topology"] = True
     normalized["transfer_drive_index"] = 0
+    try:
+        normalized["rapid_concurrency_limit"] = max(0, int(normalized.get("rapid_concurrency_limit") or 0))
+    except (TypeError, ValueError):
+        normalized["rapid_concurrency_limit"] = 0
     if not isinstance(normalized.get("rapid_accounts"), list):
         normalized["rapid_accounts"] = []
     normalized["rapid_accounts"] = [
@@ -830,6 +835,17 @@ async def get_config_302():
     except Exception as e:
         logger.error(f"读取 302 配置失败: {e}")
         return {}
+
+
+@router.get("/playback_topology")
+async def get_playback_topology():
+    """读取 115 播放线路拓扑。"""
+    try:
+        from app.services.drive115_service import drive115_service
+        return await drive115_service.get_playback_topology_async()
+    except Exception as e:
+        logger.error(f"读取 115 播放拓扑失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/save")
 async def save_config_302(config: Config302Payload):

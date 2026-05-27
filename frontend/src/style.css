@@ -4838,6 +4838,265 @@ html[data-theme="light"] .media-rules-page .subclass-preview-card {
 .config-302-drive-grid {
     margin-bottom: 40px;
 }
+.config-115-shell {
+    max-width: none;
+    margin-left: 0;
+    margin-right: 0;
+}
+.config-115-board {
+    display: grid;
+    grid-template-columns: minmax(420px, 560px) minmax(420px, 1fr);
+    gap: 18px;
+    align-items: start;
+    justify-content: start;
+}
+.config-115-board > .server-toolbar {
+    grid-column: 1 / -1;
+}
+.config-115-board > .config-302-drive-grid {
+    grid-column: 1;
+    grid-row: 2;
+    width: 100%;
+}
+.config-115-board > .playback-topology-panel {
+    grid-column: 2;
+    grid-row: 2;
+    width: 100%;
+}
+.config-115-board > .config-302-drive-grid > .module-card {
+    height: auto;
+}
+.playback-topology-panel {
+    margin: 0 0 18px;
+    padding: 16px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01)), var(--color-surface);
+    box-shadow: var(--shadow-sm);
+}
+.playback-topology-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+.playback-topology-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    color: var(--color-text-main);
+}
+.playback-topology-meta {
+    margin-top: 4px;
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+.topology-tree-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+}
+.topology-tree-column {
+    min-width: 0;
+}
+.topology-root-node {
+    min-height: 62px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.035);
+}
+.topology-root-icon {
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    color: var(--color-text-main);
+    background: rgba(255, 255, 255, 0.08);
+}
+.topology-root-text {
+    min-width: 0;
+}
+.topology-root-name {
+    font-weight: 800;
+    color: var(--color-text-main);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.topology-root-meta,
+.topology-play-year,
+.topology-play-time {
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+.topology-trunk {
+    position: relative;
+    margin-top: 10px;
+    padding-top: 18px;
+}
+.topology-trunk::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: 3px;
+    height: 18px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.18), rgba(59, 130, 246, 0.9), rgba(20, 184, 166, 0.18));
+    background-size: 100% 220%;
+    animation: topology-flow-y 1.35s linear infinite;
+}
+.topology-branch-list {
+    display: grid;
+    gap: 12px;
+}
+.topology-play-card {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.025);
+}
+.topology-play-card::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: -18px;
+    width: 3px;
+    height: 18px;
+    border-radius: 999px;
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.12), rgba(59, 130, 246, 0.9), rgba(20, 184, 166, 0.16));
+    background-size: 100% 220%;
+    animation: topology-flow-y 1.35s linear infinite;
+}
+.topology-play-card::after {
+    content: "";
+    position: absolute;
+    left: 12%;
+    right: 12%;
+    top: -18px;
+    height: 3px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.78), rgba(20, 184, 166, 0.2));
+    background-size: 220% 100%;
+    animation: topology-flow-x 1.8s linear infinite;
+}
+.topology-play-head {
+    display: grid;
+    grid-template-columns: 86px minmax(0, 1fr);
+    min-height: 82px;
+    background: rgba(255, 255, 255, 0.04);
+}
+.topology-poster {
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+}
+.topology-poster img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.topology-play-title-area {
+    min-width: 0;
+    padding: 12px 14px;
+}
+.topology-play-title {
+    margin-bottom: 3px;
+    font-weight: 800;
+    color: var(--color-text-main);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.topology-info-row {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 12px;
+    padding: 12px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.018);
+}
+.topology-info-row:nth-of-type(even) {
+    background: rgba(255, 255, 255, 0.035);
+}
+.topology-info-row > span {
+    color: var(--color-text-muted);
+    font-weight: 700;
+}
+.topology-info-row > div {
+    min-width: 0;
+    color: var(--color-text-main);
+    line-height: 1.55;
+}
+.topology-device-row {
+    grid-template-columns: 48px minmax(0, 1fr);
+    align-items: center;
+    color: var(--color-text-muted);
+}
+.topology-device-row > i {
+    justify-self: center;
+    color: var(--color-text-muted);
+    font-size: 28px;
+}
+.topology-user-row {
+    padding: 13px;
+    text-align: center;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    color: var(--color-text-main);
+}
+.topology-progress {
+    height: 5px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.12);
+}
+.topology-progress span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--color-success);
+}
+.topology-empty {
+    margin: 0;
+    padding: 12px;
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius-sm);
+    color: var(--color-text-muted);
+    font-size: 12px;
+}
+.topology-error {
+    margin-left: 0;
+    border-color: rgba(248, 113, 113, 0.35);
+    color: var(--color-danger);
+}
+@keyframes topology-flow-y {
+    from { background-position: 0 100%; }
+    to { background-position: 0 -100%; }
+}
+@keyframes topology-flow-x {
+    from { background-position: 100% 0; }
+    to { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .topology-trunk::before,
+    .topology-play-card::before,
+    .topology-play-card::after {
+        animation: none;
+    }
+}
 .config-302-emby-grid {
     padding-bottom: 50px;
 }
@@ -4856,6 +5115,15 @@ html[data-theme="light"] .media-rules-page .subclass-preview-card {
     .config-split-layout {
         flex-direction: column;
         gap: 24px;
+    }
+    .config-115-board {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+    }
+    .config-115-board > .config-302-drive-grid,
+    .config-115-board > .playback-topology-panel {
+        width: 100%;
     }
     .media-rules-header {
         flex-direction: column;
@@ -7553,6 +7821,20 @@ input:checked + .ios-slider:before {
 }
 .switch-row-label-warn {
     color: #f59e0b;
+}
+.rapid-limit-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    color: var(--color-text-muted);
+    font-size: 13px;
+}
+.rapid-limit-field input {
+    width: 86px;
+    min-height: 32px;
+    padding: 0 10px;
+    text-align: center;
 }
 .rapid-panel {
     border-color: #f59e0b;
