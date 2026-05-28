@@ -6,6 +6,17 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         // 14. 发现推荐页
         // ==========================================
         const RESOURCE_SEARCH_SOURCE_STORAGE_KEY = 'chillposter-discover-resource-search-sources';
+        const DISCOVER_SOURCES_CACHE_KEY = 'cp_discover_sources';
+        const DISCOVER_SOURCES_CACHE_VERSION = 1;
+        const DISCOVER_MAIN_GRID_CACHE_KEY = 'cp_discover_main_grid';
+        const DISCOVER_MAIN_GRID_CACHE_VERSION = 1;
+        const DISCOVER_MAIN_GRID_CACHE_MAX_ENTRIES = 12;
+        const DISCOVER_MAIN_GRID_CACHE_MAX_CHARS = 2000000;
+        const MISSING_EPISODE_STATS_CACHE_KEY = 'cp_missing_episode_stats';
+        const MISSING_EPISODE_STATS_CACHE_VERSION = 1;
+        const MISSING_EPISODE_STATS_CACHE_MAX_ENTRIES = 4;
+        const MISSING_EPISODE_STATS_CACHE_MAX_CHARS = 3500000;
+        const MISSING_EPISODE_FULL_CACHE_ITEM_LIMIT = 1600;
         const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 36;
         const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 16;
         const MISSING_EPISODE_RENDER_STEP_DESKTOP = 24;
@@ -81,6 +92,93 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             previewingId: '',
         });
         let resourceSearchSourcesPromise = null;
+
+        const readLocalJson = (key) => {
+            try {
+                const raw = localStorage.getItem(key);
+                return raw ? JSON.parse(raw) : null;
+            } catch (_) {
+                return null;
+            }
+        };
+
+        const writeLocalJson = (key, payload, maxChars = 0) => {
+            try {
+                const serialized = JSON.stringify(payload);
+                if (maxChars > 0 && serialized.length > maxChars) return false;
+                localStorage.setItem(key, serialized);
+                return true;
+            } catch (_) {
+                return false;
+            }
+        };
+
+        const getLocalCacheBucket = (storageKey, version) => {
+            const bucket = readLocalJson(storageKey);
+            if (!bucket || bucket.version !== version || !bucket.entries || typeof bucket.entries !== 'object') {
+                return { version, entries: {}, order: [] };
+            }
+            return {
+                version,
+                entries: bucket.entries || {},
+                order: Array.isArray(bucket.order) ? bucket.order : Object.keys(bucket.entries || {}),
+            };
+        };
+
+        const getLocalCacheEntry = (storageKey, version, entryKey) => {
+            if (!entryKey) return null;
+            const bucket = getLocalCacheBucket(storageKey, version);
+            const entry = bucket.entries?.[entryKey] || null;
+            return entry && typeof entry === 'object' ? entry : null;
+        };
+
+        const setLocalCacheEntry = (storageKey, version, entryKey, entry, options = {}) => {
+            if (!entryKey || !entry) return false;
+            const maxEntries = Number(options.maxEntries || 8);
+            const maxChars = Number(options.maxChars || 0);
+            const bucket = getLocalCacheBucket(storageKey, version);
+            bucket.entries[entryKey] = entry;
+            bucket.order = [entryKey, ...bucket.order.filter(key => key !== entryKey && bucket.entries[key])];
+            while (bucket.order.length > maxEntries) {
+                const staleKey = bucket.order.pop();
+                if (staleKey) delete bucket.entries[staleKey];
+            }
+            if (writeLocalJson(storageKey, bucket, maxChars)) return true;
+            while (bucket.order.length > 1) {
+                const staleKey = bucket.order.pop();
+                if (staleKey) delete bucket.entries[staleKey];
+                if (writeLocalJson(storageKey, bucket, maxChars)) return true;
+            }
+            delete bucket.entries[entryKey];
+            bucket.order = bucket.order.filter(key => key !== entryKey);
+            writeLocalJson(storageKey, bucket, maxChars);
+            return false;
+        };
+
+        const stableCacheStringify = (value) => {
+            const normalize = (input) => {
+                if (Array.isArray(input)) return input.map(normalize);
+                if (input && typeof input === 'object') {
+                    return Object.keys(input).sort().reduce((acc, key) => {
+                        const nextValue = input[key];
+                        if (nextValue !== undefined) acc[key] = normalize(nextValue);
+                        return acc;
+                    }, {});
+                }
+                return input == null ? '' : input;
+            };
+            try {
+                return JSON.stringify(normalize(value));
+            } catch (_) {
+                return '';
+            }
+        };
+
+        const getPrimaryServerFingerprint = () => {
+            const svr = servers?.value?.[0] || (Array.isArray(config302?.embys) ? config302.embys[0] : null) || {};
+            const keyTail = String(svr.key || '').slice(-8);
+            return [svr.url || '', svr.public_host || '', keyTail].join('|') || 'no-server';
+        };
 
         // ===== 发现页状态 (MP 克隆) =====
         const LIBRARY_STATUS_FILTER_KEY = '__library_status';
@@ -236,21 +334,56 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             discoverFiltersBySource[source.key] = { ...(discoverFiltersBySource[source.key] || {}), ...defaults };
         };
 
-        const loadDiscoverSources = async () => {
-            if (discoverSourceTabs.value.length) return;
-            try {
-                const res = await axios.get('/api/discover/sources');
-                discoverSourceTabs.value = res.data.sources || [];
-                discoverSourceTabs.value.forEach(source => ensureSourceFilters(source));
-                loadResourceSearchSources();
+        const applyDiscoverSourcesData = async (data = {}, options = {}) => {
+            const sources = Array.isArray(data.sources) ? data.sources : [];
+            if (!sources.length) return false;
+            discoverSourceTabs.value = sources;
+            discoverSourceTabs.value.forEach(source => ensureSourceFilters(source));
+            if (Array.isArray(data.genres) && data.genres.length) {
+                genreList.value = data.genres;
+                patchTmdbGenreSchema();
+            }
+            loadResourceSearchSources();
+            if (options.fetchGenres !== false) {
                 await fetchGenreList();
                 patchTmdbGenreSchema();
-                if (!discoverSourceMap.value[discoverActiveSource.value] && discoverSourceTabs.value.length) {
-                    discoverActiveSource.value = discoverSourceTabs.value[0].key;
-                }
-            } catch (e) {
-                console.error('加载发现源失败:', e);
             }
+            if (!discoverSourceMap.value[discoverActiveSource.value] && discoverSourceTabs.value.length) {
+                discoverActiveSource.value = discoverSourceTabs.value[0].key;
+            }
+            return true;
+        };
+
+        let discoverSourcesRefreshPromise = null;
+
+        const refreshDiscoverSources = async () => {
+            if (discoverSourcesRefreshPromise) return discoverSourcesRefreshPromise;
+            discoverSourcesRefreshPromise = (async () => {
+                const res = await axios.get('/api/discover/sources');
+                await applyDiscoverSourcesData({ sources: res.data.sources || [] });
+                writeLocalJson(DISCOVER_SOURCES_CACHE_KEY, {
+                    version: DISCOVER_SOURCES_CACHE_VERSION,
+                    updatedAt: Date.now(),
+                    sources: discoverSourceTabs.value,
+                    genres: genreList.value,
+                }, 600000);
+            })().catch(e => {
+                console.error('加载发现源失败:', e);
+            }).finally(() => {
+                discoverSourcesRefreshPromise = null;
+            });
+            return discoverSourcesRefreshPromise;
+        };
+
+        const loadDiscoverSources = async () => {
+            if (discoverSourceTabs.value.length) return;
+            const cached = readLocalJson(DISCOVER_SOURCES_CACHE_KEY);
+            if (cached?.version === DISCOVER_SOURCES_CACHE_VERSION && Array.isArray(cached.sources) && cached.sources.length) {
+                await applyDiscoverSourcesData(cached, { fetchGenres: false });
+                refreshDiscoverSources();
+                return;
+            }
+            await refreshDiscoverSources();
         };
 
         const getNormalizedDisplayFilters = () => {
@@ -949,6 +1082,84 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             return res.data || {};
         };
 
+        const getMainGridCacheEntryKey = (source = discoverActiveSource.value) => stableCacheStringify({
+            source,
+            filters: activeSourceFilters.value || {},
+            library: getPrimaryServerFingerprint(),
+        });
+
+        const getMainGridCacheEntry = () => {
+            const entry = getLocalCacheEntry(
+                DISCOVER_MAIN_GRID_CACHE_KEY,
+                DISCOVER_MAIN_GRID_CACHE_VERSION,
+                getMainGridCacheEntryKey(),
+            );
+            if (!entry?.data || !Array.isArray(entry.data.items)) return null;
+            return entry;
+        };
+
+        const applyMainGridCacheEntry = (entry) => {
+            const data = entry?.data || {};
+            mainGridItems.value = data.items || [];
+            mainGridPage.value = Number(data.page || 1);
+            mainGridTotalPages.value = Number(data.total_pages || 1);
+            mainGridNoMore.value = !!data.no_more;
+            nextTick(() => setupMainGridObserver());
+        };
+
+        const writeMainGridCache = (data = {}) => {
+            const source = discoverActiveSource.value;
+            if (!source || !Array.isArray(data.items)) return false;
+            const entryKey = getMainGridCacheEntryKey(source);
+            return setLocalCacheEntry(
+                DISCOVER_MAIN_GRID_CACHE_KEY,
+                DISCOVER_MAIN_GRID_CACHE_VERSION,
+                entryKey,
+                {
+                    updatedAt: Date.now(),
+                    source,
+                    data: {
+                        items: data.items,
+                        page: Number(data.page || 1),
+                        total_pages: Number(data.total_pages || 1),
+                        no_more: !!data.no_more,
+                    },
+                },
+                {
+                    maxEntries: DISCOVER_MAIN_GRID_CACHE_MAX_ENTRIES,
+                    maxChars: DISCOVER_MAIN_GRID_CACHE_MAX_CHARS,
+                },
+            );
+        };
+
+        const writeMainGridCacheFromCurrent = () => writeMainGridCache({
+            items: mainGridItems.value || [],
+            page: mainGridPage.value || 1,
+            total_pages: mainGridTotalPages.value || 1,
+            no_more: mainGridNoMore.value,
+        });
+
+        const mergeMainGridCachedTail = (freshItems = [], cachedItems = []) => {
+            const tail = (cachedItems || []).slice(freshItems.length);
+            const getKey = item => [
+                item?.source || '',
+                item?.id || item?._tmdb_id || item?.tmdb_id || '',
+                item?.media_type || '',
+                item?.title || item?.name || '',
+                item?.year || '',
+            ].join('|');
+            const seen = new Set((freshItems || []).map(getKey));
+            return [
+                ...(freshItems || []),
+                ...tail.filter(item => {
+                    const key = getKey(item);
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                }),
+            ];
+        };
+
         const getItemTmdbId = (item = {}) => {
             if (item._tmdb_id || item.tmdb_id) return item._tmdb_id || item.tmdb_id;
             return ['tmdb', 'themoviedb'].includes(item.source) ? item.id : '';
@@ -1023,6 +1234,115 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             missingEpisodeStats.progress = { current: 0, total: 0 };
         };
 
+        const getMissingEpisodeStatsCacheEntryKey = (data = null) => stableCacheStringify({
+            library: getPrimaryServerFingerprint(),
+            serverIdx: data?.meta?.server_idx ?? missingEpisodeStats.meta?.server_idx ?? 0,
+        });
+
+        const getMissingEpisodeStatsCacheEntry = () => {
+            const entry = getLocalCacheEntry(
+                MISSING_EPISODE_STATS_CACHE_KEY,
+                MISSING_EPISODE_STATS_CACHE_VERSION,
+                getMissingEpisodeStatsCacheEntryKey(),
+            );
+            if (!entry?.data || !Array.isArray(entry.data.items) || !Array.isArray(entry.data.libraries)) return null;
+            return entry;
+        };
+
+        const shouldCacheMissingEpisodeStatsPayload = (data = {}, summaryOnly = false) => {
+            const meta = data.meta || {};
+            return !summaryOnly
+                && data.ready !== false
+                && !data.running
+                && !!meta.missing_stats_cache_key
+                && Array.isArray(data.items)
+                && Array.isArray(data.libraries);
+        };
+
+        const compactMissingEpisodeItemForCache = (item = {}) => {
+            const keys = [
+                'tmdbId',
+                'libraryId',
+                'libraryName',
+                'title',
+                'year',
+                'releaseDate',
+                'poster_url',
+                'status',
+                'label',
+                'missingCategory',
+                'categoryLabel',
+                'tmdbStatus',
+                'presentEpisodes',
+                'totalEpisodes',
+                'missingEpisodes',
+                'airedMissingEpisodes',
+                'extraLocalEpisodes',
+                'seasonBrief',
+                'manualComplete',
+                'manualCompleteAt',
+                'manualCompleteLocalEpisodes',
+            ];
+            return keys.reduce((acc, key) => {
+                if (item[key] !== undefined) acc[key] = item[key];
+                return acc;
+            }, { _cachedDisplayOnly: true });
+        };
+
+        const stripMissingEpisodeLibraryItems = (libraries = []) => {
+            return (libraries || []).map(({ items, ...lib }) => lib);
+        };
+
+        const buildMissingEpisodeStatsCacheData = (data = {}) => {
+            const allItems = Array.isArray(data.items) ? data.items : [];
+            const shouldStoreFull = allItems.length <= MISSING_EPISODE_FULL_CACHE_ITEM_LIMIT;
+            const cachedItems = shouldStoreFull
+                ? allItems
+                : allItems
+                    .filter(item => isMissingEpisodeActionableMissing(item))
+                    .map(compactMissingEpisodeItemForCache);
+            return {
+                ready: data.ready !== false,
+                running: false,
+                message: data.message || '',
+                meta: data.meta || {},
+                summary: data.summary || emptyMissingEpisodeSummary(),
+                items: cachedItems,
+                libraries: shouldStoreFull ? (data.libraries || []) : stripMissingEpisodeLibraryItems(data.libraries || []),
+                progress: data.progress || { current: data.summary?.tvCount || 0, total: data.summary?.tvCount || 0 },
+                cachedDisplayMode: shouldStoreFull ? 'full' : 'actionable',
+            };
+        };
+
+        const writeMissingEpisodeStatsCache = (data = {}, summaryOnly = false) => {
+            if (!shouldCacheMissingEpisodeStatsPayload(data, summaryOnly)) return false;
+            const entryKey = getMissingEpisodeStatsCacheEntryKey(data);
+            return setLocalCacheEntry(
+                MISSING_EPISODE_STATS_CACHE_KEY,
+                MISSING_EPISODE_STATS_CACHE_VERSION,
+                entryKey,
+                {
+                    updatedAt: Date.now(),
+                    data: buildMissingEpisodeStatsCacheData(data),
+                },
+                {
+                    maxEntries: MISSING_EPISODE_STATS_CACHE_MAX_ENTRIES,
+                    maxChars: MISSING_EPISODE_STATS_CACHE_MAX_CHARS,
+                },
+            );
+        };
+
+        const writeMissingEpisodeStatsCacheFromCurrent = () => writeMissingEpisodeStatsCache({
+            ready: missingEpisodeStats.ready,
+            running: false,
+            message: missingEpisodeStats.message,
+            meta: missingEpisodeStats.meta,
+            summary: missingEpisodeStats.summary,
+            items: missingEpisodeStats.items,
+            libraries: missingEpisodeStats.libraries,
+            progress: missingEpisodeStats.progress,
+        });
+
         const applyMissingEpisodeStatsData = (data = {}, options = {}) => {
             const summaryOnly = options.summaryOnly || data.summaryOnly;
             const previousLibraryKey = missingEpisodeStats.activeLibraryKey;
@@ -1050,6 +1370,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             if (!summaryOnly && !data.running) {
                 missingEpisodeStats.loadingAction = '';
             }
+            writeMissingEpisodeStatsCache(data, summaryOnly);
         };
 
         const buildMissingEpisodeSummaryFromItems = (items = [], tvCountOverride = null) => {
@@ -1174,6 +1495,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const row = (missingEpisodeStats.items || []).find(item => getMissingEpisodeRowIdentity(item) === targetKey);
             if (!row) return true;
             replaceMissingEpisodeRowEverywhere(buildManualCompleteRow(row, !!data.manual_complete));
+            writeMissingEpisodeStatsCacheFromCurrent();
             return true;
         };
 
@@ -1244,8 +1566,23 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const loadMissingEpisodeStatsShell = async () => {
-            if (missingEpisodeStats.loading || missingEpisodeStats.loaded) return;
-            const runId = missingEpisodeStatsRunId;
+            if (missingEpisodeStats.loading) return;
+            if (missingEpisodeStats.loaded) {
+                const runId = ++missingEpisodeStatsRunId;
+                missingEpisodeStats.loadingAction = 'load';
+                loadMissingEpisodeStatsFull(runId);
+                return;
+            }
+            const cached = getMissingEpisodeStatsCacheEntry();
+            const renderedCached = !!cached;
+            if (cached) {
+                applyMissingEpisodeStatsData(cached.data || {});
+                const runId = ++missingEpisodeStatsRunId;
+                missingEpisodeStats.loadingAction = 'load';
+                loadMissingEpisodeStatsFull(runId);
+                return;
+            }
+            const runId = ++missingEpisodeStatsRunId;
             missingEpisodeStats.loading = true;
             missingEpisodeStats.loadingAction = 'load';
             try {
@@ -1259,7 +1596,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 if (runId === missingEpisodeStatsRunId) {
                     missingEpisodeStats.loading = false;
                     missingEpisodeStats.loadingAction = '';
-                    missingEpisodeStats.error = e.response?.data?.detail || e.message || '获取媒体库失败';
+                    if (!renderedCached) {
+                        missingEpisodeStats.error = e.response?.data?.detail || e.message || '获取媒体库失败';
+                    }
                 }
             }
         };
@@ -1359,7 +1698,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const prefetchMainGridPage = (page, gen) => {
-            if (!isDoubanMainGrid() || page < 1 || mainGridNoMore.value) return null;
+            if (!discoverActiveSource.value || page < 1 || mainGridNoMore.value) return null;
             const cached = mainGridPrefetch.pages[page];
             if (cached && cached.gen === gen) {
                 if (cached.ready) return Promise.resolve(cached.data);
@@ -1400,7 +1739,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const prefetchMainGridAhead = (fromPage, gen) => {
-            if (!isDoubanMainGrid() || mainGridNoMore.value) return;
+            if (!discoverActiveSource.value || mainGridNoMore.value) return;
             for (let offset = 1; offset <= MAIN_GRID_PREFETCH_AHEAD; offset += 1) {
                 prefetchMainGridPage(fromPage + offset, gen);
             }
@@ -1416,6 +1755,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             mainGridTotalPages.value = data.total_pages || 1;
             mainGridNoMore.value = !mainGridPageHasMore(data, page, Array(data._rawItemCount ?? items.length).fill(null));
             delete mainGridPrefetch.pages[page];
+            writeMainGridCacheFromCurrent();
             prefetchMainGridAhead(page, _mainGridGen);
             nextTick(() => setupMainGridObserver());
             return true;
@@ -1423,16 +1763,30 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
 
         const loadMainGrid = async (reset = true) => {
+            const source = discoverActiveSource.value;
+            let cachedGridSnapshot = null;
             if (reset) {
                 resetMainGridPrefetch();
-                mainGridItems.value = [];
                 mainGridPage.value = 1;
                 mainGridNoMore.value = false;
+                const cached = source ? getMainGridCacheEntry() : null;
+                if (cached) {
+                    const cachedData = cached.data || {};
+                    cachedGridSnapshot = {
+                        items: Array.isArray(cachedData.items) ? [...cachedData.items] : [],
+                        page: Number(cachedData.page || 1),
+                        totalPages: Number(cachedData.total_pages || 1),
+                        noMore: !!cachedData.no_more,
+                    };
+                    applyMainGridCacheEntry(cached);
+                } else {
+                    mainGridItems.value = [];
+                    mainGridTotalPages.value = 1;
+                }
             }
             const gen = ++_mainGridGen;
             mainGridLoading.value = true;
             try {
-                const source = discoverActiveSource.value;
                 if (!source) {
                     mainGridItems.value = [];
                     mainGridTotalPages.value = 1;
@@ -1440,20 +1794,33 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     return;
                 }
 
-                const page = mainGridPage.value;
+                const page = reset ? 1 : mainGridPage.value;
                 const data = await fetchMainGridPage(source, page);
                 if (gen !== _mainGridGen) return;
                 const rawItems = data.items || [];
                 const items = await prepareDisplayableMainGridItems(rawItems);
-                mainGridTotalPages.value = data.total_pages || 1;
-                mainGridPage.value = page;
-                mainGridNoMore.value = !mainGridPageHasMore(data, page, rawItems);
-                if (reset) {
-                    mainGridItems.value = items;
+                const freshTotalPages = data.total_pages || 1;
+                const freshNoMore = !mainGridPageHasMore(data, page, rawItems);
+                if (reset && cachedGridSnapshot?.items?.length && rawItems.length) {
+                    mainGridItems.value = mergeMainGridCachedTail(items, cachedGridSnapshot.items);
+                    mainGridPage.value = Math.max(page, cachedGridSnapshot.page || 1);
+                    mainGridTotalPages.value = Math.max(freshTotalPages, cachedGridSnapshot.totalPages || 1);
+                    mainGridNoMore.value = (
+                        (cachedGridSnapshot.noMore && freshTotalPages <= (cachedGridSnapshot.totalPages || 1))
+                        || mainGridPage.value >= mainGridTotalPages.value
+                    );
                 } else {
-                    mainGridItems.value.push(...items);
+                    mainGridTotalPages.value = freshTotalPages;
+                    mainGridPage.value = page;
+                    mainGridNoMore.value = freshNoMore;
+                    if (reset) {
+                        mainGridItems.value = items;
+                    } else {
+                        mainGridItems.value.push(...items);
+                    }
                 }
-                if (source === 'douban' && !mainGridNoMore.value) prefetchMainGridAhead(page, gen);
+                writeMainGridCacheFromCurrent();
+                if (!mainGridNoMore.value) prefetchMainGridAhead(mainGridPage.value, gen);
             } catch (e) {
                 console.error('加载发现网格失败:', e);
             } finally {
@@ -1510,7 +1877,6 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             if (mainGridObserverRetryTimer) { clearTimeout(mainGridObserverRetryTimer); mainGridObserverRetryTimer = null; }
             resetMainGridPrefetch();
             clearMissingEpisodeStatsForGridChange();
-            mainGridItems.value = [];
             mainGridPage.value = 1;
             mainGridNoMore.value = false;
             loadMainGrid(true);
@@ -2415,6 +2781,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 loadMainGrid(true);
             } else {
                 applyLibraryEventToItems(mainGridItems.value, payload);
+                writeMainGridCacheFromCurrent();
             }
 
             applyLibraryEventToItems(gridModal.items, payload);
