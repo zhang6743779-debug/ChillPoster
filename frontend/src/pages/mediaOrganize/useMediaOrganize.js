@@ -68,14 +68,21 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         const isOrganizeTerminalStatus = (status) => ['finished', 'error', 'stopped', 'interrupted'].includes(status);
         const formatOrganizeProgressText = (task = {}) => {
             const detail = task.detail || {};
+            if (detail.task === 'collection_backfill' && detail.processed !== undefined && detail.total !== undefined) {
+                return `合集补齐: ${detail.processed}/${detail.total}`;
+            }
             if (detail.processed !== undefined && detail.total !== undefined) {
                 return `已处理: ${detail.processed}/${detail.total}`;
             }
             return task.name || '';
         };
         const buildOrganizeResultMessage = (task = {}, label = '') => {
+            const detail = task.detail || {};
             if (task.status === 'interrupted') {
                 return task.resume_message || task.name || '整理已中断';
+            }
+            if (detail.task === 'collection_backfill') {
+                return `电影合集补齐${label}`;
             }
             return `整理${label}`;
         };
@@ -1362,6 +1369,30 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             }
         };
 
+        const runCollectionBackfill = async () => {
+            organizeLoading.value = true;
+            organizeResult.value = null;
+            organizeProgress.percent = 0;
+            organizeProgress.status_text = '启动中...';
+            organizeProgress.detail = { task: 'collection_backfill', total: 0, processed: 0, success: 0, failed: 0, skipped: 0 };
+            try {
+                const res = await axios.post('/api/media_organize/collections/backfill');
+                if (res.data.status === 'ok') {
+                    organizeRunId.value = res.data.run_id;
+                    localStorage.setItem(ORGANIZE_RUN_ID_STORAGE_KEY, organizeRunId.value);
+                    showToast('电影合集补齐任务已启动', 'success');
+                    startOrganizePolling();
+                } else {
+                    showToast(res.data.message || '电影合集补齐启动失败', res.data.status === 'busy' ? 'warning' : 'error');
+                    organizeLoading.value = false;
+                }
+            } catch (e) {
+                organizeResult.value = { status: 'error', message: e.response?.data?.detail || e.message };
+                showToast('电影合集补齐请求失败', 'error');
+                organizeLoading.value = false;
+            }
+        };
+
         const requestStopOrganizeRun = async (runId) => {
             if (!runId) return { status: 'not_found', message: '任务不存在或已结束' };
             const res = await axios.post('/api/stop_task', { run_id: runId });
@@ -1466,6 +1497,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         organizeResult,
         organizeProgress,
         runOrganize,
+        runCollectionBackfill,
         cancelOrganize,
         identifyTest,
         openIdentifyTest,

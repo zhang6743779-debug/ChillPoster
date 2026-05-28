@@ -56,6 +56,10 @@ from app.services.media_organize_scrape import (
     _map_remote_to_strm_local_path,
 )
 from app.services.media_server_refresh import media_server_refresh
+from app.services.emby_collection_sync import (
+    build_movie_collection_sync_payload,
+    schedule_emby_collection_sync,
+)
 from app.services.organize_history_service import append_organize_history
 from app.dependencies import ACTIVE_TASKS, set_task_detail, update_task_progress
 from core.logger import logger
@@ -2118,6 +2122,7 @@ async def _run_organize_async(run_id: str, req):
             group_pending_strm_payloads: list[dict] = []
             group_pending_emby_library_checks: list[dict] = []
             group_pending_refresh_payloads: list[dict] = []
+            group_pending_collection_syncs: list[dict] = []
             ffprobe_batch_profiles: dict = {}
             ffprobe_batch_sizes: dict = {}
             ffprobe_batch_segment_samples: dict = {}
@@ -2613,6 +2618,7 @@ async def _run_organize_async(run_id: str, req):
                                 pending_strm_payloads=group_pending_strm_payloads,
                                 pending_emby_library_checks=group_pending_emby_library_checks,
                                 pending_refresh_payloads=group_pending_refresh_payloads,
+                                pending_collection_syncs=group_pending_collection_syncs,
                                 strm_force_overwrite=bool(wash_replace_candidate_path),
                                 strm_replace_remote_paths=[wash_replace_candidate_path] if wash_replace_candidate_path else [],
                             )
@@ -2868,6 +2874,7 @@ async def _run_organize_async(run_id: str, req):
                             pending_strm_payloads=group_pending_strm_payloads,
                             pending_emby_library_checks=group_pending_emby_library_checks,
                             pending_refresh_payloads=group_pending_refresh_payloads,
+                            pending_collection_syncs=group_pending_collection_syncs,
                             strm_force_overwrite=bool(plan_item.get("strm_force_overwrite")),
                             strm_replace_remote_paths=list(plan_item.get("strm_replace_remote_paths") or []),
                         )
@@ -2914,11 +2921,12 @@ async def _run_organize_async(run_id: str, req):
 
             # === 本组 STRM + 媒体库刷新 ===
             # 放入后处理队列，释放整理并发槽继续处理下一组。
-            if group_pending_strm_payloads or group_pending_emby_library_checks or group_pending_refresh_payloads:
+            if group_pending_strm_payloads or group_pending_emby_library_checks or group_pending_refresh_payloads or group_pending_collection_syncs:
                 await postprocess_queue.put({
                     "strm_payloads": list(group_pending_strm_payloads),
                     "emby_library_checks": list(group_pending_emby_library_checks),
                     "refresh_payloads": list(group_pending_refresh_payloads),
+                    "collection_syncs": list(group_pending_collection_syncs),
                 })
 
         prefetched_source_tree_entries = getattr(req, "_prefetched_source_tree_entries", None)
@@ -2945,6 +2953,7 @@ async def _run_organize_async(run_id: str, req):
                 "strm_payloads": [],
                 "emby_library_checks": [],
                 "refresh_payloads": [],
+                "collection_syncs": [],
             }
             for batch_item in batch_items:
                 if not batch_item:
@@ -2952,6 +2961,7 @@ async def _run_organize_async(run_id: str, req):
                 merged["strm_payloads"].extend(list(batch_item.get("strm_payloads") or []))
                 merged["emby_library_checks"].extend(list(batch_item.get("emby_library_checks") or []))
                 merged["refresh_payloads"].extend(list(batch_item.get("refresh_payloads") or []))
+                merged["collection_syncs"].extend(list(batch_item.get("collection_syncs") or []))
             return merged
 
         async def _run_postprocess_batch(batch: dict):
@@ -2960,10 +2970,11 @@ async def _run_organize_async(run_id: str, req):
             strm_payloads = list((batch or {}).get("strm_payloads") or [])
             emby_checks = list((batch or {}).get("emby_library_checks") or [])
             refresh_payloads = list((batch or {}).get("refresh_payloads") or [])
+            collection_syncs = list((batch or {}).get("collection_syncs") or [])
             if group_count > 1:
                 logger.info(
                     f"[MediaOrganize] 后处理合批: 分组={group_count}, "
-                    f"STRM载荷={len(strm_payloads)}, 刷新路径={len(refresh_payloads)}"
+                    f"STRM载荷={len(strm_payloads)}, 刷新路径={len(refresh_payloads)}, 合集同步={len(collection_syncs)}"
                 )
 
             if strm_payloads and config_data.get("auto_sync_strm", False):
@@ -2997,6 +3008,10 @@ async def _run_organize_async(run_id: str, req):
                     except Exception as e:
                         logger.debug(f"[EmbyLib] 建库检查失败: {e}")
 
+            if collection_syncs:
+                scheduled_count = schedule_emby_collection_sync(collection_syncs)
+                if scheduled_count:
+                    logger.info(f"[MediaOrganize] 已安排 Emby 合集自动同步: {scheduled_count} 条")
             _flush_pending_media_server_refreshes(immediate=True, payloads=refresh_payloads)
             _update_streaming_progress(
                 run_id,
@@ -4052,6 +4067,7 @@ def _finalize_organize_result(
     library_index, config_data: dict,
     metadata_executor, pending_library_cache_items: dict,
     pending_strm_payloads: list, pending_emby_library_checks: list, pending_refresh_payloads: list,
+    pending_collection_syncs: list,
     strm_force_overwrite: bool = False, strm_replace_remote_paths: list[str] | None = None,
 ):
     file_sha1 = vf.get("sha1", "").upper()
@@ -4282,6 +4298,15 @@ def _finalize_organize_result(
         "category": category_path or "",
         "target_path": refresh_target_path,
     })
+
+    if media_type == "movie":
+        collection_payload = build_movie_collection_sync_payload(
+            meta_ctx.get("tmdb_data") or {},
+            variables,
+            refresh_target_path,
+        )
+        if collection_payload:
+            pending_collection_syncs.append(collection_payload)
 
 
 def _resolve_tv_target_names(variables: dict, config_data: dict, req) -> tuple[str, int, str]:

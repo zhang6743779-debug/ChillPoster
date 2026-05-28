@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import threading
+import re
 from copy import deepcopy
 from datetime import datetime
 from requests.adapters import HTTPAdapter
@@ -589,6 +590,157 @@ class EmbyClient:
             pass
         return results
 
+    @staticmethod
+    def _normalize_lookup_name(value):
+        return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+    @staticmethod
+    def _ids_to_csv(item_ids):
+        return ",".join(str(item_id) for item_id in (item_ids or []) if str(item_id or "").strip())
+
+    def get_raw_item(self, item_id, fields=""):
+        if not item_id:
+            return None
+        uid = self._get_user_id()
+        endpoint = f"emby/Users/{uid}/Items/{item_id}" if uid else f"emby/Items/{item_id}"
+        params = {}
+        if fields:
+            params["Fields"] = fields
+        try:
+            return self._request("GET", endpoint, params=params)
+        except Exception:
+            return None
+
+    def find_items_by_provider_id(self, provider, provider_id, item_types="Movie", limit=20):
+        if not provider or not provider_id:
+            return []
+        params = {
+            "Recursive": "true",
+            "AnyProviderIdEquals": f"{provider}.{provider_id}",
+            "IncludeItemTypes": item_types,
+            "Fields": "ProviderIds,Path,ImageTags,BackdropImageTags,ProductionYear,Name",
+            "StartIndex": 0,
+            "Limit": limit,
+        }
+        uid = self._get_user_id()
+        if uid:
+            params["UserId"] = uid
+        try:
+            data = self._request("GET", "emby/Items", params=params)
+            return data.get("Items", []) if isinstance(data, dict) else []
+        except Exception as e:
+            logger.debug(f"按外部ID查找 Emby 条目失败: {provider}.{provider_id} | {e}")
+            return []
+
+    def find_collection_by_name(self, name):
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            return None
+        expected = self._normalize_lookup_name(clean_name)
+        params = {
+            "SearchTerm": clean_name,
+            "Recursive": "true",
+            "IncludeItemTypes": "BoxSet",
+            "Fields": "ImageTags,BackdropImageTags,ProviderIds,Overview",
+            "Limit": 50,
+        }
+        uid = self._get_user_id()
+        endpoint = f"emby/Users/{uid}/Items" if uid else "emby/Items"
+        try:
+            data = self._request("GET", endpoint, params=params)
+            items = data.get("Items", []) if isinstance(data, dict) else []
+            for item in items:
+                if item.get("Type") != "BoxSet":
+                    continue
+                if self._normalize_lookup_name(item.get("Name")) == expected:
+                    return item
+            return None
+        except Exception as e:
+            logger.debug(f"查找 Emby 合集失败: {clean_name} | {e}")
+            return None
+
+    def create_collection(self, name, item_ids, is_locked=False):
+        clean_name = str(name or "").strip()
+        ids_csv = self._ids_to_csv(item_ids)
+        if not clean_name or not ids_csv:
+            return None
+        try:
+            result = self._request(
+                "POST",
+                "emby/Collections",
+                params={
+                    "Name": clean_name,
+                    "Ids": ids_csv,
+                    "IsLocked": "true" if is_locked else "false",
+                },
+            )
+            return result if isinstance(result, dict) else {"Name": clean_name}
+        except Exception as e:
+            logger.warning(f"创建 Emby 合集失败: {clean_name} | {e}")
+            return None
+
+    def add_items_to_collection(self, collection_id, item_ids):
+        ids_csv = self._ids_to_csv(item_ids)
+        if not collection_id or not ids_csv:
+            return False
+        try:
+            self._request(
+                "POST",
+                f"emby/Collections/{collection_id}/Items",
+                params={"Ids": ids_csv},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"添加条目到 Emby 合集失败: collection={collection_id}, ids={ids_csv} | {e}")
+            return False
+
+    def upload_item_image(self, item_id, image_data, image_type="Primary"):
+        if not item_id or not image_data:
+            return False
+        image_type = str(image_type or "Primary").strip() or "Primary"
+        mime_type = "image/png" if bytes(image_data).startswith(b'\x89PNG') else "image/jpeg"
+        headers = {
+            "X-Emby-Token": self.key,
+            "User-Agent": "PosterMaker/Web/6.0",
+            "Content-Type": mime_type,
+        }
+
+        endpoint_suffixes = [f"Images/{image_type}"]
+        if image_type.lower() in {"backdrop", "screenshot", "chapter"}:
+            endpoint_suffixes.append(f"Images/{image_type}/0")
+
+        def _try_upload(target_id, data):
+            for suffix in endpoint_suffixes:
+                url = f"{self.host}/emby/Items/{target_id}/{suffix}"
+                try:
+                    res = requests.post(
+                        url,
+                        headers=headers,
+                        data=data,
+                        verify=False,
+                        proxies=self.proxies,
+                        timeout=self.timeout,
+                    )
+                    if res.status_code in (200, 204):
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        b64_data = base64.b64encode(image_data)
+        if _try_upload(item_id, b64_data):
+            return True
+        if _try_upload(item_id, image_data):
+            return True
+
+        real_id = self._resolve_real_id(item_id)
+        if real_id and str(real_id) != str(item_id):
+            if _try_upload(real_id, b64_data):
+                return True
+            if _try_upload(real_id, image_data):
+                return True
+        return False
+
     def find_path_by_id(self, tmdb_id, item_type='Movie', exclude_path=None):
         """
         根据 TMDb ID 查找物理路径 (支持版本合并/MediaSources挖掘)
@@ -949,6 +1101,116 @@ class EmbyClient:
             "failed": failed_count,
             "items": results,
         }
+
+    def ensure_movie_library_min_collection_items(self, min_items=1):
+        """把电影媒体库的最小自动合集尺寸调整为指定值。"""
+        try:
+            min_items = max(1, int(min_items or 1))
+        except Exception:
+            min_items = 1
+
+        results = []
+        updated_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        try:
+            data = self._request("GET", "emby/Library/VirtualFolders/Query")
+        except Exception:
+            data = self._request("GET", "emby/Library/VirtualFolders")
+
+        folders = data.get("Items") if isinstance(data, dict) else data
+        if not isinstance(folders, list):
+            return {"updated": 0, "skipped": 0, "failed": 0, "items": results}
+
+        for folder in folders:
+            if not isinstance(folder, dict):
+                continue
+
+            lib_id = str(folder.get("ItemId") or folder.get("Id") or "").strip()
+            lib_name = str(folder.get("Name") or "").strip() or lib_id
+            options = folder.get("LibraryOptions")
+            collection_type = str(folder.get("CollectionType") or "").strip().lower()
+            type_options = options.get("TypeOptions") if isinstance(options, dict) else []
+            has_movie_type = any(
+                str(item.get("Type") or "").strip().lower() == "movie"
+                for item in (type_options if isinstance(type_options, list) else [])
+                if isinstance(item, dict)
+            )
+
+            if not lib_id or not isinstance(options, dict):
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "missing_library_options",
+                })
+                continue
+
+            if collection_type not in {"movies", "mixed"} and not has_movie_type:
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "not_movie_library",
+                })
+                continue
+
+            try:
+                current = int(options.get("MinCollectionItems"))
+            except Exception:
+                current = None
+            if current == min_items:
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "already_set",
+                    "current": current,
+                })
+                continue
+
+            next_options = deepcopy(options)
+            next_options["MinCollectionItems"] = min_items
+            try:
+                self._request(
+                    "POST",
+                    "emby/Library/VirtualFolders/LibraryOptions",
+                    json={
+                        "Id": lib_id,
+                        "LibraryOptions": next_options,
+                    },
+                )
+                updated_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "updated",
+                    "previous": current,
+                    "current": min_items,
+                })
+                logger.info(f"已调整电影库最小自动合集尺寸: {lib_name} ({lib_id}) {current} -> {min_items}")
+            except Exception as e:
+                failed_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "failed",
+                    "message": str(e),
+                    "previous": current,
+                    "current": min_items,
+                })
+                logger.warning(f"调整电影库最小自动合集尺寸失败: {lib_name} ({lib_id}) -> {e}")
+
+        return {
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "failed": failed_count,
+            "items": results,
+        }
     
     def delete_library(self, library_id):
         """
@@ -1218,6 +1480,145 @@ class EmbyClient:
             episode_groups.append({"season": int(season), "episodes": episodes})
         return ",".join(parts), episode_groups
 
+    def _extract_tmdb_id_from_item(self, item: dict) -> str:
+        provider_ids = item.get("ProviderIds") or {}
+        tmdb_id = str(provider_ids.get("Tmdb") or provider_ids.get("TMDB") or "").strip()
+        if tmdb_id:
+            return tmdb_id
+        path = str(item.get("Path") or "")
+        match = re.search(r"\{tmdb-(\d+)\}", path, re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    def _normalize_recent_identity_part(self, value) -> str:
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        return re.sub(r"[\s:：·\-*'!,?.。_]+", "", text)
+
+    def _normalize_recent_index(self, value) -> str:
+        if value in (None, "", "?"):
+            return ""
+        try:
+            return str(int(float(value)))
+        except Exception:
+            return str(value).strip()
+
+    def _is_real_library_path(self, path: str) -> bool:
+        normalized = str(path or "").replace("\\", "/").lower()
+        return "/真实库/" in normalized or "/real_library/" in normalized or "/real-library/" in normalized
+
+    def _float_or_zero(self, value) -> float:
+        try:
+            return float(value or 0)
+        except Exception:
+            return 0.0
+
+    def _calculate_progress_percent(self, playback_position_ticks, runtime_ticks) -> float:
+        position = self._float_or_zero(playback_position_ticks)
+        runtime = self._float_or_zero(runtime_ticks)
+        if position <= 0 or runtime <= 0:
+            return 0.0
+        return round(min(max(position / runtime * 100, 0), 100), 1)
+
+    def _entry_progress_percent(self, entry: dict) -> float:
+        progress = self._float_or_zero(entry.get("progress_percent"))
+        if progress > 0:
+            return progress
+        return self._calculate_progress_percent(
+            entry.get("playback_position_ticks"),
+            entry.get("runtime_ticks"),
+        )
+
+    def _recent_entry_identity_key(self, entry: dict, default_prefix: str) -> str:
+        tmdb_id = str(entry.get("tmdb_id") or "").strip()
+        media_type = str(entry.get("media_type") or entry.get("type") or "").lower()
+        item_type = str(entry.get("type") or "").lower()
+        season = self._normalize_recent_index(entry.get("season"))
+        episode = self._normalize_recent_index(entry.get("episode"))
+
+        if item_type == "episode" or (media_type in {"tv", "series"} and season and episode):
+            if tmdb_id and season and episode:
+                return f"tmdb:{tmdb_id}:episode:{season}:{episode}"
+            title = self._normalize_recent_identity_part(entry.get("series_name") or entry.get("title"))
+            year = self._normalize_recent_index(entry.get("year"))
+            if title and season and episode:
+                return f"title:{title}:{year}:episode:{season}:{episode}"
+
+        if item_type == "series" or media_type in {"tv", "series"}:
+            episode_label = self._normalize_recent_identity_part(entry.get("episode_label"))
+            if tmdb_id:
+                return f"tmdb:{tmdb_id}:series:{episode_label}"
+            title = self._normalize_recent_identity_part(entry.get("title"))
+            year = self._normalize_recent_index(entry.get("year"))
+            if title:
+                return f"title:{title}:{year}:series:{episode_label}"
+
+        if tmdb_id:
+            return f"tmdb:{tmdb_id}:movie"
+
+        title = self._normalize_recent_identity_part(entry.get("title"))
+        year = self._normalize_recent_index(entry.get("year"))
+        if title:
+            return f"title:{title}:{year}:movie"
+        return f"{default_prefix}:{entry.get('id') or entry.get('card_id') or id(entry)}"
+
+    def _recent_entry_score(self, entry: dict) -> tuple:
+        progress = self._entry_progress_percent(entry)
+        path = str(entry.get("path") or "")
+        return (
+            0 if self._is_real_library_path(path) else 1,
+            1 if progress > 0 else 0,
+            1 if entry.get("poster_url") else 0,
+            1 if entry.get("backdrop_url") else 0,
+            1 if entry.get("tmdb_id") else 0,
+            progress,
+        )
+
+    def _merge_recent_entry_fields(self, primary: dict, fallback: dict) -> dict:
+        if not primary or not fallback:
+            return primary
+
+        primary_progress = self._entry_progress_percent(primary)
+        fallback_progress = self._entry_progress_percent(fallback)
+        if primary_progress <= 0 and fallback_progress > 0:
+            primary["progress_percent"] = fallback_progress
+
+        for key in ("playback_position_ticks", "runtime_ticks"):
+            if not primary.get(key) and fallback.get(key):
+                primary[key] = fallback.get(key)
+
+        for key in ("played_at", "poster_url", "backdrop_url", "overview", "rating", "genres", "tmdb_id", "year"):
+            if not primary.get(key) and fallback.get(key):
+                primary[key] = fallback.get(key)
+
+        if self._entry_progress_percent(primary) <= 0:
+            calculated = self._calculate_progress_percent(
+                primary.get("playback_position_ticks"),
+                primary.get("runtime_ticks"),
+            )
+            if calculated > 0:
+                primary["progress_percent"] = calculated
+        return primary
+
+    def _dedupe_recent_entries(self, entries: list, limit: int | None, date_field: str, default_prefix: str, sort_by_date: bool = True) -> list:
+        grouped = {}
+        for entry in entries or []:
+            key = self._recent_entry_identity_key(entry, default_prefix)
+            existing = grouped.get(key)
+            if not existing:
+                grouped[key] = entry
+                continue
+            if self._recent_entry_score(entry) > self._recent_entry_score(existing):
+                self._merge_recent_entry_fields(entry, existing)
+                grouped[key] = entry
+            else:
+                self._merge_recent_entry_fields(existing, entry)
+
+        result = list(grouped.values())
+        if sort_by_date:
+            result.sort(key=lambda x: self._parse_emby_datetime(x.get(date_field)), reverse=True)
+        return result[:limit] if limit else result
+
     def get_item_info(self, item_id):
         """
         获取媒体详情（用于通知）
@@ -1239,7 +1640,7 @@ class EmbyClient:
 
         try:
             params = {
-                "fields": "Overview,CommunityRating,Genres,Tagline,ProductionYear,SeriesName,ParentIndexNumber,IndexNumber,SeriesId,ImageTags,ProviderIds,OriginalTitle"
+                "fields": "Overview,CommunityRating,Genres,Tagline,ProductionYear,SeriesName,ParentIndexNumber,IndexNumber,SeriesId,ImageTags,ProviderIds,OriginalTitle,Path,RunTimeTicks"
             }
             info = self._request("GET", endpoint, params=params)
 
@@ -1254,8 +1655,10 @@ class EmbyClient:
                 "community_rating": info.get("CommunityRating"),
                 "tagline": info.get("Tagline", ""),
                 "original_title": info.get("OriginalTitle", ""),
-                "tmdb_id": str(info.get("ProviderIds", {}).get("Tmdb", "")) if info.get("ProviderIds", {}).get("Tmdb") else "",
+                "tmdb_id": self._extract_tmdb_id_from_item(info),
                 "status": info.get("Status", ""),
+                "path": info.get("Path", "") or "",
+                "runtime_ticks": info.get("RunTimeTicks") or 0,
             }
 
             # 获取海报图片
@@ -1296,6 +1699,9 @@ class EmbyClient:
                             if series_overview:
                                 result["overview"] = series_overview
                             result["series_year"] = series_info.get("ProductionYear", "")
+                            result["series_path"] = series_info.get("Path", "") or ""
+                            if not result.get("tmdb_id"):
+                                result["tmdb_id"] = self._extract_tmdb_id_from_item(series_info)
                     except Exception as e:
                         logger.debug(f"获取剧集元数据失败: {e}")
 
@@ -1320,7 +1726,7 @@ class EmbyClient:
             "IncludeItemTypes": "Movie,Episode",
             "SortBy": "DateCreated",
             "SortOrder": "Descending",
-            "Fields": "Overview,CommunityRating,Genres,ProductionYear,ImageTags,BackdropImageTags,DateCreated,SeriesId,SeriesName,ParentIndexNumber,IndexNumber"
+            "Fields": "Overview,CommunityRating,Genres,ProductionYear,ImageTags,BackdropImageTags,DateCreated,SeriesId,SeriesName,ParentIndexNumber,IndexNumber,ProviderIds,Path"
         }
         try:
             result = []
@@ -1372,6 +1778,8 @@ class EmbyClient:
                             "year": self._normalize_year_value(item.get("ProductionYear", "")),
                             "type": "Movie",
                             "media_type": "movie",
+                            "tmdb_id": self._extract_tmdb_id_from_item(item),
+                            "path": item.get("Path", "") or "",
                             "poster_url": poster_url,
                             "backdrop_url": backdrop_url,
                             "overview": item.get("Overview", "") or "",
@@ -1400,6 +1808,8 @@ class EmbyClient:
                                 "year": self._normalize_year_value(series_info.get("year", "")),
                                 "type": "Series",
                                 "media_type": "tv",
+                                "tmdb_id": series_info.get("tmdb_id") or self._extract_tmdb_id_from_item(item),
+                                "path": series_info.get("path") or series_info.get("series_path") or item.get("Path", "") or "",
                                 "poster_url": series_info.get("poster_url"),
                                 "backdrop_url": series_info.get("backdrop_url"),
                                 "overview": series_info.get("overview", "") or "",
@@ -1419,13 +1829,13 @@ class EmbyClient:
 
                     if requested_limit:
                         projected_count = len(result) + (1 if current_series_entry else 0)
-                        if projected_count >= requested_limit:
+                        if projected_count >= requested_limit * 4:
                             break
 
                 start_index += len(items)
                 if requested_limit:
                     projected_count = len(result) + (1 if current_series_entry else 0)
-                    if projected_count >= requested_limit:
+                    if projected_count >= requested_limit * 4:
                         break
                 try:
                     total_record_count = int(data.get("TotalRecordCount", 0)) if isinstance(data, dict) else 0
@@ -1437,89 +1847,21 @@ class EmbyClient:
                     break
 
             flush_current_series()
-            result.sort(key=lambda x: self._parse_emby_datetime(x.get("date_created")), reverse=True)
-            return result[:requested_limit] if requested_limit else result
+            return self._dedupe_recent_entries(result, requested_limit, "date_created", "recent_added")
         except Exception as e:
             logger.debug(f"[EmbyClient] 查询最近入库失败: {e}")
             return []
 
     def get_recent_playbacks(self, limit: int | None = None) -> list:
         uid = self._get_user_id()
-        if uid:
-            try:
-                resume_params = {
-                    "IncludeItemTypes": "Movie,Episode",
-                }
-                if limit:
-                    resume_params["Limit"] = limit
-                data = self._request(
-                    "GET",
-                    f"emby/Users/{uid}/Items/Resume",
-                    params=resume_params,
-                )
-                items = data.get("Items", []) if isinstance(data, dict) else []
-                result = []
-                for item in items:
-                    item_id = item.get("Id")
-                    if not item_id:
-                        continue
-                    item_info = self.get_item_info(item_id) or {}
-                    item_type = item_info.get("type") or item.get("Type", "")
-                    media_type = "tv" if item_type in ("Series", "Episode") else "movie"
-                    season = item_info.get("season") if item_type == "Episode" else None
-                    episode = item_info.get("episode") if item_type == "Episode" else None
-                    display_title = item_info.get("name") or item.get("Name", "未知媒体")
-                    if item_type == "Episode":
-                        series_name = item_info.get("series_name") or item.get("SeriesName") or display_title
-                        display_title = series_name
-                    backdrop_url = item_info.get("backdrop_url")
-                    poster_url = item_info.get("poster_url")
-                    if not backdrop_url:
-                        backdrop_tags = item.get("BackdropImageTags") or []
-                        image_tags = item.get("ImageTags", {})
-                        if backdrop_tags:
-                            backdrop_url = f"{self.public_host}/emby/Items/{item_id}/Images/Backdrop/0?tag={backdrop_tags[0]}&quality=90&maxWidth=1280"
-                        elif "Backdrop" in image_tags:
-                            backdrop_url = f"{self.public_host}/emby/Items/{item_id}/Images/Backdrop/0?tag={image_tags['Backdrop']}&quality=90&maxWidth=1280"
-                    result.append({
-                        "id": item_id,
-                        "title": display_title,
-                        "year": item_info.get("series_year") if item_type == "Episode" else item_info.get("year", item.get("ProductionYear", "")),
-                        "type": item_type,
-                        "media_type": media_type,
-                        "backdrop_url": backdrop_url or poster_url,
-                        "poster_url": poster_url,
-                        "overview": item_info.get("overview", item.get("Overview", "")) or "",
-                        "rating": item_info.get("community_rating", item.get("CommunityRating")),
-                        "genres": item_info.get("genres", ", ".join(item.get("Genres", [])) if item.get("Genres") else ""),
-                        "played_at": item.get("DatePlayed") or item.get("UserData", {}).get("LastPlayedDate", ""),
-                        "series_name": item_info.get("series_name") or item.get("SeriesName", ""),
-                        "season": season,
-                        "episode": episode,
-                        "progress_percent": round(float(item.get("UserData", {}).get("PlayedPercentage") or 0), 1),
-                    })
-                if result:
-                    return result[:limit] if limit else result
-            except Exception as e:
-                logger.debug(f"[EmbyClient] 通过继续观看查询最近播放失败: {e}")
 
-        endpoint = f"emby/Users/{uid}/Items" if uid else "emby/Items"
-        params = {
-            "Recursive": "true",
-            "IncludeItemTypes": "Movie,Episode",
-            "SortBy": "DatePlayed",
-            "SortOrder": "Descending",
-            "Filters": "IsPlayed",
-            "Fields": "UserData,ProductionYear,Overview,CommunityRating,Genres,ImageTags,BackdropImageTags,SeriesName,ParentIndexNumber,IndexNumber,SeriesId,DatePlayed,ProviderIds,OriginalTitle"
-        }
-        if limit:
-            params["Limit"] = max(limit * 3, 12)
-        try:
-            data = self._request("GET", endpoint, params=params)
-            items = data.get("Items", []) if isinstance(data, dict) else []
+        def build_playback_entries(items: list) -> list:
             result = []
             for item in items:
-                item_info = self.get_item_info(item.get("Id")) or {}
+                item_id = item.get("Id")
+                if not item_id:
+                    continue
+                item_info = self.get_item_info(item_id) or {}
                 item_type = item_info.get("type") or item.get("Type", "")
                 media_type = "tv" if item_type in ("Series", "Episode") else "movie"
                 season = item_info.get("season") if item_type == "Episode" else None
@@ -1534,15 +1876,23 @@ class EmbyClient:
                     backdrop_tags = item.get("BackdropImageTags") or []
                     image_tags = item.get("ImageTags", {})
                     if backdrop_tags:
-                        backdrop_url = f"{self.public_host}/emby/Items/{item['Id']}/Images/Backdrop/0?tag={backdrop_tags[0]}&quality=90&maxWidth=1280"
+                        backdrop_url = f"{self.public_host}/emby/Items/{item_id}/Images/Backdrop/0?tag={backdrop_tags[0]}&quality=90&maxWidth=1280"
                     elif "Backdrop" in image_tags:
-                        backdrop_url = f"{self.public_host}/emby/Items/{item['Id']}/Images/Backdrop/0?tag={image_tags['Backdrop']}&quality=90&maxWidth=1280"
+                        backdrop_url = f"{self.public_host}/emby/Items/{item_id}/Images/Backdrop/0?tag={image_tags['Backdrop']}&quality=90&maxWidth=1280"
+                user_data = item.get("UserData", {}) or {}
+                playback_position_ticks = user_data.get("PlaybackPositionTicks") or 0
+                runtime_ticks = item.get("RunTimeTicks") or item_info.get("runtime_ticks") or 0
+                progress_percent = round(self._float_or_zero(user_data.get("PlayedPercentage")), 1)
+                if progress_percent <= 0:
+                    progress_percent = self._calculate_progress_percent(playback_position_ticks, runtime_ticks)
                 result.append({
-                    "id": item.get("Id"),
+                    "id": item_id,
                     "title": display_title,
                     "year": item_info.get("series_year") if item_type == "Episode" else item_info.get("year", item.get("ProductionYear", "")),
                     "type": item_type,
                     "media_type": media_type,
+                    "tmdb_id": item_info.get("tmdb_id") or self._extract_tmdb_id_from_item(item),
+                    "path": item_info.get("path") or item_info.get("series_path") or item.get("Path", "") or "",
                     "backdrop_url": backdrop_url or poster_url,
                     "poster_url": poster_url,
                     "overview": item_info.get("overview", item.get("Overview", "")) or "",
@@ -1552,13 +1902,52 @@ class EmbyClient:
                     "series_name": item_info.get("series_name") or item.get("SeriesName", ""),
                     "season": season,
                     "episode": episode,
-                    "progress_percent": round(float(item.get("UserData", {}).get("PlayedPercentage") or 0), 1),
+                    "playback_position_ticks": playback_position_ticks,
+                    "runtime_ticks": runtime_ticks,
+                    "progress_percent": progress_percent,
                 })
-            result.sort(key=lambda x: self._parse_emby_datetime(x.get("played_at")), reverse=True)
-            return result[:limit] if limit else result
+            return result
+
+        if uid:
+            try:
+                resume_params = {
+                    "IncludeItemTypes": "Movie,Episode",
+                    "Fields": "UserData,RunTimeTicks,ProductionYear,Overview,CommunityRating,Genres,ImageTags,BackdropImageTags,SeriesName,ParentIndexNumber,IndexNumber,SeriesId,DatePlayed,ProviderIds,OriginalTitle,Path",
+                }
+                if limit:
+                    resume_params["Limit"] = max(limit * 3, 12)
+                data = self._request(
+                    "GET",
+                    f"emby/Users/{uid}/Items/Resume",
+                    params=resume_params,
+                )
+                items = data.get("Items", []) if isinstance(data, dict) else []
+                result = build_playback_entries(items)
+                if result:
+                    return self._dedupe_recent_entries(result, limit, "played_at", "recent_playback", sort_by_date=False)
+            except Exception as e:
+                logger.debug(f"[EmbyClient] 通过继续观看查询最近播放失败: {e}")
+
+        endpoint = f"emby/Users/{uid}/Items" if uid else "emby/Items"
+        params = {
+            "Recursive": "true",
+            "IncludeItemTypes": "Movie,Episode",
+            "SortBy": "DatePlayed",
+            "SortOrder": "Descending",
+            "Filters": "IsPlayed",
+            "Fields": "UserData,RunTimeTicks,ProductionYear,Overview,CommunityRating,Genres,ImageTags,BackdropImageTags,SeriesName,ParentIndexNumber,IndexNumber,SeriesId,DatePlayed,ProviderIds,OriginalTitle,Path"
+        }
+        if limit:
+            params["Limit"] = max(limit * 6, 120)
+        try:
+            data = self._request("GET", endpoint, params=params)
+            items = data.get("Items", []) if isinstance(data, dict) else []
+            result = build_playback_entries(items)
+            if result:
+                return self._dedupe_recent_entries(result, limit, "played_at", "recent_playback")
         except Exception as e:
             logger.debug(f"[EmbyClient] 查询最近播放失败: {e}")
-            return []
+        return []
 
     def _count_items_by_types(self, item_types: str) -> int:
         try:

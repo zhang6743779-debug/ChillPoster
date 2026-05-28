@@ -75,7 +75,7 @@ export function useConsoleLogs({ showToast }) {
         {
             value: 'MEDIA_ORGANIZE',
             label: '媒体整理',
-            keywords: ['[MediaOrganize]', '[Organizer]', '[MediaIdentify]', '[MediaInfo]', '[媒体库缓存]', '[Wash]', '[CategoryDir]', '[EmbyLib]', '[EmbyLibCache]', '[MediaServerRefresh]', '[115Life]', '媒体整理', '整理任务', '整理:', '洗版', '重命名', 'ffprobe', 'SHA1已存在', '自动整理', '目录刮削', '元数据已生成'],
+            keywords: ['[MediaOrganize]', '[Organizer]', '[MediaIdentify]', '[MediaInfo]', '[EmbyCollection]', '[媒体库缓存]', '[Wash]', '[CategoryDir]', '[EmbyLib]', '[EmbyLibCache]', '[MediaServerRefresh]', '[115Life]', '媒体整理', '整理任务', '整理:', '合集补齐', '洗版', '重命名', 'ffprobe', 'SHA1已存在', '自动整理', '目录刮削', '元数据已生成'],
         },
         {
             value: 'DRIVE_115',

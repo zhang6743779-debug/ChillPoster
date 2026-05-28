@@ -1192,3 +1192,52 @@ async def organize_media(req: OrganizeRequest):
         raise
     logger.info(f"[MediaOrganize] 后台整理任务已启动: run_id={run_id}")
     return {"status": "ok", "run_id": run_id}
+
+
+def _start_collection_backfill_thread(run_id: str):
+    try:
+        from app.services.emby_collection_sync import run_existing_movie_collection_backfill
+
+        run_existing_movie_collection_backfill(run_id)
+    except Exception as e:
+        logger.error(f"[MediaOrganize] 电影合集补齐任务异常: {e}", exc_info=True)
+        update_task_progress(run_id, f"电影合集补齐失败: {e}", 100, "error")
+    finally:
+        _finish_organize_run()
+
+
+@router.post("/collections/backfill")
+async def backfill_movie_collections():
+    """启动已有电影合集补齐任务。"""
+    run_id = f"organize_collection_backfill_{uuid.uuid4().hex[:8]}"
+    with _organize_trigger_lock:
+        if _state._organize_running:
+            return {"status": "busy", "message": "已有整理任务正在运行，请稍后再试"}
+        _state._organize_running = True
+        _state._organize_done_event = asyncio.Event()
+
+    update_task_progress(
+        run_id,
+        "电影合集补齐: 准备中...",
+        0,
+        detail={
+            "task": "collection_backfill",
+            "servers": 0,
+            "total": 0,
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+            "library_options_updated": 0,
+            "library_options_skipped": 0,
+            "library_options_failed": 0,
+        },
+    )
+    try:
+        t = threading.Thread(target=_start_collection_backfill_thread, args=(run_id,), daemon=True)
+        t.start()
+    except Exception:
+        _finish_organize_run()
+        raise
+    logger.info(f"[MediaOrganize] 电影合集补齐任务已启动: run_id={run_id}")
+    return {"status": "ok", "run_id": run_id}

@@ -29,6 +29,10 @@ _AUTO_UPDATE_INTERVAL_MINUTES = 30
 _SCHEDULED_RESTART_CONFIG_PATH = os.path.join("config", "docker_scheduled_restart.json")
 _SCHEDULED_RESTART_CONFIG_LOCK = threading.Lock()
 _SCHEDULED_RESTART_JOB_PREFIX = "docker_scheduled_restart_"
+_MEMORY_RESTART_JOB_ID = "docker_memory_auto_restart"
+_MEMORY_RESTART_INTERVAL_SECONDS = 60
+_MEMORY_RESTART_COOLDOWN_SECONDS = 30 * 60
+_MEMORY_RESTART_RUN_LOCK = threading.Lock()
 _DOCKER_SCHEDULER = None
 _DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 _DOCKER_HUB_CHALLENGE_HOST = "index.docker.io"
@@ -73,7 +77,9 @@ class AutoUpdatePayload(BaseModel):
 
 class ScheduledRestartPayload(BaseModel):
     enabled: bool = False
+    mode: Literal["time", "memory"] = "time"
     time: str = ""
+    memory_limit_mb: float = 0
 
 
 def _docker() -> DockerAPI:
@@ -283,6 +289,11 @@ def _scheduled_restart_setting_for(name: str) -> dict:
     return item if isinstance(item, dict) else {}
 
 
+def _restart_mode_for(setting: dict) -> str:
+    mode = str((setting or {}).get("mode") or "time").strip().lower()
+    return "memory" if mode == "memory" else "time"
+
+
 def _validate_restart_time(value: str) -> tuple[int, int, str]:
     raw = str(value or "").strip()
     try:
@@ -294,6 +305,18 @@ def _validate_restart_time(value: str) -> tuple[int, int, str]:
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         raise HTTPException(status_code=400, detail="定时重启时间必须在 00:00 到 23:59 之间")
     return hour, minute, f"{hour:02d}:{minute:02d}"
+
+
+def _validate_memory_limit_mb(value) -> int:
+    try:
+        limit = int(round(float(value or 0)))
+    except Exception:
+        raise HTTPException(status_code=400, detail="内存重启阈值必须是数字")
+    if limit <= 0:
+        raise HTTPException(status_code=400, detail="内存重启阈值必须大于 0 MB")
+    if limit > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="内存重启阈值不能超过 10485760 MB")
+    return limit
 
 
 def _save_scheduled_restart_setting(name: str, setting: dict) -> dict:
@@ -826,7 +849,7 @@ def run_scheduled_restart(container_name: str):
     if not name:
         return
     setting = _scheduled_restart_setting_for(name)
-    if not setting.get("enabled"):
+    if not setting.get("enabled") or _restart_mode_for(setting) != "time":
         return
     try:
         api = DockerAPI(timeout=120)
@@ -835,6 +858,7 @@ def run_scheduled_restart(container_name: str):
             _save_scheduled_restart_setting(name, {"last_error": "容器不存在或已改名", "last_run_at": time.time()})
             logger.warning(f"[DockerManager] 定时重启失败，容器不存在或已改名: {name}")
             return
+        _save_scheduled_restart_setting(name, {"last_error": "", "last_run_at": time.time(), "container_id": container_id})
         api.restart_container(container_id)
         _save_scheduled_restart_setting(name, {"last_error": "", "last_run_at": time.time(), "container_id": container_id})
         logger.info(f"[DockerManager] 定时重启完成: {name}")
@@ -853,7 +877,7 @@ def _register_scheduled_restart_job(name: str, setting: dict, scheduler=None):
             target_scheduler.remove_job(job_id)
     except Exception:
         pass
-    if not setting.get("enabled"):
+    if not setting.get("enabled") or _restart_mode_for(setting) != "time":
         return
     hour, minute, clean_time = _validate_restart_time(setting.get("time") or "")
     target_scheduler.add_job(
@@ -868,23 +892,130 @@ def _register_scheduled_restart_job(name: str, setting: dict, scheduler=None):
     )
 
 
+def _register_memory_restart_job(scheduler=None):
+    target_scheduler = scheduler or _DOCKER_SCHEDULER
+    if not target_scheduler:
+        return
+    try:
+        if target_scheduler.get_job(_MEMORY_RESTART_JOB_ID):
+            return
+        target_scheduler.add_job(
+            run_memory_restart_check_once,
+            IntervalTrigger(seconds=_MEMORY_RESTART_INTERVAL_SECONDS),
+            id=_MEMORY_RESTART_JOB_ID,
+            name="Docker 内存自动重启检查",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+    except Exception as e:
+        logger.warning(f"[DockerManager] 内存自动重启检查任务加载失败: {e}")
+
+
+def run_memory_restart_check_once():
+    if not _MEMORY_RESTART_RUN_LOCK.acquire(blocking=False):
+        return
+    try:
+        if not os.path.exists("/var/run/docker.sock"):
+            return
+        config = _load_scheduled_restart_config()
+        enabled_settings = {
+            _normalize_container_name(name): item
+            for name, item in (config.get("containers") or {}).items()
+            if (
+                _normalize_container_name(name)
+                and isinstance(item, dict)
+                and item.get("enabled")
+                and _restart_mode_for(item) == "memory"
+            )
+        }
+        if not enabled_settings:
+            return
+
+        api = DockerAPI(timeout=120)
+        rows = api.list_containers(True) or []
+        containers_by_name = {}
+        for row in rows:
+            for raw_name in row.get("Names") or []:
+                clean_name = _normalize_container_name(raw_name)
+                if clean_name:
+                    containers_by_name[clean_name] = row
+
+        now = time.time()
+        for name, setting in enabled_settings.items():
+            try:
+                threshold_mb = _validate_memory_limit_mb(setting.get("memory_limit_mb") or 0)
+                threshold_bytes = threshold_mb * 1024 * 1024
+                last_run_at = float(setting.get("last_run_at") or 0)
+                if last_run_at and now - last_run_at < _MEMORY_RESTART_COOLDOWN_SECONDS:
+                    continue
+
+                row = containers_by_name.get(name)
+                if not row:
+                    _save_scheduled_restart_setting(name, {"last_error": "容器不存在或已改名", "last_checked_at": now})
+                    logger.warning(f"[DockerManager] 内存自动重启检查失败，容器不存在或已改名: {name}")
+                    continue
+                if row.get("State") != "running":
+                    _save_scheduled_restart_setting(name, {"last_error": "容器未运行", "last_checked_at": now})
+                    continue
+
+                container_id = str(row.get("Id") or "")
+                stats = api.container_stats(container_id)
+                memory = _calc_memory(stats)
+                usage = int(memory.get("usage") or 0)
+                if usage < threshold_bytes:
+                    if setting.get("last_error"):
+                        _save_scheduled_restart_setting(name, {"last_error": "", "last_checked_at": now})
+                    continue
+
+                restart_state = {
+                    "last_error": "",
+                    "last_run_at": now,
+                    "last_checked_at": now,
+                    "last_memory_restart_at": now,
+                    "last_memory_usage": usage,
+                    "memory_limit_mb": threshold_mb,
+                    "container_id": container_id,
+                }
+                _save_scheduled_restart_setting(name, restart_state)
+                api.restart_container(container_id)
+                logger.info(
+                    f"[DockerManager] 内存自动重启完成: {name}, "
+                    f"usage={usage}, threshold={threshold_bytes}"
+                )
+            except HTTPException as e:
+                detail = str(e.detail)
+                _save_scheduled_restart_setting(name, {"last_error": detail, "last_checked_at": now})
+                logger.warning(f"[DockerManager] 内存自动重启配置无效: {name} - {detail}")
+            except Exception as e:
+                _save_scheduled_restart_setting(name, {"last_error": str(e), "last_checked_at": now})
+                logger.warning(f"[DockerManager] 内存自动重启失败: {name} - {e}")
+    finally:
+        _MEMORY_RESTART_RUN_LOCK.release()
+
+
 def schedule_scheduled_restart_jobs(scheduler):
     global _DOCKER_SCHEDULER
     _DOCKER_SCHEDULER = scheduler
     try:
         config = _load_scheduled_restart_config()
         count = 0
+        memory_count = 0
         for name, setting in (config.get("containers") or {}).items():
             if not isinstance(setting, dict) or not setting.get("enabled"):
                 continue
             try:
-                _register_scheduled_restart_job(name, setting, scheduler=scheduler)
-                count += 1
+                if _restart_mode_for(setting) == "memory":
+                    memory_count += 1
+                else:
+                    _register_scheduled_restart_job(name, setting, scheduler=scheduler)
+                    count += 1
             except Exception as e:
-                logger.warning(f"[DockerManager] 定时重启任务加载失败: {name} - {e}")
-        logger.info(f"[DockerManager] 定时重启任务已加载: {count} 个")
+                logger.warning(f"[DockerManager] 自动重启任务加载失败: {name} - {e}")
+        _register_memory_restart_job(scheduler)
+        logger.info(f"[DockerManager] 自动重启任务已加载: 定时 {count} 个，内存阈值 {memory_count} 个")
     except Exception as e:
-        logger.warning(f"[DockerManager] 定时重启任务加载失败: {e}")
+        logger.warning(f"[DockerManager] 自动重启任务加载失败: {e}")
 
 
 @router.get("/status")
@@ -930,7 +1061,18 @@ def list_containers():
             item["auto_update_image"] = auto_setting.get("image") or item["image"]
             item["auto_update_last_error"] = auto_setting.get("last_error") or ""
             restart_setting = _scheduled_restart_setting_for(item["name"])
-            item["scheduled_restart_enabled"] = bool(restart_setting.get("enabled"))
+            restart_mode = _restart_mode_for(restart_setting)
+            restart_enabled = bool(restart_setting.get("enabled"))
+            try:
+                memory_limit_mb = int(round(float(restart_setting.get("memory_limit_mb") or 0)))
+            except Exception:
+                memory_limit_mb = 0
+            item["auto_restart_enabled"] = restart_enabled
+            item["auto_restart_mode"] = restart_mode
+            item["auto_restart_time"] = restart_setting.get("time") or ""
+            item["auto_restart_memory_limit_mb"] = memory_limit_mb
+            item["auto_restart_last_error"] = restart_setting.get("last_error") or ""
+            item["scheduled_restart_enabled"] = bool(restart_enabled and restart_mode == "time")
             item["scheduled_restart_time"] = restart_setting.get("time") or ""
             item["scheduled_restart_last_error"] = restart_setting.get("last_error") or ""
             containers.append(item)
@@ -1011,31 +1153,69 @@ def set_container_auto_update(container_id: str, payload: AutoUpdatePayload):
         _api_error(e)
 
 
-@router.post("/containers/{container_id}/scheduled_restart")
-def set_container_scheduled_restart(container_id: str, payload: ScheduledRestartPayload):
+def _set_container_restart_policy(container_id: str, payload: ScheduledRestartPayload):
     try:
         api = _docker()
         info = api.inspect_container(container_id)
         name = _normalize_container_name(info.get("Name") or container_id[:12])
-        clean_time = ""
+        existing = _scheduled_restart_setting_for(name)
+        mode = payload.mode if payload.enabled else _restart_mode_for(existing)
+        if mode not in ("time", "memory"):
+            mode = "time"
+
+        clean_time = str(existing.get("time") or "04:00")
+        try:
+            memory_limit_mb = _validate_memory_limit_mb(existing.get("memory_limit_mb") or 1024)
+        except HTTPException:
+            memory_limit_mb = 1024
         if payload.enabled:
-            _, _, clean_time = _validate_restart_time(payload.time)
+            if mode == "time":
+                _, _, clean_time = _validate_restart_time(payload.time)
+            else:
+                _, _, clean_time = _validate_restart_time(payload.time or existing.get("time") or "04:00")
+                memory_limit_mb = _validate_memory_limit_mb(payload.memory_limit_mb)
+        else:
+            try:
+                _, _, clean_time = _validate_restart_time(payload.time or existing.get("time") or "04:00")
+            except HTTPException:
+                clean_time = "04:00"
+            try:
+                memory_limit_mb = _validate_memory_limit_mb(payload.memory_limit_mb or existing.get("memory_limit_mb") or 1024)
+            except HTTPException:
+                memory_limit_mb = 1024
+
         setting = _save_scheduled_restart_setting(name, {
             "enabled": bool(payload.enabled),
+            "mode": mode,
             "time": clean_time,
+            "memory_limit_mb": memory_limit_mb,
             "container_id": str(info.get("Id") or container_id),
             "last_error": "",
         })
         _register_scheduled_restart_job(name, setting)
+        _register_memory_restart_job()
+        message_mode = "定时" if _restart_mode_for(setting) == "time" else "内存阈值"
         return {
             "status": "ok",
             "container_name": name,
             "enabled": bool(setting.get("enabled")),
+            "mode": _restart_mode_for(setting),
             "time": setting.get("time") or "",
-            "message": f"{'已设置' if setting.get('enabled') else '已关闭'}定时重启: {name}"
+            "memory_limit_mb": int(setting.get("memory_limit_mb") or 0),
+            "message": f"{'已设置' if setting.get('enabled') else '已关闭'}{message_mode}自动重启: {name}"
         }
     except Exception as e:
         _api_error(e)
+
+
+@router.post("/containers/{container_id}/auto_restart")
+def set_container_auto_restart(container_id: str, payload: ScheduledRestartPayload):
+    return _set_container_restart_policy(container_id, payload)
+
+
+@router.post("/containers/{container_id}/scheduled_restart")
+def set_container_scheduled_restart(container_id: str, payload: ScheduledRestartPayload):
+    return _set_container_restart_policy(container_id, payload)
 
 
 @router.get("/containers/{container_id}/logs")

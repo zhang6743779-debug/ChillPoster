@@ -24,7 +24,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         loading: false,
         actionLoading: '',
         autoUpdateSaving: '',
-        scheduledRestartSaving: false,
+        autoRestartSaving: false,
         logsLoading: false,
         imagePulling: false,
         updateChecking: false,
@@ -66,11 +66,13 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
             container: null,
             value: '',
         },
-        scheduledRestartDialog: {
+        autoRestartDialog: {
             visible: false,
             container: null,
-            enabled: true,
+            mode: 'time',
             time: '04:00',
+            memoryValue: 1024,
+            memoryUnit: 'MB',
         },
     });
     const DOCKER_UPDATE_CACHE_KEY = 'chillposter-docker-update-cache';
@@ -627,60 +629,100 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         }
     };
 
-    const openDockerScheduledRestartDialog = (container) => {
-        dockerManager.scheduledRestartDialog.visible = true;
-        dockerManager.scheduledRestartDialog.container = container;
-        dockerManager.scheduledRestartDialog.enabled = true;
-        dockerManager.scheduledRestartDialog.time = container.scheduled_restart_time || '04:00';
+    const splitMemoryLimitForDialog = (memoryLimitMb) => {
+        const mb = Number(memoryLimitMb || 0);
+        if (mb >= 1024 && mb % 1024 === 0) {
+            return { value: mb / 1024, unit: 'GB' };
+        }
+        return { value: mb > 0 ? mb : 1024, unit: 'MB' };
     };
 
-    const closeDockerScheduledRestartDialog = () => {
-        dockerManager.scheduledRestartDialog.visible = false;
-        dockerManager.scheduledRestartDialog.container = null;
-        dockerManager.scheduledRestartDialog.enabled = true;
-        dockerManager.scheduledRestartDialog.time = '04:00';
+    const dockerAutoRestartLabel = (container) => {
+        if (!container?.auto_restart_enabled) return '';
+        if (container.auto_restart_mode === 'memory') {
+            const limitMb = Number(container.auto_restart_memory_limit_mb || 0);
+            return limitMb > 0 ? formatDockerBytes(limitMb * 1024 * 1024) : '内存阈值';
+        }
+        return container.auto_restart_time || container.scheduled_restart_time || '定时';
     };
 
-    const saveDockerScheduledRestartDialog = async () => {
-        const container = dockerManager.scheduledRestartDialog.container;
-        const time = String(dockerManager.scheduledRestartDialog.time || '').trim();
+    const getDialogMemoryLimitMb = () => {
+        const rawValue = Number(dockerManager.autoRestartDialog.memoryValue || 0);
+        if (!Number.isFinite(rawValue) || rawValue <= 0) return 0;
+        const unit = dockerManager.autoRestartDialog.memoryUnit === 'GB' ? 'GB' : 'MB';
+        return Math.max(1, Math.round(rawValue * (unit === 'GB' ? 1024 : 1)));
+    };
+
+    const openDockerAutoRestartDialog = (container) => {
+        const memoryLimit = splitMemoryLimitForDialog(container.auto_restart_memory_limit_mb || 1024);
+        dockerManager.autoRestartDialog.visible = true;
+        dockerManager.autoRestartDialog.container = container;
+        dockerManager.autoRestartDialog.mode = container.auto_restart_mode === 'memory' ? 'memory' : 'time';
+        dockerManager.autoRestartDialog.time = container.auto_restart_time || container.scheduled_restart_time || '04:00';
+        dockerManager.autoRestartDialog.memoryValue = memoryLimit.value;
+        dockerManager.autoRestartDialog.memoryUnit = memoryLimit.unit;
+    };
+
+    const closeDockerAutoRestartDialog = () => {
+        dockerManager.autoRestartDialog.visible = false;
+        dockerManager.autoRestartDialog.container = null;
+        dockerManager.autoRestartDialog.mode = 'time';
+        dockerManager.autoRestartDialog.time = '04:00';
+        dockerManager.autoRestartDialog.memoryValue = 1024;
+        dockerManager.autoRestartDialog.memoryUnit = 'MB';
+    };
+
+    const saveDockerAutoRestartDialog = async () => {
+        const dialog = dockerManager.autoRestartDialog;
+        const container = dialog.container;
+        const mode = dialog.mode === 'memory' ? 'memory' : 'time';
+        const time = String(dialog.time || '').trim();
+        const memoryLimitMb = getDialogMemoryLimitMb();
         if (!container) return;
         if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
             showToast('请选择有效的定时重启时间', 'warning');
             return;
         }
-        dockerManager.scheduledRestartSaving = true;
+        if (mode === 'memory' && memoryLimitMb <= 0) {
+            showToast('请填写有效的内存重启阈值', 'warning');
+            return;
+        }
+        dockerManager.autoRestartSaving = true;
         try {
-            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/scheduled_restart`, {
+            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/auto_restart`, {
                 enabled: true,
+                mode,
                 time,
+                memory_limit_mb: memoryLimitMb,
             });
-            closeDockerScheduledRestartDialog();
-            showToast(res.data?.message || `已设置 ${container.name} 定时重启`, 'success');
+            closeDockerAutoRestartDialog();
+            showToast(res.data?.message || `已设置 ${container.name} 自动重启`, 'success');
             await fetchDockerContainers({ skipAutoCheck: true });
         } catch (e) {
-            showToast('定时重启设置失败: ' + (e.response?.data?.detail || e.message), 'error');
+            showToast('自动重启设置失败: ' + (e.response?.data?.detail || e.message), 'error');
         } finally {
-            dockerManager.scheduledRestartSaving = false;
+            dockerManager.autoRestartSaving = false;
         }
     };
 
-    const disableDockerScheduledRestart = async (container) => {
-        const ok = await showConfirm('Docker 定时重启', `确定关闭「${container.name}」的定时重启吗？`, 'warning');
+    const disableDockerAutoRestart = async (container) => {
+        const ok = await showConfirm('Docker 自动重启', `确定关闭「${container.name}」的自动重启吗？`, 'warning');
         if (!ok) return;
-        dockerManager.actionLoading = `scheduled_restart:${container.id}`;
+        dockerManager.autoRestartSaving = true;
         try {
-            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/scheduled_restart`, {
+            const res = await axios.post(`/api/docker/containers/${encodeURIComponent(container.id)}/auto_restart`, {
                 enabled: false,
-                time: '',
+                mode: dockerManager.autoRestartDialog.mode || container.auto_restart_mode || 'time',
+                time: dockerManager.autoRestartDialog.time || container.auto_restart_time || container.scheduled_restart_time || '04:00',
+                memory_limit_mb: getDialogMemoryLimitMb() || container.auto_restart_memory_limit_mb || 1024,
             });
-            closeDockerScheduledRestartDialog();
-            showToast(res.data?.message || '已关闭定时重启', 'success');
+            closeDockerAutoRestartDialog();
+            showToast(res.data?.message || '已关闭自动重启', 'success');
             await fetchDockerContainers({ skipAutoCheck: true });
         } catch (e) {
-            showToast('关闭定时重启失败: ' + (e.response?.data?.detail || e.message), 'error');
+            showToast('关闭自动重启失败: ' + (e.response?.data?.detail || e.message), 'error');
         } finally {
-            dockerManager.actionLoading = '';
+            dockerManager.autoRestartSaving = false;
         }
     };
 
@@ -792,10 +834,10 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         stopDockerUpdatePolling,
         runDockerContainerAction,
         toggleDockerAutoUpdate,
-        openDockerScheduledRestartDialog,
-        closeDockerScheduledRestartDialog,
-        saveDockerScheduledRestartDialog,
-        disableDockerScheduledRestart,
+        openDockerAutoRestartDialog,
+        closeDockerAutoRestartDialog,
+        saveDockerAutoRestartDialog,
+        disableDockerAutoRestart,
         openDockerLogs,
         closeDockerLogs,
         pullDockerImage,
@@ -810,6 +852,7 @@ export function useDockerManager({ tab, projectVersion, showToast, showConfirm }
         saveDockerVersionDialog,
         formatDockerBytes,
         formatDockerDate,
+        dockerAutoRestartLabel,
         isDockerImageUntagged,
         dockerImageTagLabel,
     };

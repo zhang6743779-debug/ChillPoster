@@ -68,6 +68,38 @@ PLAYBACK_TOPOLOGY_EVENTS = {
     "playback.starting",
 }
 
+COLLECTION_SYNC_NOTIFICATION_EVENTS = {
+    "notification.collectionitemsadded.eventname",
+    "notification.collectionitemsremoved.eventname",
+    "notification.metadataupdate.eventname",
+    "notification.imageupdate.eventname",
+    "collectionitemsadded",
+    "collectionitemsremoved",
+    "itemsaddedtocollection",
+    "itemsremovedfromcollection",
+    "metadataupdate",
+    "imageupdate",
+}
+
+COLLECTION_SYNC_NOTIFICATION_KEYWORDS = (
+    "合集项目已添加",
+    "合集项目已移除",
+    "合集項目已添加",
+    "合集項目已移除",
+    "媒体元数据更新",
+    "媒體元數據更新",
+    "媒体图像更新",
+    "媒體圖像更新",
+    "collection items added",
+    "collection items removed",
+    "items added to collection",
+    "items removed from collection",
+    "metadata update",
+    "metadata updated",
+    "image update",
+    "image updated",
+)
+
 
 def _normalize_webhook_event_name(event_type: str) -> str:
     return re.sub(r"[\s_\-]+", ".", str(event_type or "").strip().lower())
@@ -95,6 +127,64 @@ def _is_playback_topology_event(event_type: str) -> bool:
         "playbackresume",
         "playbackstop",
     }
+
+
+def _collection_sync_webhook_text(data: dict, event_type: str = "") -> str:
+    if not isinstance(data, dict):
+        return str(event_type or "")
+
+    values = [event_type]
+    for key in (
+        "Event",
+        "NotificationType",
+        "EventType",
+        "Type",
+        "Title",
+        "Name",
+        "Description",
+        "Message",
+    ):
+        value = data.get(key)
+        if isinstance(value, (str, int, float)):
+            values.append(str(value))
+
+    notification = data.get("Notification")
+    if isinstance(notification, dict):
+        for value in notification.values():
+            if isinstance(value, (str, int, float)):
+                values.append(str(value))
+
+    return " ".join(value for value in values if value)
+
+
+def _is_collection_sync_webhook_event(data: dict, event_type: str = "") -> bool:
+    text = _collection_sync_webhook_text(data, event_type)
+    normalized_event = _normalize_webhook_event_name(event_type)
+    if normalized_event in COLLECTION_SYNC_NOTIFICATION_EVENTS:
+        return True
+
+    normalized_text = _normalize_webhook_event_name(text)
+    if any(event_name in normalized_text for event_name in COLLECTION_SYNC_NOTIFICATION_EVENTS):
+        return True
+
+    lowered = text.lower()
+    return any(keyword in lowered or keyword in text for keyword in COLLECTION_SYNC_NOTIFICATION_KEYWORDS)
+
+
+def _sync_pending_collections_for_webhook(data: dict, event_type: str = "") -> dict:
+    try:
+        from app.services.emby_collection_sync import sync_pending_emby_collections_for_webhook
+
+        result = sync_pending_emby_collections_for_webhook(data, event_type=event_type)
+        if result.get("synced"):
+            logger.info(
+                f"[Webhook] 已根据 Emby/神医通知同步合集: "
+                f"synced={result.get('synced')} remaining={result.get('remaining', result.get('pending'))}"
+            )
+        return result
+    except Exception as e:
+        logger.error(f"[Webhook] Emby 合集通知同步失败: {e}", exc_info=True)
+        return {"status": "error", "reason": str(e)}
 
 
 async def _refresh_playback_topology_for_webhook(event_type: str, delay: float = 0.0) -> int:
@@ -435,10 +525,11 @@ async def emby_webhook_trigger(request: Request):
         return {"status": "error", "reason": f"Payload Error: {e}"}
 
     event_type = _extract_webhook_event_type(data)
+    collection_sync_trigger = _is_collection_sync_webhook_event(data, event_type)
     item_data = data.get("Item", {}) if isinstance(data.get("Item", {}), dict) else {}
     target_item_id = item_data.get("Id")
 
-    if _is_emby_test_notification(data):
+    if not collection_sync_trigger and _is_emby_test_notification(data):
         logger.info(
             "[Webhook] webhook接收到emby测试通知: "
             f"event={event_type or 'unknown'} title={data.get('Title', '')} "
@@ -453,7 +544,7 @@ async def emby_webhook_trigger(request: Request):
 
     allowed_events = ["library.new", "item.added", "library.scan_complete"]
     delete_events = ["item.removed", "library.deleted", "deep.delete"]
-    if event_type not in allowed_events and event_type not in delete_events:
+    if event_type not in allowed_events and event_type not in delete_events and not collection_sync_trigger:
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
 
     try:
@@ -471,8 +562,9 @@ def get_webhook_queue():
 
 def process_webhook_payload(data: dict):
     event_type = _extract_webhook_event_type(data)
+    collection_sync_trigger = _is_collection_sync_webhook_event(data, event_type)
 
-    if _is_emby_test_notification(data):
+    if not collection_sync_trigger and _is_emby_test_notification(data):
         logger.info(
             "[Webhook] webhook接收到emby测试通知: "
             f"event={event_type or 'unknown'} title={data.get('Title', '')} "
@@ -500,7 +592,17 @@ def process_webhook_payload(data: dict):
     webhook_enabled = bool(wh_config.get("enabled", False))
     delete_sync_enabled = True
 
+    collection_sync_result = None
+    if collection_sync_trigger or event_type in allowed_events:
+        collection_sync_result = _sync_pending_collections_for_webhook(data, event_type)
+
     if event_type not in allowed_events and event_type not in delete_events:
+        if collection_sync_trigger:
+            return {
+                "status": "ok",
+                "action": "emby_collection_sync",
+                "collection_sync": collection_sync_result,
+            }
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
 
     item_data = data.get("Item", {})

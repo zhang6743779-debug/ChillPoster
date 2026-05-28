@@ -2613,6 +2613,10 @@
                                             <span class="organize-toggle-label">emby刮削器</span>
                                         </div>
                                         <div class="organize-run-actions">
+                                            <button class="btn btn-secondary" @click="runCollectionBackfill" :disabled="organizeLoading">
+                                                <i class="fa-solid fa-layer-group"></i>
+                                                补齐已有电影合集
+                                            </button>
                                             <button class="btn btn-green" @click="runOrganize" :disabled="organizeLoading">
                                                 <i class="fa-solid" :class="organizeLoading ? 'fa-spinner fa-spin' : 'fa-arrows-up-down-left-right'"></i>
                                                 {{ organizeLoading ? '整理中...' : '执行整理' }}
@@ -2631,7 +2635,32 @@
                                             <span>{{ organizeProgress.status_text }}</span>
                                             <span>{{ organizeProgress.percent }}%</span>
                                         </div>
-                                        <div v-if="organizeProgress.detail" class="organize-progress-summary-grid">
+                                        <div v-if="organizeProgress.detail && organizeProgress.detail.task === 'collection_backfill'" class="organize-progress-summary-grid">
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">处理</span>
+                                                <span>电影 <b>{{ organizeProgress.detail.total || 0 }}</b></span>
+                                                <span>已处理 <b class="info">{{ organizeProgress.detail.processed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">合集</span>
+                                                <span>已同步 <b class="ok">{{ organizeProgress.detail.success || 0 }}</b></span>
+                                                <span>无合集 <b class="warn">{{ organizeProgress.detail.no_collection || 0 }}</b></span>
+                                                <span>失败 <b class="danger">{{ organizeProgress.detail.failed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">识别</span>
+                                                <span>无TMDB <b class="warn">{{ organizeProgress.detail.no_tmdb || 0 }}</b></span>
+                                                <span>TMDB失败 <b class="danger">{{ organizeProgress.detail.tmdb_failed || 0 }}</b></span>
+                                                <span>服务器 <b class="info">{{ organizeProgress.detail.servers || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">设置/NFO</span>
+                                                <span>阈值已改 <b class="ok">{{ organizeProgress.detail.library_options_updated || 0 }}</b></span>
+                                                <span>已补写 <b class="ok">{{ organizeProgress.detail.nfo_updated || 0 }}</b></span>
+                                                <span>不可写/缺失 <b class="warn">{{ (organizeProgress.detail.nfo_missing || 0) + (organizeProgress.detail.nfo_unavailable || 0) }}</b></span>
+                                            </div>
+                                        </div>
+                                        <div v-else-if="organizeProgress.detail" class="organize-progress-summary-grid">
                                             <div class="organize-progress-summary-group">
                                                 <span class="organize-progress-summary-title">处理</span>
                                                 <span>总数 <b>{{ organizeProgress.detail.total || 0 }}</b></span>
@@ -2663,7 +2692,32 @@
                                             <i class="fa-solid" :class="organizeResult.status === 'success' ? 'fa-circle-check transfer-status-success' : (organizeResult.status === 'error' ? 'fa-circle-xmark transfer-status-error' : 'fa-circle-exclamation transfer-status-warning')"></i>
                                             <span class="organize-result-message">{{ organizeResult.message }}</span>
                                         </div>
-                                        <div v-if="organizeResult.detail" class="organize-progress-summary-grid organize-progress-summary-grid-result">
+                                        <div v-if="organizeResult.detail && organizeResult.detail.task === 'collection_backfill'" class="organize-progress-summary-grid organize-progress-summary-grid-result">
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">处理</span>
+                                                <span>电影 <b>{{ organizeResult.detail.total || 0 }}</b></span>
+                                                <span>已处理 <b class="info">{{ organizeResult.detail.processed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">合集</span>
+                                                <span>已同步 <b class="ok">{{ organizeResult.detail.success || 0 }}</b></span>
+                                                <span>无合集 <b class="warn">{{ organizeResult.detail.no_collection || 0 }}</b></span>
+                                                <span>失败 <b class="danger">{{ organizeResult.detail.failed || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">识别</span>
+                                                <span>无TMDB <b class="warn">{{ organizeResult.detail.no_tmdb || 0 }}</b></span>
+                                                <span>TMDB失败 <b class="danger">{{ organizeResult.detail.tmdb_failed || 0 }}</b></span>
+                                                <span>服务器 <b class="info">{{ organizeResult.detail.servers || 0 }}</b></span>
+                                            </div>
+                                            <div class="organize-progress-summary-group">
+                                                <span class="organize-progress-summary-title">设置/NFO</span>
+                                                <span>阈值已改 <b class="ok">{{ organizeResult.detail.library_options_updated || 0 }}</b></span>
+                                                <span>已补写 <b class="ok">{{ organizeResult.detail.nfo_updated || 0 }}</b></span>
+                                                <span>不可写/缺失 <b class="warn">{{ (organizeResult.detail.nfo_missing || 0) + (organizeResult.detail.nfo_unavailable || 0) }}</b></span>
+                                            </div>
+                                        </div>
+                                        <div v-else-if="organizeResult.detail" class="organize-progress-summary-grid organize-progress-summary-grid-result">
                                             <div class="organize-progress-summary-group">
                                                 <span class="organize-progress-summary-title">处理</span>
                                                 <span>总数 <b>{{ organizeResult.detail.total || 0 }}</b></span>
@@ -5229,7 +5283,7 @@
                                             </div>
                                             <div class="docker-card-badges">
                                                 <span class="docker-state-pill" :class="container.state === 'running' ? 'ok' : 'muted'">{{ container.state === 'running' ? '运行中' : '已停止' }}</span>
-                                                <span v-if="container.scheduled_restart_enabled && container.scheduled_restart_time" class="docker-schedule-pill"><i class="fa-solid fa-clock-rotate-left"></i> {{ container.scheduled_restart_time }}</span>
+                                                <span v-if="container.auto_restart_enabled" class="docker-schedule-pill" :class="{ memory: container.auto_restart_mode === 'memory' }"><i class="fa-solid" :class="container.auto_restart_mode === 'memory' ? 'fa-memory' : 'fa-clock-rotate-left'"></i> {{ dockerAutoRestartLabel(container) }}</span>
                                             </div>
                                         </div>
                                         <div class="docker-image-display" :class="{ changed: dockerManager.imageDrafts[container.id] && dockerManager.imageDrafts[container.id] !== container.image }">
@@ -5256,9 +5310,9 @@
                                             <button class="docker-action-btn" @click="runDockerContainerAction(container, 'restart')" title="重启"><i class="fa-solid fa-rotate-right"></i><span>重启</span></button>
                                             <button class="docker-action-btn" @click="openDockerLogs(container)" title="日志"><i class="fa-solid fa-file-lines"></i><span>日志</span></button>
                                             <button class="docker-action-btn update" :class="{ hot: dockerManager.updateMap[container.image]?.update_available }" @click="runDockerContainerAction(container, 'update')" title="按当前卡片版本拉取并重建"><i class="fa-solid fa-cloud-arrow-down"></i><span>更新</span></button>
-                                            <button class="docker-action-btn auto-update" :class="{ active: container.auto_update_enabled }" :disabled="dockerManager.autoUpdateSaving === container.id" @click="toggleDockerAutoUpdate(container)" :title="container.auto_update_enabled ? '关闭自动更新' : '开启自动更新'"><i class="fa-solid" :class="dockerManager.autoUpdateSaving === container.id ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'"></i><span>自动</span></button>
-                                            <button class="docker-action-btn scheduled" :class="{ active: container.scheduled_restart_enabled }" @click="openDockerScheduledRestartDialog(container)" title="配置定时重启"><i class="fa-solid fa-clock-rotate-left"></i><span>定时</span></button>
                                             <button class="docker-action-btn danger" @click="runDockerContainerAction(container, 'remove')" title="删除"><i class="fa-solid fa-trash"></i><span>删除</span></button>
+                                            <button class="docker-action-btn auto-restart" :class="{ active: container.auto_restart_enabled, memory: container.auto_restart_mode === 'memory' }" @click="openDockerAutoRestartDialog(container)" title="配置自动重启"><i class="fa-solid" :class="container.auto_restart_enabled && container.auto_restart_mode === 'memory' ? 'fa-memory' : (container.auto_restart_enabled ? 'fa-clock-rotate-left' : 'fa-rotate')"></i><span>自动重启</span></button>
+                                            <button class="docker-action-btn auto-update" :class="{ active: container.auto_update_enabled }" :disabled="dockerManager.autoUpdateSaving === container.id" @click="toggleDockerAutoUpdate(container)" :title="container.auto_update_enabled ? '关闭自动更新' : '开启自动更新'"><i class="fa-solid" :class="dockerManager.autoUpdateSaving === container.id ? 'fa-spinner fa-spin' : 'fa-arrows-rotate'"></i><span>自动更新</span></button>
                                             <button class="docker-action-btn version" @click="openDockerVersionDialog(container)" title="修改版本"><i class="fa-solid fa-pen-to-square"></i><span>修改版本</span></button>
                                         </div>
                                     </div>
@@ -5764,28 +5818,56 @@
         </transition>
 
         <transition name="fade">
-            <div v-if="dockerManager.scheduledRestartDialog.visible" class="confirm-mask docker-version-mask">
+            <div v-if="dockerManager.autoRestartDialog.visible" class="confirm-mask docker-version-mask">
                 <div class="docker-version-modal docker-scheduled-modal">
                     <div class="docker-version-header">
                         <div class="docker-version-title">
-                            <div class="docker-version-icon docker-scheduled-icon"><i class="fa-solid fa-clock-rotate-left"></i></div>
+                            <div class="docker-version-icon docker-scheduled-icon"><i class="fa-solid fa-rotate"></i></div>
                             <div>
-                                <strong>定时重启</strong>
-                                <span>{{ dockerManager.scheduledRestartDialog.container?.name || '' }}</span>
+                                <strong>自动重启</strong>
+                                <span>{{ dockerManager.autoRestartDialog.container?.name || '' }}</span>
                             </div>
                         </div>
-                        <button class="settings-drawer-close" @click="closeDockerScheduledRestartDialog" title="关闭">
+                        <button class="settings-drawer-close" @click="closeDockerAutoRestartDialog" title="关闭">
                             <i class="fa-solid fa-xmark"></i>
                         </button>
                     </div>
-                    <label class="docker-version-field">
+                    <div class="docker-restart-mode-grid">
+                        <button type="button" class="docker-restart-mode-btn" :class="{ active: dockerManager.autoRestartDialog.mode === 'time' }" @click="dockerManager.autoRestartDialog.mode = 'time'">
+                            <i class="fa-solid fa-clock-rotate-left"></i>
+                            <strong>定时重启</strong>
+                            <span>每日固定时间</span>
+                        </button>
+                        <button type="button" class="docker-restart-mode-btn" :class="{ active: dockerManager.autoRestartDialog.mode === 'memory' }" @click="dockerManager.autoRestartDialog.mode = 'memory'">
+                            <i class="fa-solid fa-memory"></i>
+                            <strong>内存阈值</strong>
+                            <span>达到指定内存</span>
+                        </button>
+                    </div>
+                    <label v-if="dockerManager.autoRestartDialog.mode === 'time'" class="docker-version-field">
                         <span>每日重启时间</span>
-                        <input type="time" v-model="dockerManager.scheduledRestartDialog.time" @keydown.enter="saveDockerScheduledRestartDialog">
+                        <input type="time" v-model="dockerManager.autoRestartDialog.time" @keydown.enter="saveDockerAutoRestartDialog">
                     </label>
+                    <div v-else class="docker-memory-restart-fields">
+                        <label class="docker-version-field">
+                            <span>内存重启阈值</span>
+                            <div class="docker-memory-threshold-row">
+                                <input type="number" min="1" step="1" v-model.number="dockerManager.autoRestartDialog.memoryValue" @keydown.enter="saveDockerAutoRestartDialog">
+                                <select v-model="dockerManager.autoRestartDialog.memoryUnit">
+                                    <option value="MB">MB</option>
+                                    <option value="GB">GB</option>
+                                </select>
+                            </div>
+                        </label>
+                        <div class="docker-version-current docker-memory-current">
+                            <span>当前内存</span>
+                            <strong>{{ formatDockerBytes(dockerManager.autoRestartDialog.container?.memory_usage || 0) }}</strong>
+                        </div>
+                    </div>
                     <div class="docker-version-actions">
-                        <button v-if="dockerManager.scheduledRestartDialog.container?.scheduled_restart_enabled" class="btn btn-secondary danger-soft" @click="disableDockerScheduledRestart(dockerManager.scheduledRestartDialog.container)">关闭定时</button>
-                        <button class="btn btn-secondary" @click="closeDockerScheduledRestartDialog">取消</button>
-                        <button class="btn btn-primary" :disabled="dockerManager.scheduledRestartSaving" @click="saveDockerScheduledRestartDialog">{{ dockerManager.scheduledRestartSaving ? '保存中...' : '保存定时' }}</button>
+                        <button v-if="dockerManager.autoRestartDialog.container?.auto_restart_enabled" class="btn btn-secondary danger-soft" :disabled="dockerManager.autoRestartSaving" @click="disableDockerAutoRestart(dockerManager.autoRestartDialog.container)">关闭自动重启</button>
+                        <button class="btn btn-secondary" @click="closeDockerAutoRestartDialog">取消</button>
+                        <button class="btn btn-primary" :disabled="dockerManager.autoRestartSaving" @click="saveDockerAutoRestartDialog">{{ dockerManager.autoRestartSaving ? '保存中...' : '保存自动重启' }}</button>
                     </div>
                 </div>
             </div>

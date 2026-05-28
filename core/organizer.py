@@ -963,6 +963,7 @@ class MediaOrganizer:
         genres_xml = self._tags_xml(data.get("genres", []), "genre")
         studios_xml = self._tags_xml(data.get("production_companies", []), "studio")
         countries_xml = self._tags_xml(data.get("production_countries", []), "country")
+        collection_xml = self._build_movie_collection_xml(data)
 
         # 导演 / 编剧
         directors_xml = ""
@@ -982,7 +983,7 @@ class MediaOrganizer:
 <movie>
   <title>{title}</title>
   <originaltitle>{original_title}</originaltitle>
-  <sorttitle>{sort_title}</sorttitle>
+{collection_xml}  <sorttitle>{sort_title}</sorttitle>
   <year>{year}</year>
   <plot>{plot}</plot>
   <tagline>{tagline}</tagline>
@@ -992,6 +993,18 @@ class MediaOrganizer:
   <imdb>{imdb_id}</imdb>
   <tmdbid>{tmdb_id}</tmdbid>
 {genres_xml}{studios_xml}{countries_xml}{directors_xml}{writers_xml}{cast_xml}</movie>"""
+
+    def _build_movie_collection_xml(self, data: Dict[str, Any]) -> str:
+        collection = data.get("collection_details") if isinstance(data.get("collection_details"), dict) else {}
+        belongs = data.get("belongs_to_collection") if isinstance(data.get("belongs_to_collection"), dict) else {}
+        name = self._xml_escape(collection.get("name") or belongs.get("name") or "")
+        if not name:
+            return ""
+
+        overview = self._xml_escape(collection.get("overview") or belongs.get("overview") or "")
+        if overview:
+            return f"  <set>\n    <name>{name}</name>\n    <overview>{overview}</overview>\n  </set>\n"
+        return f"  <set>\n    <name>{name}</name>\n  </set>\n"
 
     def _build_tvshow_nfo(self, data: Dict[str, Any]) -> str:
         """构建剧集 tvshow.nfo XML 内容"""

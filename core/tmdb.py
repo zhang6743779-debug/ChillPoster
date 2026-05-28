@@ -298,6 +298,35 @@ def _tmdb_request(endpoint: str, api_key: str, params: Optional[Dict[str, Any]] 
             _set_last_tmdb_error(None, str(e), full_url)
             return None
 # --- 获取电影的详细信息 ---
+def _enrich_movie_collection_details(details: Optional[Dict[str, Any]], api_key: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(details, dict):
+        return details
+
+    collection = details.get("belongs_to_collection")
+    if not isinstance(collection, dict):
+        return details
+
+    try:
+        collection_id = int(collection.get("id") or 0)
+    except (TypeError, ValueError):
+        collection_id = 0
+    if not collection_id:
+        return details
+
+    try:
+        collection_details = get_collection_details(collection_id, api_key)
+        if not isinstance(collection_details, dict):
+            return details
+        details["collection_details"] = collection_details
+        for key in ("name", "poster_path", "backdrop_path"):
+            if not collection.get(key) and collection_details.get(key):
+                collection[key] = collection_details.get(key)
+    except Exception as e:
+        logger.debug(f"TMDb: 获取合集详情失败 (ID: {collection_id}): {e}")
+
+    return details
+
+
 def get_movie_details(movie_id: int, api_key: str, append_to_response: Optional[str] = "credits,videos,images,keywords,external_ids,translations,release_dates,alternative_titles", language: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     【新增】获取电影的详细信息。
@@ -329,6 +358,7 @@ def get_movie_details(movie_id: int, api_key: str, append_to_response: Optional[
     elif details and details.get("original_language") == "en":
         details["english_title"] = details.get("original_title")
 
+    details = _enrich_movie_collection_details(details, api_key)
     return details
 
 
