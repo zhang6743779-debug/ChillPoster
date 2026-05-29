@@ -35,6 +35,32 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
 
+def _dedupe_names(values: list, exclude: set[str] | None = None) -> list[str]:
+    result = []
+    seen = {_normalize_name(value) for value in (exclude or set()) if _clean_text(value)}
+    for value in values or []:
+        name = _clean_text(value)
+        if not name:
+            continue
+        key = _normalize_name(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return result
+
+
+def _legacy_inferred_collection_alias(name: str) -> str:
+    value = _clean_text(name)
+    for suffix in (" (系列)", "（系列）"):
+        if value.endswith(suffix):
+            base_name = value[:-len(suffix)].strip()
+            if base_name.endswith("三部曲"):
+                return base_name
+            return f"{base_name}系列" if base_name else ""
+    return ""
+
+
 def _image_url(path: str) -> str:
     value = _clean_text(path)
     if not value:
@@ -54,10 +80,26 @@ def build_movie_collection_sync_payload(tmdb_data: dict, variables: dict, target
         return None
 
     collection_id = collection.get("id") or belongs.get("id")
-    collection_name = _clean_text(collection.get("name") or belongs.get("name"))
+    collection_name = _clean_text(
+        collection.get("localized_name")
+        or collection.get("name")
+        or belongs.get("localized_name")
+        or belongs.get("name")
+    )
     movie_tmdb_id = _clean_text((variables or {}).get("tmdb_id") or tmdb_data.get("id"))
     if not collection_id or not collection_name or not movie_tmdb_id:
         return None
+
+    alias_names = _dedupe_names(
+        [
+            collection.get("original_name"),
+            belongs.get("original_name"),
+            collection.get("name"),
+            belongs.get("name"),
+            _legacy_inferred_collection_alias(collection_name),
+        ],
+        exclude={collection_name},
+    )
 
     return {
         "movie_tmdb_id": movie_tmdb_id,
@@ -66,6 +108,7 @@ def build_movie_collection_sync_payload(tmdb_data: dict, variables: dict, target
         "target_path": _clean_text(target_path),
         "collection_tmdb_id": _clean_text(collection_id),
         "collection_name": collection_name,
+        "collection_alias_names": alias_names,
         "collection_overview": _clean_text(collection.get("overview") or belongs.get("overview")),
         "poster_path": _clean_text(collection.get("poster_path") or belongs.get("poster_path")),
         "backdrop_path": _clean_text(collection.get("backdrop_path") or belongs.get("backdrop_path")),
@@ -196,6 +239,116 @@ def sync_pending_emby_collections_for_webhook(data: dict | None = None, event_ty
 
     result["remaining"] = len(current)
     return result
+
+
+def sync_emby_collection_delete_for_webhook(data: dict | None = None, event_type: str = "") -> dict:
+    from app.services.media_organize_tmdb import _fetch_tmdb_data_sync
+    from core.configs import global_config
+
+    item = _extract_webhook_item(data)
+    if not item:
+        return {"status": "skipped", "reason": "no_item"}
+
+    item_type = _clean_text(item.get("Type"))
+    if item_type and item_type.casefold() != "movie":
+        return {"status": "skipped", "reason": "not_movie", "item_type": item_type}
+
+    tmdb_id = _extract_movie_tmdb_id(item)
+    if not tmdb_id:
+        return {
+            "status": "skipped",
+            "reason": "no_tmdb",
+            "item_id": _clean_text(item.get("Id")),
+            "item_name": _clean_text(item.get("Name")),
+        }
+
+    global_config.load()
+    api_key = _clean_text(global_config.tmdb_key)
+    if not api_key:
+        return {"status": "skipped", "reason": "no_tmdb_api_key", "movie_tmdb_id": tmdb_id}
+
+    try:
+        tmdb_data = _fetch_tmdb_data_sync(int(tmdb_id), "movie", api_key)
+    except Exception as e:
+        logger.warning(f"[EmbyCollection] 删除后合集清理获取 TMDB 失败: {tmdb_id} | {e}")
+        return {"status": "failed", "reason": "tmdb_failed", "movie_tmdb_id": tmdb_id}
+
+    payload = build_movie_collection_sync_payload(
+        tmdb_data,
+        {
+            "tmdb_id": tmdb_id,
+            "title": _clean_text(item.get("Name")),
+            "year": _clean_text(item.get("ProductionYear")),
+        },
+        _clean_text(item.get("Path")),
+    )
+    if not payload:
+        return {"status": "skipped", "reason": "no_collection", "movie_tmdb_id": tmdb_id}
+
+    embys = get_emby_configs_sync()
+    if not embys:
+        return {"status": "disabled", "reason": "no_emby", "movie_tmdb_id": tmdb_id}
+
+    deleted_item_id = _clean_text(item.get("Id"))
+    stats = {
+        "status": "skipped",
+        "event": event_type or "",
+        "movie_tmdb_id": tmdb_id,
+        "movie_name": _clean_text(item.get("Name")),
+        "collection_name": payload.get("collection_name"),
+        "servers": 0,
+        "matched_collections": 0,
+        "removed_items": 0,
+        "deleted_collections": 0,
+        "kept_collections": 0,
+        "skipped": 0,
+        "failed": 0,
+        "items": [],
+    }
+
+    for idx, server in enumerate(embys):
+        if not isinstance(server, dict) or not server.get("enabled", True):
+            continue
+        if not server.get("url") or not server.get("key"):
+            continue
+
+        stats["servers"] += 1
+        server_name = server.get("name") or server.get("url") or f"Emby[{idx}]"
+        client = EmbyClient(server.get("url", ""), server.get("key", ""), server.get("public_host"))
+        try:
+            result = _cleanup_collection_after_deleted_movie(client, payload, deleted_item_id, server_name)
+            stats["items"].append(result)
+            status = result.get("status")
+            if status in {"deleted", "kept"}:
+                stats["matched_collections"] += 1
+                stats["removed_items"] += int(bool(result.get("removed_item")))
+                if status == "deleted":
+                    stats["deleted_collections"] += 1
+                else:
+                    stats["kept_collections"] += 1
+            elif status == "failed":
+                stats["failed"] += 1
+            else:
+                stats["skipped"] += 1
+        except Exception as e:
+            stats["failed"] += 1
+            stats["items"].append({"server": server_name, "status": "failed", "reason": str(e)})
+            logger.error(
+                f"[EmbyCollection] 删除后合集清理异常: "
+                f"{payload.get('collection_name')} | {server_name} | {e}",
+                exc_info=True,
+            )
+        finally:
+            client.close()
+
+    if stats["deleted_collections"] or stats["removed_items"]:
+        stats["status"] = "ok"
+    elif stats["kept_collections"]:
+        stats["status"] = "kept"
+    elif stats["failed"]:
+        stats["status"] = "failed"
+
+    return stats
 
 
 def run_existing_movie_collection_backfill(run_id: str) -> dict:
@@ -497,12 +650,44 @@ def _list_emby_movie_items(client: EmbyClient) -> list[dict]:
     return items
 
 
+def _extract_webhook_item(data: dict | None) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    item = data.get("Item")
+    if isinstance(item, dict):
+        return item
+    for key in ("item", "ItemData", "MediaItem"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def _extract_movie_tmdb_id(item: dict) -> str:
     provider_ids = item.get("ProviderIds") or {}
     for key in ("Tmdb", "TMDB", "TMDb", "TheMovieDb", "themoviedb"):
         value = _clean_text(provider_ids.get(key))
         if value:
             return value
+    if isinstance(provider_ids, dict):
+        for key, value in provider_ids.items():
+            if str(key or "").strip().casefold() in {"tmdb", "tmdbid", "themoviedb"}:
+                value = _clean_text(value)
+                if value:
+                    return value
+
+    for external in item.get("ExternalUrls") or []:
+        if isinstance(external, dict):
+            value = " ".join(
+                _clean_text(external.get(key))
+                for key in ("Name", "Url", "url", "Value")
+                if external.get(key)
+            )
+        else:
+            value = _clean_text(external)
+        match = re.search(r"themoviedb\.org/movie/(\d+)", value, re.IGNORECASE)
+        if match:
+            return match.group(1)
 
     path = _clean_text(item.get("Path"))
     match = re.search(r"(?:tmdbid-|tmdb-|\{tmdb-|\[tmdbid-)(\d+)", path, re.IGNORECASE)
@@ -615,10 +800,20 @@ def _sync_one_payload(client: EmbyClient, payload: dict, movie_item: dict, serve
     if not movie_id or not collection_name:
         return False
 
-    collection = client.find_collection_by_name(collection_name)
+    collection, matched_name = _find_collection_for_payload(client, payload)
     created = False
     if collection and collection.get("Id"):
         collection_id = collection.get("Id")
+        if _normalize_name(matched_name) != _normalize_name(collection_name):
+            collection_id, collection, created = _migrate_collection_name(
+                client,
+                payload,
+                collection,
+                movie_id,
+                server_name,
+            )
+            if not collection_id:
+                return False
         if not client.add_items_to_collection(collection_id, [movie_id]):
             return False
     else:
@@ -645,6 +840,172 @@ def _sync_one_payload(client: EmbyClient, payload: dict, movie_item: dict, serve
         f"{payload.get('movie_title') or payload.get('movie_tmdb_id')} | {server_name}"
     )
     return True
+
+
+def _payload_collection_names(payload: dict) -> list[str]:
+    return _dedupe_names(
+        [payload.get("collection_name")] + list(payload.get("collection_alias_names") or []),
+    )
+
+
+def _find_collection_for_payload(client: EmbyClient, payload: dict) -> tuple[Optional[dict], str]:
+    for name in _payload_collection_names(payload):
+        collection = client.find_collection_by_name(name)
+        if collection and collection.get("Id"):
+            return collection, name
+    return None, ""
+
+
+def _migrate_collection_name(
+    client: EmbyClient,
+    payload: dict,
+    source_collection: dict,
+    movie_id: str,
+    server_name: str,
+) -> tuple[str, dict, bool]:
+    target_name = _clean_text(payload.get("collection_name"))
+    source_id = _clean_text(source_collection.get("Id"))
+    source_name = _clean_text(source_collection.get("Name"))
+    if not target_name or not source_id:
+        return source_id, source_collection, False
+
+    target_collection = client.find_collection_by_name(target_name)
+    source_items = client.get_collection_items(source_id, item_types="Movie", limit=1000)
+    if source_items is None:
+        logger.warning(f"[EmbyCollection] 合集中文名迁移跳过，无法读取旧合集成员: {source_name or source_id} | {server_name}")
+        return source_id, source_collection, False
+    source_item_ids = [_clean_text(item.get("Id")) for item in (source_items or []) if _clean_text(item.get("Id"))]
+    item_ids = _dedupe_names(source_item_ids + [_clean_text(movie_id)])
+
+    if target_collection and target_collection.get("Id"):
+        target_id = _clean_text(target_collection.get("Id"))
+        if item_ids:
+            client.add_items_to_collection(target_id, item_ids)
+        if source_id != target_id:
+            client.delete_collection(source_id)
+        logger.info(
+            f"[EmbyCollection] 合集已合并到中文名: {source_name or source_id} -> {target_name} | {server_name}"
+        )
+        return target_id, target_collection, False
+
+    result = client.create_collection(target_name, item_ids or [movie_id], is_locked=False)
+    target_id = _clean_text((result or {}).get("Id"))
+    if not target_id:
+        target_collection = client.find_collection_by_name(target_name)
+        target_id = _clean_text((target_collection or {}).get("Id"))
+        result = target_collection or result
+
+    if not target_id:
+        logger.warning(f"[EmbyCollection] 合集中文名迁移失败: {source_name or source_id} -> {target_name} | {server_name}")
+        return source_id, source_collection, False
+
+    client.delete_collection(source_id)
+    logger.info(
+        f"[EmbyCollection] 合集已改用中文名: {source_name or source_id} -> {target_name} | {server_name}"
+    )
+    return target_id, result or {"Id": target_id, "Name": target_name}, True
+
+
+def _cleanup_collection_after_deleted_movie(
+    client: EmbyClient,
+    payload: dict,
+    deleted_item_id: str,
+    server_name: str,
+) -> dict:
+    collection_name = _clean_text(payload.get("collection_name"))
+    if not collection_name:
+        return {"server": server_name, "status": "skipped", "reason": "no_collection_name"}
+
+    collection, matched_name = _find_collection_for_payload(client, payload)
+    collection_id = _clean_text((collection or {}).get("Id"))
+    if not collection_id:
+        return {
+            "server": server_name,
+            "status": "missing",
+            "reason": "collection_not_found",
+            "collection_name": collection_name,
+        }
+
+    removed = False
+    if deleted_item_id:
+        removed = client.remove_items_from_collection(collection_id, [deleted_item_id])
+
+    items = client.get_collection_items(collection_id, item_types="Movie", limit=1000)
+    if items is None:
+        return {
+            "server": server_name,
+            "status": "failed",
+            "reason": "collection_items_unavailable",
+            "collection_id": collection_id,
+            "collection_name": collection_name,
+            "removed_item": removed,
+        }
+
+    remaining_items = [
+        item
+        for item in items
+        if _clean_text(item.get("Id")) != _clean_text(deleted_item_id)
+    ]
+    remaining_count = len(remaining_items)
+
+    if remaining_count < 2:
+        deleted = client.delete_collection(collection_id)
+        if deleted:
+            logger.info(
+                f"[EmbyCollection] 删除后合集已清理: {collection_name} | "
+                f"剩余 {remaining_count} 部 | {server_name}"
+            )
+            return {
+                "server": server_name,
+                "status": "deleted",
+                "collection_id": collection_id,
+                "collection_name": _clean_text(matched_name) or collection_name,
+                "remaining": remaining_count,
+                "removed_item": removed,
+            }
+        return {
+            "server": server_name,
+            "status": "failed",
+            "reason": "delete_collection_failed",
+            "collection_id": collection_id,
+            "collection_name": _clean_text(matched_name) or collection_name,
+            "remaining": remaining_count,
+            "removed_item": removed,
+        }
+
+    migrated = False
+    if _normalize_name(matched_name) != _normalize_name(collection_name):
+        new_collection_id, new_collection, created = _migrate_collection_name(
+            client,
+            payload,
+            collection,
+            "",
+            server_name,
+        )
+        if new_collection_id and new_collection_id != collection_id:
+            collection_id = new_collection_id
+            collection = new_collection or collection
+            migrated = True
+            if created:
+                collection = client.get_raw_item(
+                    collection_id,
+                    fields="ImageTags,BackdropImageTags,ProviderIds,Overview",
+                ) or collection
+                _upload_collection_images(client, collection_id, collection, payload, force=True)
+
+    logger.info(
+        f"[EmbyCollection] 删除后合集保留: {collection_name} | "
+        f"剩余 {remaining_count} 部 | {server_name}"
+    )
+    return {
+        "server": server_name,
+        "status": "kept",
+        "collection_id": collection_id,
+        "collection_name": collection_name if migrated else (_clean_text(matched_name) or collection_name),
+        "remaining": remaining_count,
+        "removed_item": removed,
+        "renamed": migrated,
+    }
 
 
 def _find_movie_item(client: EmbyClient, payload: dict) -> Optional[dict]:

@@ -1352,6 +1352,59 @@ def get_discover_series_entries() -> list[dict]:
         return entries
 
 
+def get_discover_movie_entries() -> list[dict]:
+    try:
+        _ensure_discover_cache_schema()
+        server_idx = _current_discover_server_idx()
+        with cache_db() as conn:
+            item_rows = conn.execute(
+                """
+                SELECT item_key, item_json FROM discover_items
+                WHERE server_idx = ? AND media_type = 'movie'
+                """,
+                (server_idx,),
+            ).fetchall()
+        entries = []
+        for row in item_rows:
+            key = str(row["item_key"] or "")
+            item = _row_item_json(row)
+            if not key or not isinstance(item, dict):
+                continue
+            tmdb_id = key.split(":", 1)[0]
+            entries.append({
+                "tmdb_id": str(tmdb_id),
+                "emby_id": item.get("emby_id", ""),
+                "title": item.get("title", ""),
+                "original_title": item.get("original_title", ""),
+                "year": item.get("year", ""),
+                "library_id": item.get("library_id", ""),
+                "library_name": item.get("library_name", "") or "电影库",
+                "media_type": "movie",
+            })
+        entries.sort(key=lambda item: (item.get("library_name") or "", item.get("title") or "", item.get("tmdb_id") or ""))
+        return entries
+    except Exception as e:
+        logger.debug(f"[EmbyLibCache] SQLite 读取电影发现索引失败: {e}")
+    with _discover_index_lock:
+        entries = []
+        for key, item in _discover_items.items():
+            parts = key.split(":")
+            if len(parts) < 2 or parts[1] != "movie" or not isinstance(item, dict):
+                continue
+            tmdb_id = parts[0]
+            entries.append({
+                "tmdb_id": str(tmdb_id),
+                "emby_id": item.get("emby_id", ""),
+                "title": item.get("title", ""),
+                "original_title": item.get("original_title", ""),
+                "year": item.get("year", ""),
+                "library_id": item.get("library_id", ""),
+                "library_name": item.get("library_name", "") or "电影库",
+                "media_type": "movie",
+            })
+        return entries
+
+
 def _build_discover_series_entry_from_item(key: str, item: dict) -> dict | None:
     if not isinstance(item, dict):
         return None

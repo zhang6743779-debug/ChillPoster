@@ -62,8 +62,6 @@ class Drive115Service:
         self._path_cache = TTLCache(maxsize=5000, ttl=3600)
 
         # === [第四级缓存] Pickcode_UA -> 直链URL ===
-        # 这既是直链缓存，也是"并发锁"的依据。
-        # 如果能在这个缓存里找到某个 pickcode 的记录，说明该文件当前"正在被播放"
         self._url_cache = TTLCache(maxsize=1000, ttl=1200) # 20分钟有效
         self._url_cache_hit_log_dedupe = TTLCache(maxsize=2000, ttl=10)
 
@@ -563,6 +561,28 @@ class Drive115Service:
                     counts[account_index] += 1
             return counts
         return {idx: 0 for idx in range(len(rapid_accounts))}
+
+    def _is_file_busy(self, pickcode: str, rapid_context: dict | None = None) -> bool:
+        """基于 Emby Sessions 判断当前文件是否已有活跃播放。"""
+        if not isinstance(rapid_context, dict):
+            return False
+
+        current_item_id = str(rapid_context.get("item_id") or "").strip()
+        if not current_item_id:
+            return False
+
+        active_playbacks = rapid_context.get("active_playbacks") or []
+        if not isinstance(active_playbacks, list):
+            return False
+
+        for playback in active_playbacks:
+            if not isinstance(playback, dict):
+                continue
+            active_item_id = str(playback.get("item_id") or "").strip()
+            if active_item_id != current_item_id:
+                continue
+            return True
+        return False
 
     def _select_rapid_account_index(self, rapid_accounts: list, rapid_mode: str, rapid_context: dict | None = None, concurrency_limit: int = 0) -> int | None:
         counts = self._active_rapid_assignment_counts(rapid_accounts, rapid_context)
@@ -1106,9 +1126,10 @@ class Drive115Service:
 
         cache_ua = user_agent if user_agent else "NoUA"
         cache_key = f"{pickcode}_{cache_ua}"
-        is_busy = self._is_file_busy(pickcode)
+        is_playback_context = direct_link_context in {"gateway_playback", "gateway_direct"}
+        is_busy = self._is_file_busy(pickcode, rapid_context) if is_playback_context else False
 
-        if cache_key in self._url_cache and not enable_rapid and not (enable_rapid and is_busy):
+        if cache_key in self._url_cache and not enable_rapid and not (enable_sync and is_busy):
             if cache_key not in self._url_cache_hit_log_dedupe:
                 self._url_cache_hit_log_dedupe[cache_key] = True
                 logger.trace(f"[Cache-{drive_name}] 命中直链缓存: {display_name}")
@@ -1325,14 +1346,6 @@ class Drive115Service:
             filename = None
         normalized = str(filename or "").strip()
         return normalized or f"{pickcode}.mkv"
-
-    def _is_file_busy(self, pickcode: str) -> bool:
-        """检查缓存中是否有该 pickcode 的活跃记录"""
-        prefix = f"{pickcode}_"
-        for key in self._url_cache.keys():
-            if key.startswith(prefix):
-                return True
-        return False
 
     async def _resolve_pickcode_flow(self, client, item_id, media_source_id, emby_index: int = 0):
         """解析 Pickcode 的完整流程"""

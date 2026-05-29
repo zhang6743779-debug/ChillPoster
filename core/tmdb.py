@@ -119,6 +119,97 @@ DEFAULT_LANGUAGE = "zh-CN"
 DEFAULT_REGION = "CN"
 DEFAULT_IMAGE_LANGUAGE = "zh,en,null,ja,ko"
 CHINESE_TITLE_FALLBACK_LANGUAGES = ("zh-HK", "zh-TW", "zh-SG")
+CHINESE_COLLECTION_TRANSLATION_REGIONS = ("CN", "SG", "MY", "HK", "TW", "MO")
+
+
+def _normalize_tmdb_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _pick_chinese_collection_translation(translations_data: Optional[Dict[str, Any]]) -> tuple[str, str]:
+    if not isinstance(translations_data, dict):
+        return "", ""
+
+    translations = [item for item in translations_data.get("translations", []) or [] if isinstance(item, dict)]
+    for region in CHINESE_COLLECTION_TRANSLATION_REGIONS:
+        for item in translations:
+            if str(item.get("iso_639_1") or "").lower() != "zh":
+                continue
+            if str(item.get("iso_3166_1") or "").upper() != region:
+                continue
+            data = item.get("data") or {}
+            title = _normalize_tmdb_text(data.get("title") or data.get("name"))
+            overview = _normalize_tmdb_text(data.get("overview"))
+            if title and contains_chinese(title):
+                return title, overview
+
+    for item in translations:
+        if str(item.get("iso_639_1") or "").lower() != "zh":
+            continue
+        data = item.get("data") or {}
+        title = _normalize_tmdb_text(data.get("title") or data.get("name"))
+        overview = _normalize_tmdb_text(data.get("overview"))
+        if title and contains_chinese(title):
+            return title, overview
+    return "", ""
+
+
+def _infer_chinese_collection_name_from_parts(details: Dict[str, Any]) -> str:
+    if not isinstance(details, dict):
+        return ""
+
+    original_name = _normalize_tmdb_text(details.get("original_name") or details.get("name"))
+    suffix = "三部曲 (系列)" if "trilogy" in original_name.lower() else " (系列)"
+    parts = details.get("parts") or []
+    sorted_parts = sorted(
+        [part for part in parts if isinstance(part, dict)],
+        key=lambda part: str(part.get("release_date") or "9999-99-99"),
+    )
+    for part in sorted_parts:
+        title = _normalize_tmdb_text(part.get("title") or part.get("name"))
+        if title and contains_chinese(title):
+            return f"{title}{suffix}"
+    return ""
+
+
+def _apply_chinese_collection_name_fallback(details: Optional[Dict[str, Any]], api_key: str) -> Optional[Dict[str, Any]]:
+    if not isinstance(details, dict) or not DEFAULT_LANGUAGE.startswith("zh"):
+        return details
+
+    details["_collection_language_fallback_checked"] = True
+    current_name = _normalize_tmdb_text(details.get("name"))
+    if current_name:
+        details.setdefault("original_name", current_name)
+    if contains_chinese(current_name):
+        details["_collection_name_source"] = "tmdb"
+        return details
+
+    collection_id = details.get("id")
+    translation_name = ""
+    translation_overview = ""
+    try:
+        translations_data = _tmdb_request(
+            f"/collection/{collection_id}/translations",
+            api_key,
+            {},
+            use_default_language=False,
+        )
+        translation_name, translation_overview = _pick_chinese_collection_translation(translations_data)
+    except Exception as e:
+        logger.debug(f"TMDb: 获取合集中文翻译失败 (ID: {collection_id}): {e}")
+
+    fallback_source = "translation" if translation_name else "parts"
+    fallback_name = translation_name or _infer_chinese_collection_name_from_parts(details)
+    if fallback_name:
+        details["name"] = fallback_name
+        details["localized_name"] = fallback_name
+        details["_collection_name_source"] = fallback_source
+        if translation_overview and not contains_chinese(_normalize_tmdb_text(details.get("overview"))):
+            details["overview"] = translation_overview
+        logger.debug(f"TMDb: 合集名称中文化: {current_name or collection_id} -> {fallback_name}")
+    else:
+        details["_collection_name_source"] = "original"
+    return details
 
 
 def _apply_chinese_title_language_fallback(
@@ -318,9 +409,18 @@ def _enrich_movie_collection_details(details: Optional[Dict[str, Any]], api_key:
         if not isinstance(collection_details, dict):
             return details
         details["collection_details"] = collection_details
-        for key in ("name", "poster_path", "backdrop_path"):
+        for key in ("poster_path", "backdrop_path"):
             if not collection.get(key) and collection_details.get(key):
                 collection[key] = collection_details.get(key)
+        detail_name = _normalize_tmdb_text(collection_details.get("name"))
+        current_name = _normalize_tmdb_text(collection.get("name"))
+        if detail_name and (
+            not current_name
+            or (DEFAULT_LANGUAGE.startswith("zh") and contains_chinese(detail_name) and not contains_chinese(current_name))
+        ):
+            if current_name:
+                collection.setdefault("original_name", current_name)
+            collection["name"] = detail_name
     except Exception as e:
         logger.debug(f"TMDb: 获取合集详情失败 (ID: {collection_id}): {e}")
 
@@ -848,7 +948,8 @@ def get_collection_details(collection_id: int, api_key: str) -> Optional[Dict[st
     params = {"language": DEFAULT_LANGUAGE}
     
     logger.debug(f"TMDb: 获取合集详情 (ID: {collection_id})")
-    return _tmdb_request(endpoint, api_key, params)
+    details = _tmdb_request(endpoint, api_key, params)
+    return _apply_chinese_collection_name_fallback(details, api_key)
 # --- 搜索媒体 ---
 def _merge_search_results(*result_groups: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []

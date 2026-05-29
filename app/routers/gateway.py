@@ -281,6 +281,22 @@ def _session_matches_client(session: dict, auth_client: str, auth_device: str, u
     return bool(ua and session_client and session_client in ua)
 
 
+def _session_matches_identity(session: dict, auth_token: str, auth_client: str, auth_device: str) -> bool:
+    if _session_matches_token(session, auth_token):
+        return True
+
+    auth_client_l = str(auth_client or "").strip().lower()
+    auth_device_l = str(auth_device or "").strip().lower()
+    if not auth_device_l:
+        return False
+
+    session_client = str(session.get("Client", "") or "").strip().lower()
+    session_device = str(session.get("DeviceName", "") or "").strip().lower()
+    if session_device != auth_device_l:
+        return False
+    return not auth_client_l or not session_client or auth_client_l == session_client
+
+
 def _session_user_key(session: dict) -> str:
     value = str(session.get("UserId", "") or "").strip()
     if value:
@@ -319,15 +335,25 @@ async def _fetch_emby_sessions(base_url: str, api_key: str) -> list:
     return []
 
 
-def _match_request_session(sessions: list, item_id: str, auth_token: str, auth_client: str, auth_device: str, user_agent: str) -> dict | None:
+def _match_request_session(
+    sessions: list,
+    item_id: str,
+    auth_token: str,
+    auth_client: str,
+    auth_device: str,
+    user_agent: str,
+    *,
+    allow_item_fallback: bool = True,
+) -> dict | None:
     if item_id:
         for sess in sessions:
             if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
                 if _session_matches_token(sess, auth_token) or _session_matches_client(sess, auth_client, auth_device, user_agent):
                     return sess
-        for sess in sessions:
-            if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
-                return sess
+        if allow_item_fallback:
+            for sess in sessions:
+                if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                    return sess
     for sess in sessions:
         if _session_matches_token(sess, auth_token):
             return sess
@@ -337,16 +363,44 @@ def _match_request_session(sessions: list, item_id: str, auth_token: str, auth_c
     return None
 
 
+def _match_request_identity_session(sessions: list, item_id: str, auth_token: str, auth_client: str, auth_device: str) -> dict | None:
+    if item_id:
+        for sess in sessions:
+            if str(sess.get("NowPlayingItem", {}).get("Id", "") or "") == str(item_id):
+                if _session_matches_identity(sess, auth_token, auth_client, auth_device):
+                    return sess
+    for sess in sessions:
+        if _session_matches_identity(sess, auth_token, auth_client, auth_device):
+            return sess
+    return None
+
+
 async def _build_rapid_context(base_url: str, api_key: str, item_id: str, auth_token: str, auth_client: str, auth_device: str, user_agent: str) -> tuple[dict, list, dict | None]:
     sessions = await _fetch_emby_sessions(base_url, api_key)
-    matched_session = _match_request_session(sessions, item_id, auth_token, auth_client, auth_device, user_agent)
-    user_key = _session_user_key(matched_session) if matched_session else ""
-    user_name = _get_session_user_name(matched_session) if matched_session else ""
+    identity_session = _match_request_identity_session(
+        sessions,
+        item_id,
+        auth_token,
+        auth_client,
+        auth_device,
+    )
+    matched_session = identity_session or _match_request_session(
+        sessions,
+        item_id,
+        auth_token,
+        auth_client,
+        auth_device,
+        user_agent,
+        allow_item_fallback=True,
+    )
+    user_key = _session_user_key(identity_session) if identity_session else ""
+    user_name = _get_session_user_name(identity_session) if identity_session else ""
     if not user_key:
         user_key = _fallback_user_key(auth_token, auth_client, auth_device, user_agent)
 
     active_user_keys = []
     active_item_ids = []
+    active_playbacks = []
     for sess in sessions:
         if not isinstance(sess, dict) or not sess.get("NowPlayingItem"):
             continue
@@ -357,6 +411,15 @@ async def _build_rapid_context(base_url: str, api_key: str, item_id: str, auth_t
         active_key = _session_user_key(sess)
         if active_key:
             active_user_keys.append(active_key)
+        active_playbacks.append({
+            "session_id": str(sess.get("Id") or "").strip(),
+            "user_key": active_key,
+            "user_name": _get_session_user_name(sess),
+            "item_id": active_item_id,
+            "client": str(sess.get("Client") or "").strip(),
+            "device": str(sess.get("DeviceName") or "").strip(),
+            "remote_endpoint": str(sess.get("RemoteEndPoint") or "").strip(),
+        })
 
     effective_item_id = str(item_id or "").strip()
     if not effective_item_id and matched_session:
@@ -364,12 +427,18 @@ async def _build_rapid_context(base_url: str, api_key: str, item_id: str, auth_t
         if isinstance(now_playing, dict):
             effective_item_id = str(now_playing.get("Id") or "").strip()
 
+    identity_session = identity_session or {}
     return {
         "user_key": user_key,
         "user_name": user_name,
         "item_id": effective_item_id,
+        "session_id": str(identity_session.get("Id") or "").strip(),
+        "client": str(identity_session.get("Client") or auth_client or "").strip(),
+        "device": str(identity_session.get("DeviceName") or auth_device or "").strip(),
+        "remote_endpoint": str(identity_session.get("RemoteEndPoint") or "").strip(),
         "active_user_keys": active_user_keys,
         "active_item_ids": active_item_ids,
+        "active_playbacks": active_playbacks,
     }, sessions, matched_session
 
 

@@ -431,14 +431,61 @@ def _contains_chinese_text(text: str) -> bool:
     return bool(re.search(r"[一-鿿]", str(text or "")))
 
 
-def _tmdb_cached_detail_needs_title_fallback_refresh(media_type: str, data: Optional[dict]) -> bool:
-    if not isinstance(data, dict):
+def _is_legacy_inferred_collection_name(name: str) -> bool:
+    value = str(name or "").strip()
+    if not value or not _contains_chinese_text(value):
         return False
+    if value.endswith((" (系列)", "（系列）")):
+        return False
+    return value.endswith(("系列", "三部曲"))
+
+
+def _tmdb_cached_movie_collection_refresh_reason(data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return ""
+
+    belongs = data.get("belongs_to_collection")
+    if not isinstance(belongs, dict) or not belongs.get("id"):
+        return ""
+
+    collection_details = data.get("collection_details")
+    if not isinstance(collection_details, dict):
+        return "缺少新版合集详情"
+
+    collection_name = (
+        collection_details.get("localized_name")
+        or collection_details.get("name")
+        or belongs.get("localized_name")
+        or belongs.get("name")
+    )
+    if collection_details.get("_collection_language_fallback_checked"):
+        collection_source = str(collection_details.get("_collection_name_source") or "")
+        if not collection_source:
+            return "缺少合集命名来源标记"
+        if collection_source == "parts" and _is_legacy_inferred_collection_name(collection_name):
+            return "旧版推断合集格式"
+        return ""
+
+    if collection_name and not _contains_chinese_text(collection_name):
+        return "缺少中文合集名检查"
+    return ""
+
+
+def _tmdb_cached_detail_refresh_reason(media_type: str, data: Optional[dict]) -> str:
+    if not isinstance(data, dict):
+        return ""
+    if media_type == "movie":
+        collection_reason = _tmdb_cached_movie_collection_refresh_reason(data)
+        if collection_reason:
+            return collection_reason
+
     source = data.get("series_details") if media_type != "movie" and isinstance(data.get("series_details"), dict) else data
     if source.get("_title_language_fallback_checked"):
-        return False
+        return ""
     title_field = "title" if media_type == "movie" else "name"
-    return not _contains_chinese_text(source.get(title_field, ""))
+    if not _contains_chinese_text(source.get(title_field, "")):
+        return "缺少中文备选语言检查"
+    return ""
 
 
 def _tmdb_detail_status(media_type: str, data: Optional[dict]) -> str:
@@ -512,8 +559,9 @@ def _get_cached_tmdb_detail(tmdb_id: int, media_type: str, required_episode_keys
         if float(row["expires_at"] or 0) <= now_ts:
             return None
         data = json.loads(row["payload_json"])
-        if _tmdb_cached_detail_needs_title_fallback_refresh(media_type, data):
-            logger.debug(f"[TMDbCache] 详情缓存需要刷新: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 原因：缺少中文备选语言检查")
+        refresh_reason = _tmdb_cached_detail_refresh_reason(media_type, data)
+        if refresh_reason:
+            logger.debug(f"[TMDbCache] 详情缓存需要刷新: 类型：{_human_tmdb_media_type(media_type)} | TMDb编号：{tmdb_id} | 原因：{refresh_reason}")
             return None
         if media_type != "movie" and not _tmdb_data_has_required_episodes(data, list(required_episode_keys or [])):
             if _tmdb_series_is_ended(data):

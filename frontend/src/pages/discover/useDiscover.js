@@ -13,9 +13,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const DISCOVER_MAIN_GRID_CACHE_MAX_ENTRIES = 12;
         const DISCOVER_MAIN_GRID_CACHE_MAX_CHARS = 2000000;
         const MISSING_EPISODE_STATS_CACHE_KEY = 'cp_missing_episode_stats';
-        const MISSING_EPISODE_STATS_CACHE_VERSION = 1;
+        const MISSING_EPISODE_STATS_CACHE_VERSION = 3;
         const MISSING_EPISODE_STATS_CACHE_MAX_ENTRIES = 4;
-        const MISSING_EPISODE_STATS_CACHE_MAX_CHARS = 3500000;
+        const MISSING_EPISODE_STATS_CACHE_MAX_CHARS = 5000000;
         const MISSING_EPISODE_FULL_CACHE_ITEM_LIMIT = 1600;
         const MISSING_EPISODE_RENDER_LIMIT_DESKTOP = 36;
         const MISSING_EPISODE_RENDER_LIMIT_MOBILE = 16;
@@ -60,7 +60,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const discoverHasSearched = ref(false);
         const searchPage = ref(1);
         const searchTotalPages = ref(1);
-        const missingEpisodeCompareModal = reactive({ visible: false, row: null });
+        const missingEpisodeCompareModal = reactive({ visible: false, row: null, selectedCollectionMovieKey: '' });
         const mpSubscribeModal = reactive({
             visible: false,
             loading: false,
@@ -558,11 +558,16 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         let mainGridObserver = null;
         let mainGridObserverRetryTimer = null;
         let discoverRealtimeEventSource = null;
+        const hydratedMissingEpisodeManualMarks = new Set();
         let _mainGridGen = 0;
         const mainGridPrefetch = reactive({ pages: {} });
         const MAIN_GRID_PREFETCH_AHEAD = 2;
         const emptyMissingEpisodeSummary = () => ({
             tvCount: 0,
+            movieCollectionCount: 0,
+            movieCollectionMissingCount: 0,
+            movieCollectionMissingMovies: 0,
+            movieCollectionCompleteCount: 0,
             completeCount: 0,
             manualCompleteCount: 0,
             partialCount: 0,
@@ -620,13 +625,25 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const missingEpisodeActiveSummary = computed(() => {
             return missingEpisodeActiveLibrary.value?.summary || missingEpisodeStats.summary || emptyMissingEpisodeSummary();
         });
+        const isMovieCollectionRow = (item = {}) => {
+            return String(item.mediaType || item.item?.media_type || '').toLowerCase() === 'movie_collection'
+                || String(item.missingCategory || '').toLowerCase().startsWith('movie_collection_');
+        };
+        const isMovieCollectionMissingRow = (item = {}) => {
+            return String(item.missingCategory || '').toLowerCase() === 'movie_collection_missing';
+        };
+        const isMovieCollectionCompleteRow = (item = {}) => {
+            return String(item.missingCategory || '').toLowerCase() === 'movie_collection_complete';
+        };
         const missingEpisodeActiveErrorCount = computed(() => {
             const summary = missingEpisodeActiveSummary.value || {};
             return Number(summary.errorCount) || 0;
         });
         const missingEpisodeActionableMissingCount = computed(() => {
             const summary = missingEpisodeActiveSummary.value || {};
-            return (Number(summary.airingAiredMissingCount) || 0) + (Number(summary.endedMissingCount) || 0);
+            return (Number(summary.airingAiredMissingCount) || 0)
+                + (Number(summary.endedMissingCount) || 0)
+                + (Number(summary.movieCollectionMissingCount) || 0);
         });
         const missingEpisodeActionableEpisodeCount = computed(() => {
             const summary = missingEpisodeActiveSummary.value || {};
@@ -635,7 +652,10 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const missingEpisodeSearchActive = computed(() => !!String(missingEpisodeStats.searchQuery || '').trim());
         const isMissingEpisodeActionableMissing = (item = {}) => {
             const category = String(item.missingCategory || '').trim().toLowerCase();
-            return category === 'ended_missing' || category === 'airing_aired_missing';
+            return category === 'ended_missing' || category === 'airing_aired_missing' || category === 'movie_collection_missing';
+        };
+        const isMissingEpisodeDisplayCacheRow = (item = {}) => {
+            return isMissingEpisodeActionableMissing(item) || isMovieCollectionCompleteRow(item);
         };
         const missingEpisodeStatsProblemItems = computed(() => {
             const query = String(missingEpisodeStats.searchQuery || '').trim().toLowerCase();
@@ -649,6 +669,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 if (missingEpisodeStats.filter === 'complete') return item.missingCategory === 'complete' || !!item.manualComplete;
                 if (missingEpisodeStats.filter === 'airing_aired_missing') return item.missingCategory === 'airing_aired_missing';
                 if (missingEpisodeStats.filter === 'airing_recent_missing') return item.missingCategory === 'airing_recent_missing';
+                if (missingEpisodeStats.filter === 'movie_collection_missing') return isMovieCollectionMissingRow(item);
+                if (missingEpisodeStats.filter === 'movie_collection_complete') return isMovieCollectionCompleteRow(item);
                 return item.missingCategory === missingEpisodeStats.filter;
             }).filter(item => {
                 if (!query) return true;
@@ -660,6 +682,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     item.label,
                     item.categoryLabel,
                     item.seasonBrief,
+                    ...(item.missingMovies || []).map(movie => movie.title || movie.originalTitle || movie.tmdbId || ''),
+                    ...(item.presentMovies || []).map(movie => movie.title || movie.originalTitle || movie.tmdbId || ''),
                 ].filter(Boolean).join(' ').toLowerCase();
                 return haystack.includes(query);
             });
@@ -765,8 +789,10 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const getMissingEpisodePosterCategoryLabel = (row = {}) => {
             if (isMissingEpisodeManualComplete(row)) {
-                const localCount = Number(row.manualCompleteLocalEpisodes) || countLocalEpisodes(row.localItem?.seasons);
-                return localCount ? `已标记完整 ${localCount}集` : '已标记完整';
+                const localCount = isMovieCollectionRow(row)
+                    ? (Number(row.manualCompleteLocalEpisodes) || Number(row.presentEpisodes) || (row.presentMovies || []).length)
+                    : (Number(row.manualCompleteLocalEpisodes) || countLocalEpisodes(row.localItem?.seasons));
+                return localCount ? `已标记完整 ${localCount}${isMovieCollectionRow(row) ? '部' : '集'}` : '已标记完整';
             }
             const category = String(row.missingCategory || '').trim().toLowerCase();
             const total = Number(row.totalEpisodes) || 0;
@@ -774,6 +800,12 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const isComplete = String(row.status || '').trim().toLowerCase() === 'exists';
             const isAiring = isMissingEpisodeAiringStatus(row.tmdbStatus);
             const withDetail = (baseLabel) => total > 0 ? `${baseLabel} ${present}/${total}` : baseLabel;
+            if (isMovieCollectionRow(row)) {
+                if (isMovieCollectionCompleteRow(row)) {
+                    return total > 0 ? `电影合集完整 ${present}/${total} 部` : '电影合集完整';
+                }
+                return total > 0 ? `电影合集缺 ${Number(row.missingEpisodes) || 0}/${total} 部` : '电影合集缺集';
+            }
             if (category === 'airing_recent_missing') {
                 return withDetail((Number(row.airedMissingEpisodes) || 0) > 0 ? '已播缺集' : '连载未缺集');
             }
@@ -787,6 +819,71 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             if (categoryLabel.includes('完结')) return withDetail(isComplete ? '完结' : '完结缺集');
             return withDetail(isAiring ? (isComplete ? '连载' : '连载缺集') : (isComplete ? '完结' : '完结缺集'));
         };
+
+        const getMovieCollectionCompareMovies = (row = {}) => {
+            const moviesByKey = new Map();
+            const addMovie = (movie = {}, exists = false) => {
+                if (!movie || typeof movie !== 'object') return;
+                const key = String(movie.tmdbId || movie.id || movie.title || movie.originalTitle || '').trim();
+                if (!key) return;
+                const current = moviesByKey.get(key) || {};
+                moviesByKey.set(key, {
+                    ...current,
+                    ...movie,
+                    exists: Boolean(current.exists || exists || movie.exists),
+                    embyId: current.embyId || movie.embyId || '',
+                });
+            };
+            (row.presentMovies || []).forEach(movie => addMovie(movie, true));
+            (row.missingMovies || []).forEach(movie => addMovie(movie, false));
+            const dateKey = (movie = {}) => String(movie.releaseDate || movie.year || '9999-99-99').slice(0, 10);
+            return Array.from(moviesByKey.values()).sort((a, b) => {
+                return dateKey(a).localeCompare(dateKey(b))
+                    || String(a.title || a.originalTitle || '').localeCompare(String(b.title || b.originalTitle || ''), 'zh-Hans-CN');
+            });
+        };
+
+        const getMovieCollectionMovieKey = (movie = {}) => {
+            return String(movie.tmdbId || movie.id || movie.title || movie.originalTitle || '').trim();
+        };
+
+        const selectMovieCollectionMovie = (movie = {}) => {
+            const key = getMovieCollectionMovieKey(movie);
+            missingEpisodeCompareModal.selectedCollectionMovieKey = missingEpisodeCompareModal.selectedCollectionMovieKey === key ? '' : key;
+            if (resourceSearchModal.context === 'missing_episode') {
+                resourceSearchModal.loading = false;
+                resourceSearchModal.items = [];
+                resourceSearchModal.error = '';
+                resourceSearchModal.title = '';
+            }
+        };
+
+        const getSelectedMovieCollectionMovie = (row = missingEpisodeCompareModal.row) => {
+            const movies = getMovieCollectionCompareMovies(row);
+            if (!movies.length) return null;
+            const selectedKey = String(missingEpisodeCompareModal.selectedCollectionMovieKey || '');
+            if (!selectedKey) return null;
+            return movies.find(movie => getMovieCollectionMovieKey(movie) === selectedKey) || null;
+        };
+
+        const isSelectedMovieCollectionMovie = (movie = {}) => {
+            const selectedKey = String(missingEpisodeCompareModal.selectedCollectionMovieKey || '');
+            return !!selectedKey && getMovieCollectionMovieKey(movie) === selectedKey;
+        };
+
+        const movieCollectionMovieToMediaItem = (movie = {}) => ({
+            id: movie.tmdbId || movie.id || '',
+            _tmdb_id: movie.tmdbId || movie.id || '',
+            tmdb_id: movie.tmdbId || movie.id || '',
+            title: movie.title || movie.originalTitle || '',
+            original_title: movie.originalTitle || '',
+            year: movie.year || '',
+            release_date: movie.releaseDate || '',
+            poster_url: movie.poster_url || '',
+            media_type: 'movie',
+            source: 'tmdb',
+            exists_in_library: !!movie.exists,
+        });
 
         const isMissingEpisodePosterReady = (row = {}) => {
             return !!row.poster_url;
@@ -880,12 +977,18 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const openMissingEpisodeCompare = (row = {}) => {
             missingEpisodeCompareModal.row = row;
+            if (isMovieCollectionRow(row)) {
+                missingEpisodeCompareModal.selectedCollectionMovieKey = '';
+            } else {
+                missingEpisodeCompareModal.selectedCollectionMovieKey = '';
+            }
             missingEpisodeCompareModal.visible = true;
         };
 
         const closeMissingEpisodeCompare = () => {
             missingEpisodeCompareModal.visible = false;
             missingEpisodeCompareModal.row = null;
+            missingEpisodeCompareModal.selectedCollectionMovieKey = '';
             if (resourceSearchModal.context === 'missing_episode') {
                 resourceSearchModal.visible = false;
                 resourceSearchModal.context = '';
@@ -1240,13 +1343,58 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         });
 
         const getMissingEpisodeStatsCacheEntry = () => {
-            const entry = getLocalCacheEntry(
+            const entryKey = getMissingEpisodeStatsCacheEntryKey();
+            let entry = getLocalCacheEntry(
                 MISSING_EPISODE_STATS_CACHE_KEY,
                 MISSING_EPISODE_STATS_CACHE_VERSION,
-                getMissingEpisodeStatsCacheEntryKey(),
+                entryKey,
             );
+            if (!entry) {
+                for (const legacyVersion of [2, 1]) {
+                    const legacyEntry = getLocalCacheEntry(MISSING_EPISODE_STATS_CACHE_KEY, legacyVersion, entryKey);
+                    if (!legacyEntry?.data || !Array.isArray(legacyEntry.data.items) || !Array.isArray(legacyEntry.data.libraries)) continue;
+                    entry = { ...legacyEntry, migratedFromVersion: legacyVersion };
+                    setLocalCacheEntry(
+                        MISSING_EPISODE_STATS_CACHE_KEY,
+                        MISSING_EPISODE_STATS_CACHE_VERSION,
+                        entryKey,
+                        entry,
+                        {
+                            maxEntries: MISSING_EPISODE_STATS_CACHE_MAX_ENTRIES,
+                            maxChars: MISSING_EPISODE_STATS_CACHE_MAX_CHARS,
+                        },
+                    );
+                    break;
+                }
+            }
             if (!entry?.data || !Array.isArray(entry.data.items) || !Array.isArray(entry.data.libraries)) return null;
             return entry;
+        };
+
+        const hydrateMissingEpisodeManualMarksFromCache = async (data = {}) => {
+            const rows = (Array.isArray(data.items) ? data.items : []).filter(item => item?.manualComplete);
+            if (!rows.length) return;
+            const serverIdx = data.meta?.server_idx ?? missingEpisodeStats.meta?.server_idx ?? 0;
+            for (const row of rows.slice(0, 200)) {
+                const tmdbId = row.tmdbId || row.item?.tmdb_id || row.item?.id || '';
+                const libraryId = row.libraryId || '';
+                if (!tmdbId) continue;
+                const key = [serverIdx, libraryId, tmdbId].join('|');
+                if (hydratedMissingEpisodeManualMarks.has(key)) continue;
+                hydratedMissingEpisodeManualMarks.add(key);
+                try {
+                    await axios.post('/api/discover/library/missing-episode-stats/manual-complete', {
+                        tmdb_id: tmdbId,
+                        library_id: libraryId,
+                        title: row.title || row.item?.title || row.localItem?.title || '',
+                        year: row.year || row.localItem?.year || '',
+                        server_idx: serverIdx,
+                        enabled: true,
+                    });
+                } catch (_) {
+                    hydratedMissingEpisodeManualMarks.delete(key);
+                }
+            }
         };
 
         const shouldCacheMissingEpisodeStatsPayload = (data = {}, summaryOnly = false) => {
@@ -1262,6 +1410,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const compactMissingEpisodeItemForCache = (item = {}) => {
             const keys = [
                 'tmdbId',
+                'collectionTmdbId',
+                'mediaType',
                 'libraryId',
                 'libraryName',
                 'title',
@@ -1279,11 +1429,14 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 'airedMissingEpisodes',
                 'extraLocalEpisodes',
                 'seasonBrief',
+                'missingMovies',
+                'presentMovies',
                 'manualComplete',
                 'manualCompleteAt',
                 'manualCompleteLocalEpisodes',
             ];
             return keys.reduce((acc, key) => {
+                if (isMovieCollectionCompleteRow(item) && ['missingMovies', 'presentMovies'].includes(key)) return acc;
                 if (item[key] !== undefined) acc[key] = item[key];
                 return acc;
             }, { _cachedDisplayOnly: true });
@@ -1299,7 +1452,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const cachedItems = shouldStoreFull
                 ? allItems
                 : allItems
-                    .filter(item => isMissingEpisodeActionableMissing(item))
+                    .filter(item => isMissingEpisodeDisplayCacheRow(item))
                     .map(compactMissingEpisodeItemForCache);
             return {
                 ready: data.ready !== false,
@@ -1378,6 +1531,24 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             summary.tvCount = tvCountOverride == null ? items.length : Number(tvCountOverride) || 0;
             const num = (value) => Number(value) || 0;
             (items || []).forEach(item => {
+                if (isMovieCollectionRow(item)) {
+                    const missingMovies = num(item?.missingEpisodes);
+                    const manualComplete = !!item?.manualComplete;
+                    summary.movieCollectionCount += 1;
+                    if (manualComplete) summary.manualCompleteCount += 1;
+                    if (missingMovies > 0) {
+                        summary.movieCollectionMissingCount += 1;
+                        summary.movieCollectionMissingMovies += missingMovies;
+                        summary.missingCount += 1;
+                    } else {
+                        summary.movieCollectionCompleteCount += 1;
+                    }
+                    summary.presentEpisodes += num(item?.presentEpisodes);
+                    summary.totalEpisodes += num(item?.totalEpisodes);
+                    summary.missingEpisodes += missingMovies;
+                    summary.actionableMissingEpisodes += missingMovies;
+                    return;
+                }
                 const status = String(item?.status || '').toLowerCase();
                 const manualComplete = !!item?.manualComplete;
                 const category = String(item?.missingCategory || '').trim().toLowerCase();
@@ -1451,13 +1622,16 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                     seasonBrief: row.seasonBrief,
                     releaseDate: row.releaseDate,
                 };
-                const localCount = countLocalEpisodes(row.localItem?.seasons);
+                const isCollectionRow = isMovieCollectionRow(row);
+                const localCount = isCollectionRow
+                    ? (Number(row.presentEpisodes) || (row.presentMovies || []).length)
+                    : countLocalEpisodes(row.localItem?.seasons);
                 nextRow.manualComplete = true;
                 nextRow.manualCompleteAt = Math.floor(Date.now() / 1000);
                 nextRow.manualCompleteLocalEpisodes = localCount;
                 nextRow.manualCompleteOriginal = original;
                 nextRow.status = 'exists';
-                nextRow.label = localCount ? `已标记完整 ${localCount} 集` : '已标记完整';
+                nextRow.label = localCount ? `已标记完整 ${localCount} ${isCollectionRow ? '部' : '集'}` : '已标记完整';
                 nextRow.missingCategory = 'manual_complete';
                 nextRow.categoryLabel = '已标记完整';
                 nextRow.missingEpisodes = 0;
@@ -1577,6 +1751,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const renderedCached = !!cached;
             if (cached) {
                 applyMissingEpisodeStatsData(cached.data || {});
+                hydrateMissingEpisodeManualMarksFromCache(cached.data || {});
                 const runId = ++missingEpisodeStatsRunId;
                 missingEpisodeStats.loadingAction = 'load';
                 loadMissingEpisodeStatsFull(runId);
@@ -2168,6 +2343,12 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             openMediaDetail(item);
         };
 
+        const openMovieCollectionSelectedDetail = () => {
+            const movie = getSelectedMovieCollectionMovie();
+            if (!movie) return;
+            openMediaDetail(movieCollectionMovieToMediaItem(movie));
+        };
+
         const normalizeMpSubscribeSeasons = (seasons = []) => {
             const map = new Map();
             (Array.isArray(seasons) ? seasons : []).forEach(season => {
@@ -2334,13 +2515,60 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             });
         };
 
-        const getMissingEpisodeEmbyContext = (row = missingEpisodeCompareModal.row) => {
-            const embyId = String(row?.localItem?.embyId || '').trim();
+        const openMovieCollectionSelectedMpSubscribe = async () => {
+            const movie = getSelectedMovieCollectionMovie();
+            if (!movie) return;
+            await openMpSubscribeModalForMedia({
+                tmdbId: movie.tmdbId || '',
+                mediaType: 'movie',
+                title: movie.title || movie.originalTitle || '',
+                year: movie.year || '',
+            });
+        };
+
+        const getEmbyWebContext = (embyId = '') => {
             const dashboardServer = Array.isArray(servers?.value) ? (servers.value[0] || {}) : {};
             const embyConfig = Array.isArray(config302?.embys) ? (config302.embys[0] || {}) : {};
             const baseUrl = String(dashboardServer.public_host || dashboardServer.url || embyConfig.public_host || embyConfig.url || '').trim().replace(/\/+$/, '');
             const serverId = String(dashboardServer.server_id || '').trim();
-            return { embyId, baseUrl, serverId };
+            return { embyId: String(embyId || '').trim(), baseUrl, serverId };
+        };
+
+        const getMissingEpisodeEmbyContext = (row = missingEpisodeCompareModal.row) => {
+            const embyId = String(row?.localItem?.embyId || '').trim();
+            return getEmbyWebContext(embyId);
+        };
+
+        const getMovieCollectionSelectedEmbyContext = () => {
+            const movie = getSelectedMovieCollectionMovie();
+            return getEmbyWebContext(movie?.embyId || '');
+        };
+
+        const canOpenMovieCollectionSelectedEmby = () => {
+            const { embyId, baseUrl } = getMovieCollectionSelectedEmbyContext();
+            return !!embyId && !!baseUrl;
+        };
+
+        const getMovieCollectionSelectedEmbyUrl = () => {
+            const { embyId, baseUrl, serverId } = getMovieCollectionSelectedEmbyContext();
+            if (!embyId || !baseUrl || !serverId) return '';
+            return `${baseUrl}/web/index.html#!/item?id=${encodeURIComponent(embyId)}&serverId=${encodeURIComponent(serverId)}`;
+        };
+
+        const openMovieCollectionSelectedEmby = async () => {
+            if (!canOpenMovieCollectionSelectedEmby()) {
+                showToast?.('未获取到这部电影的 Emby 链接', 'warning');
+                return;
+            }
+            if (typeof ensureDashboardServerId === 'function') {
+                await ensureDashboardServerId();
+            }
+            const url = getMovieCollectionSelectedEmbyUrl();
+            if (!url) {
+                showToast?.('未获取到 Emby serverId，请重启服务后重试', 'error');
+                return;
+            }
+            window.open(url, '_blank', 'noopener,noreferrer');
         };
 
         const canOpenMissingEpisodeEmby = (row = missingEpisodeCompareModal.row) => {
@@ -2591,6 +2819,18 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             });
         };
 
+        const openMovieCollectionSelectedResourceSearch = async () => {
+            const movie = getSelectedMovieCollectionMovie();
+            if (!movie) return;
+            await openResourceSearchForMedia({
+                tmdbId: movie.tmdbId || '',
+                mediaType: 'movie',
+                title: movie.title || movie.originalTitle || '',
+                context: 'missing_episode',
+                inline: true,
+            });
+        };
+
         const openRowGrid = async (row) => {
             gridModal.visible = true;
             gridModal.row = row;
@@ -2799,14 +3039,19 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             await refreshDetailLibraryStateFromEvent(payload);
         };
 
-        const refreshMissingEpisodeStatsFromCache = async () => {
-            if (!missingEpisodeStats.loaded || missingEpisodeStats.loading) return;
-            const runId = ++missingEpisodeStatsRunId;
+        const refreshMissingEpisodeStatsFromCache = async (options = {}) => {
+            const force = !!options.force;
+            const preserveRun = !!options.preserveRun;
+            if (!missingEpisodeStats.loaded || (missingEpisodeStats.loading && !force)) return;
+            const runId = preserveRun ? missingEpisodeStatsRunId : ++missingEpisodeStatsRunId;
             try {
                 const res = await axios.get('/api/discover/library/missing-episode-stats');
                 if (runId !== missingEpisodeStatsRunId) return;
                 applyMissingEpisodeStatsData(res.data || {});
-                missingEpisodeStats.loading = false;
+                if (!res.data?.running) {
+                    missingEpisodeStats.loading = false;
+                    missingEpisodeStats.loadingAction = '';
+                }
             } catch (e) {
                 if (runId === missingEpisodeStatsRunId) {
                     missingEpisodeStats.error = e.response?.data?.detail || e.message || '刷新缓存失败';
@@ -2833,7 +3078,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 } catch (e) {
                     console.error('处理缺集统计事件失败:', e);
                 }
-                refreshMissingEpisodeStatsFromCache();
+                refreshMissingEpisodeStatsFromCache({ force: true, preserveRun: true });
             });
         };
 
@@ -2861,6 +3106,13 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         missingEpisodeLoadMoreSentinel,
         getMissingEpisodePosterKey,
         getMissingEpisodePosterCategoryLabel,
+        getMovieCollectionCompareMovies,
+        getSelectedMovieCollectionMovie,
+        selectMovieCollectionMovie,
+        isSelectedMovieCollectionMovie,
+        isMovieCollectionRow,
+        isMovieCollectionMissingRow,
+        isMovieCollectionCompleteRow,
         isMissingEpisodeErrorRow,
         shouldShowMissingEpisodeTmdbCompare,
         isMissingEpisodeManualComplete,
@@ -2877,6 +3129,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         openMissingEpisodeCompareDetail,
         openMissingEpisodeResourceSearch,
         openMissingEpisodeMpSubscribe,
+        openMovieCollectionSelectedDetail,
+        openMovieCollectionSelectedResourceSearch,
+        openMovieCollectionSelectedMpSubscribe,
         closeMpSubscribeModal,
         confirmMpSubscribe,
         toggleMpSubscribeSeason,
@@ -2884,6 +3139,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         canOpenMissingEpisodeEmby,
         getMissingEpisodeEmbyUrl,
         openMissingEpisodeEmby,
+        canOpenMovieCollectionSelectedEmby,
+        openMovieCollectionSelectedEmby,
         closeMissingEpisodeCompare,
         loadMissingEpisodeStatsShell,
         runMissingEpisodeStats,

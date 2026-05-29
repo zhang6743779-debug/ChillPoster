@@ -171,6 +171,30 @@ def _is_collection_sync_webhook_event(data: dict, event_type: str = "") -> bool:
     return any(keyword in lowered or keyword in text for keyword in COLLECTION_SYNC_NOTIFICATION_KEYWORDS)
 
 
+def _is_collection_remove_webhook_event(data: dict, event_type: str = "") -> bool:
+    text = _collection_sync_webhook_text(data, event_type)
+    normalized_text = _normalize_webhook_event_name(text)
+    if any(
+        token in normalized_text
+        for token in (
+            "notification.collectionitemsremoved.eventname",
+            "collectionitemsremoved",
+            "itemsremovedfromcollection",
+        )
+    ):
+        return True
+    lowered = text.lower()
+    return any(
+        keyword in lowered or keyword in text
+        for keyword in (
+            "合集项目已移除",
+            "合集項目已移除",
+            "collection items removed",
+            "items removed from collection",
+        )
+    )
+
+
 def _sync_pending_collections_for_webhook(data: dict, event_type: str = "") -> dict:
     try:
         from app.services.emby_collection_sync import sync_pending_emby_collections_for_webhook
@@ -184,6 +208,19 @@ def _sync_pending_collections_for_webhook(data: dict, event_type: str = "") -> d
         return result
     except Exception as e:
         logger.error(f"[Webhook] Emby 合集通知同步失败: {e}", exc_info=True)
+        return {"status": "error", "reason": str(e)}
+
+
+def _sync_deleted_collection_for_webhook(data: dict, event_type: str = "") -> dict:
+    try:
+        from app.services.emby_collection_sync import sync_emby_collection_delete_for_webhook
+
+        result = sync_emby_collection_delete_for_webhook(data, event_type=event_type)
+        if result.get("status") in {"ok", "kept", "failed"}:
+            logger.info(f"[Webhook] Emby 删除后合集清理结果: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"[Webhook] Emby 删除后合集清理失败: {e}", exc_info=True)
         return {"status": "error", "reason": str(e)}
 
 
@@ -598,10 +635,14 @@ def process_webhook_payload(data: dict):
 
     if event_type not in allowed_events and event_type not in delete_events:
         if collection_sync_trigger:
+            collection_delete_result = None
+            if _is_collection_remove_webhook_event(data, event_type):
+                collection_delete_result = _sync_deleted_collection_for_webhook(data, event_type)
             return {
                 "status": "ok",
                 "action": "emby_collection_sync",
                 "collection_sync": collection_sync_result,
+                "collection_cleanup": collection_delete_result,
             }
         return {"status": "ignored", "reason": f"Event '{event_type}' not watched"}
 
@@ -635,6 +676,8 @@ def process_webhook_payload(data: dict):
         else:
             delete_sync_result = {"status": "skipped", "message": f"非 deep.delete 删除通知不触发115删除: {event_type}"}
 
+        collection_delete_result = _sync_deleted_collection_for_webhook(data, event_type)
+
         patched = False
         servers = get_emby_configs_sync()
         for svr_idx, svr in enumerate(servers):
@@ -659,6 +702,7 @@ def process_webhook_payload(data: dict):
             "action": "missing_episode_incremental_delete",
             "patched": patched,
             "delete_sync": delete_sync_result,
+            "collection_cleanup": collection_delete_result,
         }
     
     if not item_path and target_item_id:

@@ -694,6 +694,62 @@ class EmbyClient:
             logger.warning(f"添加条目到 Emby 合集失败: collection={collection_id}, ids={ids_csv} | {e}")
             return False
 
+    def get_collection_items(self, collection_id, item_types="Movie", limit=500):
+        if not collection_id:
+            return None
+
+        uid = self._get_user_id()
+        endpoint = f"emby/Users/{uid}/Items" if uid else "emby/Items"
+        try:
+            data = self._request(
+                "GET",
+                endpoint,
+                params={
+                    "ParentId": collection_id,
+                    "Recursive": "false",
+                    "IncludeItemTypes": item_types,
+                    "Fields": "ProviderIds,Path,Name,OriginalTitle,ProductionYear",
+                    "Limit": int(limit or 500),
+                },
+            )
+            return data.get("Items", []) if isinstance(data, dict) else []
+        except Exception as e:
+            logger.warning(f"读取 Emby 合集成员失败: collection={collection_id} | {e}")
+            return None
+
+    def remove_items_from_collection(self, collection_id, item_ids):
+        ids_csv = self._ids_to_csv(item_ids)
+        if not collection_id or not ids_csv:
+            return False
+        try:
+            self._request(
+                "DELETE",
+                f"emby/Collections/{collection_id}/Items",
+                params={"Ids": ids_csv},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"从 Emby 合集移除条目失败: collection={collection_id}, ids={ids_csv} | {e}")
+            return False
+
+    def delete_collection(self, collection_id):
+        if not collection_id:
+            return False
+        try:
+            self._request(
+                "DELETE",
+                "emby/Items",
+                params={"Ids": collection_id},
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"删除 Emby 合集失败: collection={collection_id} | {e}")
+            try:
+                self._request("DELETE", f"emby/Items/{collection_id}")
+                return True
+            except Exception:
+                return False
+
     def upload_item_image(self, item_id, image_data, image_type="Primary"):
         if not item_id or not image_data:
             return False

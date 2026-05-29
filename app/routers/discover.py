@@ -31,6 +31,7 @@ from app.services.emby_library_cache import (
     discover_tmdb_id_exists,
     get_discover_index_meta,
     get_discover_index_ready,
+    get_discover_movie_entries,
     get_discover_series_entries,
     get_discover_series_status,
     lookup_discover_tmdb_id,
@@ -1708,6 +1709,10 @@ def library_series_status(tmdb_id: int):
 def _empty_missing_episode_summary() -> dict:
     return {
         "tvCount": 0,
+        "movieCollectionCount": 0,
+        "movieCollectionMissingCount": 0,
+        "movieCollectionMissingMovies": 0,
+        "movieCollectionCompleteCount": 0,
         "completeCount": 0,
         "manualCompleteCount": 0,
         "partialCount": 0,
@@ -1850,6 +1855,56 @@ def _get_missing_episode_manual_complete_marks(server_idx: int | str | None = 0)
         return {}
 
 
+def _seed_missing_episode_manual_complete_marks_from_payload(
+    payload: dict | None,
+    server_idx: int | str | None = 0,
+) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return 0
+    manual_items = [item for item in items if isinstance(item, dict) and item.get("manualComplete")]
+    if not manual_items:
+        return 0
+    try:
+        _ensure_missing_episode_manual_complete_schema()
+        server_idx_int = _missing_episode_server_idx(fallback=server_idx)
+        now = int(time.time())
+        inserted = 0
+        with cache_db(write=True) as conn:
+            for item in manual_items:
+                tmdb_id = str(item.get("tmdbId") or item.get("tmdb_id") or "").strip()
+                library_id = str(item.get("libraryId") or "").strip()
+                if not tmdb_id:
+                    continue
+                changed = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO missing_episode_manual_complete(
+                        server_idx, library_id, tmdb_id, title, year, note, created_at, updated_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        server_idx_int,
+                        library_id,
+                        tmdb_id,
+                        str(item.get("title") or (item.get("item") or {}).get("title") or ""),
+                        str(item.get("year") or (item.get("localItem") or {}).get("year") or "")[:4],
+                        "migrated_from_stats_cache",
+                        int(item.get("manualCompleteAt") or now),
+                        int(item.get("manualCompleteAt") or now),
+                    ),
+                ).rowcount
+                inserted += int(changed or 0)
+        if inserted:
+            logger.info(f"[Discover] 已从缺集统计缓存恢复手动完整标记: count={inserted}")
+        return inserted
+    except Exception as e:
+        logger.debug(f"[Discover] 从缺集统计缓存恢复手动完整标记失败: {e}")
+        return 0
+
+
 def _get_missing_episode_manual_complete_mark(server_idx: int | str | None, tmdb_id: str, library_id: str = "") -> dict | None:
     marks = _get_missing_episode_manual_complete_marks(server_idx)
     return marks.get(_missing_episode_manual_key(tmdb_id, library_id))
@@ -1926,6 +1981,28 @@ def _count_missing_episode_local_episodes(item: dict | None) -> int:
     return total
 
 
+def _is_missing_episode_movie_collection_item(item: dict | None) -> bool:
+    item = item or {}
+    return (
+        str(item.get("mediaType") or "").lower() == "movie_collection"
+        or str((item.get("item") or {}).get("media_type") or "").lower() == "movie_collection"
+        or str(item.get("missingCategory") or "").lower().startswith("movie_collection_")
+    )
+
+
+def _count_missing_episode_manual_units(item: dict | None) -> int:
+    item = item or {}
+    if _is_missing_episode_movie_collection_item(item):
+        present_movies = item.get("presentMovies")
+        if isinstance(present_movies, list) and present_movies:
+            return len(present_movies)
+        try:
+            return int(item.get("presentEpisodes") or 0)
+        except Exception:
+            return 0
+    return _count_missing_episode_local_episodes(item)
+
+
 def _manual_complete_original_snapshot(item: dict) -> dict:
     keys = [
         "status",
@@ -1953,13 +2030,15 @@ def _apply_missing_episode_manual_complete(item: dict, mark: dict | None) -> dic
     original = item.get("manualCompleteOriginal")
     if not isinstance(original, dict):
         original = _manual_complete_original_snapshot(item)
-    local_count = _count_missing_episode_local_episodes(item)
+    is_movie_collection = _is_missing_episode_movie_collection_item(item)
+    local_count = _count_missing_episode_manual_units(item)
+    unit = "部" if is_movie_collection else "集"
     item["manualComplete"] = True
     item["manualCompleteAt"] = int(mark.get("updated_at") or mark.get("created_at") or time.time())
     item["manualCompleteLocalEpisodes"] = local_count
     item["manualCompleteOriginal"] = original
     item["status"] = "exists"
-    item["label"] = f"已标记完整 {local_count} 集" if local_count else "已标记完整"
+    item["label"] = f"已标记完整 {local_count} {unit}" if local_count else "已标记完整"
     item["missingCategory"] = "manual_complete"
     item["categoryLabel"] = "已标记完整"
     item["missingEpisodes"] = 0
@@ -2346,11 +2425,242 @@ def _build_missing_episode_stat(
         return _apply_missing_episode_manual_complete(item_payload, mark) if mark else item_payload
 
 
+MOVIE_COLLECTION_LIBRARY_ID = "__movie_collections__"
+MOVIE_COLLECTION_LIBRARY_NAME = "电影合集"
+
+
+def _tmdb_proxy_image(path: str) -> str:
+    value = str(path or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return f"/api/discover/tmdb_img?path={value}"
+
+
+def _movie_collection_part_payload(part: dict, exists: bool = False, local_entry: dict | None = None) -> dict:
+    release_date = str(part.get("release_date") or part.get("first_air_date") or "")
+    title = str(part.get("title") or part.get("name") or "").strip()
+    return {
+        "tmdbId": str(part.get("id") or ""),
+        "embyId": str((local_entry or {}).get("emby_id") or ""),
+        "title": title,
+        "originalTitle": str(part.get("original_title") or part.get("original_name") or "").strip(),
+        "year": release_date[:4],
+        "releaseDate": release_date,
+        "poster_url": _tmdb_proxy_image(part.get("poster_path")),
+        "exists": bool(exists),
+        "libraryId": str((local_entry or {}).get("library_id") or ""),
+        "libraryName": str((local_entry or {}).get("library_name") or ""),
+    }
+
+
+def _movie_collection_brief(parts: list[dict]) -> str:
+    names = [str(part.get("title") or "").strip() for part in parts if str(part.get("title") or "").strip()]
+    if not names:
+        return ""
+    shown = "、".join(names[:3])
+    if len(names) > 3:
+        shown += f" 等 {len(names)} 部"
+    return f"缺 {shown}"
+
+
+def _fetch_movie_collection_seed(entry: dict, api_key: str) -> tuple[str, dict] | None:
+    try:
+        tmdb_id = int(str(entry.get("tmdb_id") or "").strip())
+    except Exception:
+        return None
+    try:
+        from app.services.media_organize_tmdb import _fetch_tmdb_data_sync
+
+        detail = _fetch_tmdb_data_sync(tmdb_id, "movie", api_key)
+    except Exception as e:
+        logger.debug(f"[Discover] 电影合集缺集读取电影详情失败: TMDB={entry.get('tmdb_id')} | {e}")
+        return None
+    if not isinstance(detail, dict):
+        return None
+    collection = detail.get("collection_details") if isinstance(detail.get("collection_details"), dict) else {}
+    belongs = detail.get("belongs_to_collection") if isinstance(detail.get("belongs_to_collection"), dict) else {}
+    collection_id = str(collection.get("id") or belongs.get("id") or "").strip()
+    if not collection_id:
+        return None
+    return collection_id, collection or belongs
+
+
+def _build_movie_collection_missing_stats(movie_entries: list[dict], api_key: str) -> list[dict]:
+    entries = [
+        entry for entry in (movie_entries or [])
+        if isinstance(entry, dict) and str(entry.get("tmdb_id") or "").strip().isdigit()
+    ]
+    if not entries:
+        return []
+
+    groups: dict[str, dict] = {}
+    max_workers = min(MISSING_EPISODE_TMDB_MAX_WORKERS, max(1, len(entries)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(_fetch_movie_collection_seed, entry, api_key): entry for entry in entries}
+        for future in as_completed(future_map):
+            entry = future_map[future]
+            try:
+                seed = future.result()
+            except Exception as e:
+                logger.debug(f"[Discover] 电影合集缺集种子计算失败: {e}")
+                continue
+            if not seed:
+                continue
+            collection_id, collection_seed = seed
+            group = groups.setdefault(collection_id, {
+                "collection_id": collection_id,
+                "collection": collection_seed if isinstance(collection_seed, dict) else {},
+                "present": {},
+            })
+            if isinstance(collection_seed, dict) and len(collection_seed) > len(group.get("collection") or {}):
+                group["collection"] = collection_seed
+            group["present"][str(entry.get("tmdb_id") or "")] = entry
+
+    results = []
+    for collection_id, group in groups.items():
+        present_entries = group.get("present") or {}
+        if not present_entries:
+            continue
+        try:
+            collection = tmdb.get_collection_details(int(collection_id), api_key) or group.get("collection") or {}
+        except Exception as e:
+            logger.debug(f"[Discover] 电影合集缺集读取合集详情失败: collection={collection_id} | {e}")
+            collection = group.get("collection") or {}
+        if not isinstance(collection, dict):
+            continue
+        raw_parts = [part for part in (collection.get("parts") or []) if isinstance(part, dict) and part.get("id")]
+        parts_by_id: dict[str, dict] = {}
+        for part in raw_parts:
+            part_id = str(part.get("id") or "")
+            if part_id and part_id not in parts_by_id:
+                parts_by_id[part_id] = part
+        if len(parts_by_id) <= 1:
+            continue
+        present_ids = set(present_entries.keys()) & set(parts_by_id.keys())
+        if not present_ids:
+            continue
+        missing_parts = [
+            part for part_id, part in parts_by_id.items()
+            if part_id not in present_ids
+        ]
+
+        sorted_parts = sorted(parts_by_id.values(), key=lambda part: str(part.get("release_date") or "9999-99-99"))
+        sorted_missing_parts = sorted(missing_parts, key=lambda part: str(part.get("release_date") or "9999-99-99"))
+        sorted_present_parts = [part for part in sorted_parts if str(part.get("id") or "") in present_ids]
+        title = str(collection.get("name") or group.get("collection", {}).get("name") or f"TMDB 合集 {collection_id}").strip()
+        first_release = next((str(part.get("release_date") or "") for part in sorted_parts if part.get("release_date")), "")
+        missing_count = len(sorted_missing_parts)
+        total_count = len(parts_by_id)
+        present_count = len(present_ids)
+        is_complete_collection = missing_count <= 0
+        status = "exists" if is_complete_collection else "partial"
+        missing_category = "movie_collection_complete" if is_complete_collection else "movie_collection_missing"
+        category_label = "电影合集完整" if is_complete_collection else "电影合集缺集"
+        label = (
+            f"电影合集完整 {present_count}/{total_count} 部"
+            if is_complete_collection
+            else f"电影合集缺 {missing_count}/{total_count} 部"
+        )
+        season_brief = (
+            f"已完整 {present_count} 部"
+            if is_complete_collection
+            else _movie_collection_brief([_movie_collection_part_payload(part) for part in sorted_missing_parts])
+        )
+        poster_url = _tmdb_proxy_image(collection.get("poster_path")) or _tmdb_proxy_image((sorted_present_parts[0] if sorted_present_parts else sorted_parts[0]).get("poster_path"))
+        backdrop_url = _tmdb_proxy_image(collection.get("backdrop_path"))
+        normalized_item = {
+            "id": f"collection:{collection_id}",
+            "_tmdb_id": f"collection:{collection_id}",
+            "tmdb_id": f"collection:{collection_id}",
+            "collection_tmdb_id": collection_id,
+            "title": title,
+            "original_title": collection.get("original_name") or "",
+            "year": first_release[:4],
+            "release_date": first_release,
+            "poster_url": poster_url,
+            "backdrop_url": backdrop_url,
+            "rating": 0,
+            "overview": collection.get("overview") or "",
+            "media_type": "movie_collection",
+            "source": "tmdb",
+            "subscribed": False,
+            "exists_in_library": True,
+        }
+        results.append({
+            "tmdbId": f"collection:{collection_id}",
+            "collectionTmdbId": collection_id,
+            "mediaType": "movie_collection",
+            "item": normalized_item,
+            "localItem": {
+                "tmdbId": f"collection:{collection_id}",
+                "embyId": "",
+                "title": title,
+                "year": first_release[:4],
+                "libraryId": MOVIE_COLLECTION_LIBRARY_ID,
+                "libraryName": MOVIE_COLLECTION_LIBRARY_NAME,
+                "presentMovieIds": sorted(present_ids),
+            },
+            "title": title,
+            "year": first_release[:4],
+            "releaseDate": first_release,
+            "poster_url": poster_url,
+            "backdrop_url": backdrop_url,
+            "status": status,
+            "label": label,
+            "missingCategory": missing_category,
+            "categoryLabel": category_label,
+            "tmdbStatus": "",
+            "libraryId": MOVIE_COLLECTION_LIBRARY_ID,
+            "libraryName": MOVIE_COLLECTION_LIBRARY_NAME,
+            "presentEpisodes": present_count,
+            "totalEpisodes": total_count,
+            "missingEpisodes": missing_count,
+            "rawTotalEpisodes": total_count,
+            "rawMissingEpisodes": missing_count,
+            "airedMissingEpisodes": missing_count,
+            "extraLocalEpisodes": 0,
+            "extraLocalSeasons": [],
+            "seasons": [],
+            "seasonBrief": season_brief,
+            "missingMovies": [_movie_collection_part_payload(part) for part in sorted_missing_parts],
+            "presentMovies": [
+                _movie_collection_part_payload(
+                    part,
+                    exists=True,
+                    local_entry=present_entries.get(str(part.get("id") or "")) or {},
+                )
+                for part in sorted_present_parts
+            ],
+        })
+
+    return _sort_missing_episode_results(results)
+
+
 def _accumulate_missing_episode_summary(summary: dict, item: dict) -> None:
-    summary["tvCount"] += 1
+    is_movie_collection = _is_missing_episode_movie_collection_item(item)
     status = item.get("status")
     is_manual_complete = bool(item.get("manualComplete"))
     category = str(item.get("missingCategory") or "").strip().lower()
+    missing_episodes = int(item.get("missingEpisodes") or 0)
+    if is_movie_collection:
+        summary["movieCollectionCount"] = int(summary.get("movieCollectionCount") or 0) + 1
+        if is_manual_complete:
+            summary["manualCompleteCount"] = int(summary.get("manualCompleteCount") or 0) + 1
+        if missing_episodes > 0:
+            summary["movieCollectionMissingCount"] = int(summary.get("movieCollectionMissingCount") or 0) + 1
+            summary["movieCollectionMissingMovies"] = int(summary.get("movieCollectionMissingMovies") or 0) + missing_episodes
+            summary["missingCount"] += 1
+        else:
+            summary["movieCollectionCompleteCount"] = int(summary.get("movieCollectionCompleteCount") or 0) + 1
+        summary["presentEpisodes"] += int(item.get("presentEpisodes") or 0)
+        summary["totalEpisodes"] += int(item.get("totalEpisodes") or 0)
+        summary["missingEpisodes"] += missing_episodes
+        summary["actionableMissingEpisodes"] += missing_episodes
+        return
+
+    summary["tvCount"] += 1
     if status == "exists" and category not in {"airing_recent_missing", "airing_aired_missing"}:
         summary["completeCount"] += 1
     elif status == "partial":
@@ -2361,7 +2671,6 @@ def _accumulate_missing_episode_summary(summary: dict, item: dict) -> None:
         summary["errorCount"] += 1
     if is_manual_complete:
         summary["manualCompleteCount"] = int(summary.get("manualCompleteCount") or 0) + 1
-    missing_episodes = int(item.get("missingEpisodes") or 0)
     if missing_episodes > 0:
         summary["missingCount"] += 1
     if category == "airing_aired_missing":
@@ -2473,8 +2782,8 @@ _missing_episode_stats_lock = threading.RLock()
 _missing_episode_cache_db_lock = threading.RLock()
 _missing_episode_cache_db_ready = False
 MISSING_EPISODE_TMDB_MAX_WORKERS = 12
-MISSING_EPISODE_STATS_CACHE_VERSION = 16
-MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 8
+MISSING_EPISODE_STATS_CACHE_VERSION = 18
+MISSING_EPISODE_SUMMARY_PREVIEW_VERSION = 10
 MISSING_EPISODE_SUMMARY_PREVIEW_LIMIT = 48
 MISSING_EPISODE_PROGRESS_UPDATE_STEP = 50
 MISSING_EPISODE_PROGRESS_UPDATE_INTERVAL_SEC = 1.0
@@ -2510,6 +2819,7 @@ def _create_missing_episode_stats_cache_schema(conn) -> None:
 
 def _slim_missing_episode_preview_item(item: dict) -> dict:
     media_item = item.get("item") if isinstance(item.get("item"), dict) else {}
+    media_type = media_item.get("media_type") or item.get("mediaType") or "tv"
     preview_media = {
         "id": media_item.get("id") or item.get("tmdbId") or "",
         "_tmdb_id": media_item.get("_tmdb_id") or item.get("tmdbId") or "",
@@ -2523,13 +2833,15 @@ def _slim_missing_episode_preview_item(item: dict) -> dict:
         "backdrop_url": media_item.get("backdrop_url") or item.get("backdrop_url") or "",
         "rating": media_item.get("rating") or 0,
         "overview": media_item.get("overview") or "",
-        "media_type": "tv",
+        "media_type": media_type,
         "source": media_item.get("source") or "tmdb",
         "subscribed": bool(media_item.get("subscribed", False)),
         "exists_in_library": True,
     }
     return {
         "tmdbId": item.get("tmdbId") or "",
+        "collectionTmdbId": item.get("collectionTmdbId") or "",
+        "mediaType": item.get("mediaType") or media_type,
         "item": preview_media,
         "title": item.get("title") or preview_media["title"],
         "year": item.get("year") or preview_media["year"],
@@ -2558,6 +2870,8 @@ def _slim_missing_episode_preview_item(item: dict) -> dict:
         "extraLocalSeasons": item.get("extraLocalSeasons") or [],
         "seasons": item.get("seasons") or [],
         "seasonBrief": item.get("seasonBrief") or "",
+        "missingMovies": item.get("missingMovies") or [],
+        "presentMovies": item.get("presentMovies") or [],
     }
 
 
@@ -2613,6 +2927,70 @@ def _build_missing_episode_summary_payload(payload: dict | None) -> dict:
     summary_payload["summaryOnly"] = True
     summary_payload["previewVersion"] = MISSING_EPISODE_SUMMARY_PREVIEW_VERSION
     return summary_payload
+
+
+def _missing_episode_summary_with_defaults(summary: dict | None) -> dict:
+    merged = _empty_missing_episode_summary()
+    if isinstance(summary, dict):
+        merged.update(summary)
+    return merged
+
+
+def _normalize_missing_episode_payload_summary_defaults(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    payload = dict(payload)
+    payload["summary"] = _missing_episode_summary_with_defaults(payload.get("summary"))
+    normalized_libraries = []
+    for lib in payload.get("libraries") or []:
+        if not isinstance(lib, dict):
+            continue
+        next_lib = dict(lib)
+        next_lib["summary"] = _missing_episode_summary_with_defaults(next_lib.get("summary"))
+        normalized_libraries.append(next_lib)
+    payload["libraries"] = normalized_libraries
+    payload.setdefault("items", [])
+    return payload
+
+
+def _payload_matches_missing_episode_server(payload: dict | None, server_idx: int | str | None) -> bool:
+    if server_idx is None:
+        return True
+    try:
+        expected = int(server_idx or 0)
+    except Exception:
+        expected = 0
+    meta = payload.get("meta") if isinstance(payload, dict) else {}
+    try:
+        actual = int((meta or {}).get("server_idx", 0) or 0)
+    except Exception:
+        actual = 0
+    return actual == expected
+
+
+def _mark_stale_missing_episode_stats_payload(payload: dict, version: int, summary_only: bool = False) -> dict:
+    payload = _normalize_missing_episode_payload_summary_defaults(payload) or {}
+    meta = dict(payload.get("meta") or {})
+    meta["missing_stats_stale_cache"] = True
+    meta["missing_stats_stale_cache_version"] = version
+    payload["meta"] = meta
+    payload["running"] = False
+    payload["staleCache"] = True
+    payload["staleCacheVersion"] = version
+    payload["message"] = "当前版本的缺集统计缓存需要刷新，正在显示上一次统计结果。"
+    return _build_missing_episode_summary_payload(payload) if summary_only else payload
+
+
+def _load_stale_missing_episode_stats_payload(
+    summary_only: bool = False,
+    meta: dict | None = None,
+) -> dict | None:
+    payload, version, _cache_key = _load_latest_missing_episode_stats_payload_any_version(
+        server_idx=_missing_episode_server_idx(meta) if meta is not None else None,
+    )
+    if not payload or version >= MISSING_EPISODE_STATS_CACHE_VERSION:
+        return None
+    return _mark_stale_missing_episode_stats_payload(payload, version, summary_only=summary_only)
 
 
 def _legacy_missing_episode_stats_cache_file() -> dict:
@@ -2757,6 +3135,13 @@ def _write_missing_episode_stats_cache_file(data: dict) -> None:
 
 
 def _normalize_missing_episode_entry_for_cache(entry: dict) -> dict:
+    if str(entry.get("media_type") or "").lower() == "movie":
+        return {
+            "tmdb_id": str(entry.get("tmdb_id") or ""),
+            "library_id": str(entry.get("library_id") or ""),
+            "media_type": "movie",
+        }
+
     seasons = {}
     for season, episodes in (entry.get("seasons") or {}).items():
         try:
@@ -2784,6 +3169,10 @@ def _build_missing_episode_entries_digest(entries: list[dict]) -> str:
     normalized.sort(key=lambda item: (item.get("tmdb_id") or "", item.get("library_id") or ""))
     raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _missing_episode_stats_cache_entries(series_entries: list[dict], movie_entries: list[dict] | None = None) -> list[dict]:
+    return list(series_entries or []) + list(movie_entries or [])
 
 
 def _build_missing_episode_cache_key(entries: list[dict], meta: dict | None = None) -> str:
@@ -2955,30 +3344,56 @@ def _load_missing_episode_stats_cache(cache_key: str | None = None, summary_only
     return payload
 
 
-def _load_latest_missing_episode_stats_payload_any_version() -> tuple[dict | None, int]:
+def _load_latest_missing_episode_stats_payload_any_version(
+    server_idx: int | str | None = None,
+) -> tuple[dict | None, int, str]:
     """Read the latest full stats payload only as an incremental-update base."""
     try:
         _ensure_missing_episode_stats_cache_schema()
         with cache_db() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 """
-                SELECT version, payload_json
+                SELECT version, cache_key, payload_json
                 FROM missing_episode_stats_cache
-                ORDER BY saved_at DESC LIMIT 1
-                """
-            ).fetchone()
-        if not row:
-            return None, 0
-        payload = json.loads(row["payload_json"] or "{}")
-        if not isinstance(payload, dict) or payload.get("running"):
-            return None, int(row["version"] or 0)
-        payload = dict(payload)
-        payload["running"] = False
-        payload.setdefault("message", "统计完成")
-        return payload, int(row["version"] or 0)
+                WHERE version < ?
+                ORDER BY saved_at DESC LIMIT 12
+                """,
+                (MISSING_EPISODE_STATS_CACHE_VERSION,),
+            ).fetchall()
+        for row in rows:
+            version = int(row["version"] or 0)
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or payload.get("running"):
+                continue
+            if not _payload_matches_missing_episode_server(payload, server_idx):
+                continue
+            payload = dict(payload)
+            payload["running"] = False
+            payload.setdefault("message", "统计完成")
+            return payload, version, str(row["cache_key"] or "")
+
+        legacy = _legacy_missing_episode_stats_cache_file()
+        legacy_meta = legacy.get("_meta") if isinstance(legacy, dict) else {}
+        legacy_payload = legacy.get("payload") if isinstance(legacy, dict) else None
+        legacy_version = int((legacy_meta or {}).get("version", 0) or 0)
+        if (
+            isinstance(legacy_payload, dict)
+            and legacy_version
+            and legacy_version < MISSING_EPISODE_STATS_CACHE_VERSION
+            and not legacy_payload.get("running")
+            and _payload_matches_missing_episode_server(legacy_payload, server_idx)
+        ):
+            legacy_payload = dict(legacy_payload)
+            legacy_payload["running"] = False
+            legacy_payload.setdefault("message", "统计完成")
+            return legacy_payload, legacy_version, str((legacy_meta or {}).get("cache_key") or "")
+        return None, 0, ""
     except Exception as e:
         logger.debug(f"[Discover] 读取旧版缺集统计缓存失败: {e}")
-        return None, 0
+        return None, 0, ""
 
 
 def _load_or_backfill_missing_episode_stats_summary(cache_key: str | None, entries: list[dict]) -> dict | None:
@@ -3017,16 +3432,25 @@ def _attach_cached_missing_episode_items_for_display(payload: dict, cache_key: s
         return payload
     cached = _cache_get(cache_key) or _load_missing_episode_stats_cache(cache_key)
     if not cached or not cached.get("items"):
+        cached = _load_stale_missing_episode_stats_payload(summary_only=False, meta=meta)
+    if not cached or not cached.get("items"):
         return payload
-    if not _missing_episode_cache_matches(cached, cache_key, entries):
+    is_stale_cache = bool(cached.get("staleCache") or (cached.get("meta") or {}).get("missing_stats_stale_cache"))
+    if not is_stale_cache and not _missing_episode_cache_matches(cached, cache_key, entries):
         return payload
+    if is_stale_cache:
+        _seed_missing_episode_manual_complete_marks_from_payload(cached, _missing_episode_server_idx(meta))
     cached = _overlay_missing_episode_manual_complete_marks(cached, entries, meta) or cached
-    _cache_set(cache_key, cached, ttl=24 * 60 * 60)
+    if not is_stale_cache:
+        _cache_set(cache_key, cached, ttl=24 * 60 * 60)
     display_payload = dict(payload)
     display_payload["items"] = cached.get("items") or []
     display_payload["libraries"] = cached.get("libraries") or payload.get("libraries") or []
     display_payload["displayingCachedItems"] = True
     display_payload["displayingCachedItemsUpdatedAt"] = (cached.get("meta") or {}).get("missing_stats_updated_at")
+    display_payload["displayingStaleCachedItems"] = is_stale_cache
+    if is_stale_cache:
+        display_payload["staleCacheVersion"] = cached.get("staleCacheVersion") or (cached.get("meta") or {}).get("missing_stats_stale_cache_version")
     return display_payload
 
 
@@ -3034,11 +3458,13 @@ def _sort_missing_episode_results(results: list[dict]) -> list[dict]:
     priority = {
         "airing_aired_missing": 0,
         "ended_missing": 1,
-        "partial_missing": 2,
-        "error": 3,
-        "airing_recent_missing": 4,
-        "manual_complete": 5,
-        "complete": 6,
+        "movie_collection_missing": 2,
+        "partial_missing": 3,
+        "error": 4,
+        "airing_recent_missing": 5,
+        "manual_complete": 6,
+        "complete": 7,
+        "movie_collection_complete": 8,
     }
     return sorted(results, key=lambda item: (
         priority.get(item.get("missingCategory"), 5),
@@ -3075,7 +3501,11 @@ def _run_missing_episode_stats_job(
     meta: dict,
     cache_key: str,
     full_calibration: bool = False,
+    movie_entries: list[dict] | None = None,
+    stats_cache_entries: list[dict] | None = None,
 ) -> None:
+    movie_entries = list(movie_entries or [])
+    stats_cache_entries = list(stats_cache_entries or _missing_episode_stats_cache_entries(entries, movie_entries))
     results: list[dict] = []
     total = len(entries)
     payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
@@ -3096,7 +3526,9 @@ def _run_missing_episode_stats_job(
             )
             meta = get_discover_index_meta()
             entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
-            cache_key = _build_missing_episode_cache_key(entries, meta)
+            movie_entries = get_discover_movie_entries()
+            stats_cache_entries = _missing_episode_stats_cache_entries(entries, movie_entries)
+            cache_key = _build_missing_episode_cache_key(stats_cache_entries, meta)
             total = len(entries)
             payload = _build_missing_episode_progress_payload(entries, meta, running=True, message="正在统计剧集缺集...")
             _store_missing_episode_progress(payload, cache_key)
@@ -3171,6 +3603,11 @@ def _run_missing_episode_stats_job(
                         completed_count += 1
                         _maybe_store_light_progress(force=completed_count >= total)
 
+        if movie_entries:
+            movie_results = _build_movie_collection_missing_stats(movie_entries, api_key)
+            if movie_results:
+                results.extend(movie_results)
+
         final_results = _sort_missing_episode_results(results)
         final_summary = _empty_missing_episode_summary()
         for item in final_results:
@@ -3188,12 +3625,12 @@ def _run_missing_episode_stats_job(
             "summary": final_summary,
             "items": final_results,
             "libraries": _merge_missing_episode_libraries(entries, final_results),
-            "progress": {"current": len(results), "total": total},
+            "progress": {"current": len(stats_cache_entries), "total": len(stats_cache_entries)},
             "message": "统计完成",
         }
-        final_payload = _decorate_missing_episode_payload(final_payload, cache_key, entries, meta, message="统计完成")
+        final_payload = _decorate_missing_episode_payload(final_payload, cache_key, stats_cache_entries, meta, message="统计完成")
         _cache_set(cache_key, final_payload, ttl=24 * 60 * 60)
-        _save_missing_episode_stats_cache(final_payload, cache_key, entries)
+        _save_missing_episode_stats_cache(final_payload, cache_key, stats_cache_entries)
         _store_missing_episode_progress(final_payload, cache_key)
     except Exception as e:
         logger.warning(f"[Discover] 缺集统计后台任务失败: {e}")
@@ -3250,8 +3687,11 @@ def _overlay_missing_episode_manual_complete_marks(payload: dict | None, entries
     if not isinstance(items, list) or not items:
         return payload
 
-    manual_marks = _get_missing_episode_manual_complete_marks(_missing_episode_server_idx(meta or payload.get("meta")))
+    server_idx = _missing_episode_server_idx(meta or payload.get("meta"))
     has_manual_rows = any(isinstance(item, dict) and item.get("manualComplete") for item in items)
+    if has_manual_rows:
+        _seed_missing_episode_manual_complete_marks_from_payload(payload, server_idx)
+    manual_marks = _get_missing_episode_manual_complete_marks(server_idx)
     if not manual_marks and not has_manual_rows:
         return payload
 
@@ -3260,8 +3700,9 @@ def _overlay_missing_episode_manual_complete_marks(payload: dict | None, entries
     for item in items:
         if not isinstance(item, dict):
             continue
+        is_movie_collection = _is_missing_episode_movie_collection_item(item)
         item_key = _missing_episode_result_key(item)
-        if entry_keys and item_key not in entry_keys:
+        if not is_movie_collection and entry_keys and item_key not in entry_keys:
             continue
         mark = manual_marks.get(item_key)
         if mark:
@@ -3336,6 +3777,7 @@ def _build_missing_episode_stats_payload(entries: list[dict], api_key: str, meta
 
 def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = False, tmdb_id: str = "", library_id: str = "") -> bool:
     """Patch the persisted missing-episode statistics for one Series."""
+    meta = get_discover_index_meta()
     cached_payload = _load_missing_episode_stats_cache()
     if not cached_payload:
         with _missing_episode_stats_lock:
@@ -3345,17 +3787,29 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
             not isinstance(payload_meta, dict)
             or int(payload_meta.get("missing_stats_cache_version", 0) or 0) != MISSING_EPISODE_STATS_CACHE_VERSION
         ):
-            logger.info(
-                "[Discover] 缺集统计单剧缓存未更新: 当前没有同版本完整缓存，"
-                "请先刷新一次缺集统计"
-            )
-            return False
+            cached_payload = _load_stale_missing_episode_stats_payload(summary_only=False, meta=meta)
+            if cached_payload:
+                _seed_missing_episode_manual_complete_marks_from_payload(
+                    cached_payload,
+                    _missing_episode_server_idx(meta),
+                )
+                logger.info(
+                    "[Discover] 缺集统计单剧缓存使用旧版完整缓存作为增量基底: "
+                    f"version={cached_payload.get('staleCacheVersion') or (cached_payload.get('meta') or {}).get('missing_stats_stale_cache_version')}"
+                )
+            else:
+                logger.info(
+                    "[Discover] 缺集统计单剧缓存未更新: 当前没有同版本完整缓存，"
+                    "请先刷新一次缺集统计"
+                )
+                return False
     if not isinstance(cached_payload, dict) or cached_payload.get("running"):
         logger.info("[Discover] 缺集统计单剧缓存未更新: 当前没有已完成的缺集统计缓存")
         return False
 
-    meta = get_discover_index_meta()
     entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
+    movie_entries = get_discover_movie_entries()
+    stats_cache_entries = _missing_episode_stats_cache_entries(entries, movie_entries)
     entry_keys = {_missing_episode_entry_key(item) for item in entries}
     target_key = _missing_episode_entry_key(entry or {"tmdb_id": tmdb_id, "library_id": library_id})
     if target_key == ("", ""):
@@ -3365,6 +3819,9 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
 
     results = []
     for item in cached_payload.get("items") or []:
+        if str(item.get("mediaType") or "").lower() == "movie_collection" or str(item.get("missingCategory") or "").lower() == "movie_collection_missing":
+            results.append(item)
+            continue
         item_key = _missing_episode_result_key(item)
         is_target = item_key[0] == target_tmdb_id and (not target_library_id or item_key[1] == target_library_id)
         if is_target:
@@ -3393,7 +3850,7 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
     for item in results:
         _accumulate_missing_episode_summary(summary, item)
     summary["tvCount"] = len(entries)
-    cache_key = _build_missing_episode_cache_key(entries, meta)
+    cache_key = _build_missing_episode_cache_key(stats_cache_entries, meta)
     final_payload = {
         "ready": True,
         "running": False,
@@ -3401,13 +3858,22 @@ def sync_missing_episode_stats_entry(entry: dict | None = None, remove: bool = F
         "summary": summary,
         "items": results,
         "libraries": _merge_missing_episode_libraries(entries, results),
-        "progress": {"current": len(entries), "total": len(entries)},
+        "progress": {"current": len(stats_cache_entries), "total": len(stats_cache_entries)},
         "message": "统计完成",
     }
-    final_payload = _decorate_missing_episode_payload(final_payload, cache_key, entries, meta, message="统计完成")
+    final_payload = _decorate_missing_episode_payload(final_payload, cache_key, stats_cache_entries, meta, message="统计完成")
     _cache_set(cache_key, final_payload, ttl=24 * 60 * 60)
-    _save_missing_episode_stats_cache(final_payload, cache_key, entries)
-    _store_missing_episode_progress(final_payload, cache_key)
+    _save_missing_episode_stats_cache(final_payload, cache_key, stats_cache_entries)
+    with _missing_episode_stats_lock:
+        stats_job_running = bool(_missing_episode_stats_state.get("running"))
+        current_progress = _missing_episode_stats_state.get("progress") or final_payload.get("progress")
+    state_payload = final_payload
+    if stats_job_running:
+        state_payload = dict(final_payload)
+        state_payload["running"] = True
+        state_payload["progress"] = current_progress or final_payload.get("progress")
+        state_payload["message"] = "正在统计剧集缺集..."
+    _store_missing_episode_progress(state_payload, cache_key)
     publish_realtime_event("missing_episode_stats_updated", {
         "action": "removed" if remove else "updated",
         "media_type": "tv",
@@ -3447,9 +3913,10 @@ def set_missing_episode_manual_complete(payload: dict = Body(...)):
     )
     cache_key = _build_missing_episode_cache_key([], {"server_idx": server_idx})
     _cache.pop(cache_key, None)
+    media_type = "movie_collection" if tmdb_id.startswith("collection:") else "tv"
     publish_realtime_event("missing_episode_stats_updated", {
         "action": "manual_complete" if enabled else "manual_complete_removed",
-        "media_type": "tv",
+        "media_type": media_type,
         "tmdb_id": tmdb_id,
         "library_id": library_id,
         "manual_complete": enabled,
@@ -3474,6 +3941,9 @@ def library_missing_episode_stats(
         cached = _load_missing_episode_stats_cache(summary_only=wants_summary)
         if cached:
             return cached
+        stale = _load_stale_missing_episode_stats_payload(summary_only=wants_summary, meta=meta)
+        if stale:
+            return stale
         return {
             "ready": False,
             "meta": meta,
@@ -3486,12 +3956,14 @@ def library_missing_episode_stats(
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
     entries = _filter_rss_real_library_entries(get_discover_series_entries(), meta)
-    cache_key = _build_missing_episode_cache_key(entries, meta)
+    movie_entries = get_discover_movie_entries()
+    stats_cache_entries = _missing_episode_stats_cache_entries(entries, movie_entries)
+    cache_key = _build_missing_episode_cache_key(stats_cache_entries, meta)
     if wants_summary and not start and not refresh:
         with _missing_episode_stats_lock:
             if _missing_episode_stats_state.get("payload") and _missing_episode_stats_state.get("running"):
                 return _build_missing_episode_summary_payload(_missing_episode_stats_state["payload"])
-        cached_summary = _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
+        cached_summary = _load_or_backfill_missing_episode_stats_summary(cache_key, stats_cache_entries)
         if cached_summary and cached_summary.get("previewVersion") == MISSING_EPISODE_SUMMARY_PREVIEW_VERSION:
             return cached_summary
     with _missing_episode_stats_lock:
@@ -3499,7 +3971,7 @@ def library_missing_episode_stats(
             payload = _missing_episode_stats_state["payload"]
             if wants_summary:
                 return _build_missing_episode_summary_payload(payload)
-            return _attach_cached_missing_episode_items_for_display(payload, cache_key, entries, meta)
+            return _attach_cached_missing_episode_items_for_display(payload, cache_key, stats_cache_entries, meta)
 
     if start or refresh:
         message = "正在校准 Emby 剧集索引..." if refresh else "正在统计剧集缺集..."
@@ -3514,28 +3986,29 @@ def library_missing_episode_stats(
             })
         worker = threading.Thread(
             target=_run_missing_episode_stats_job,
-            args=(entries, api_key, meta, cache_key, bool(refresh)),
+            args=(entries, api_key, meta, cache_key, bool(refresh), movie_entries, stats_cache_entries),
             daemon=True,
         )
         worker.start()
-        return _build_missing_episode_summary_payload(initial_payload) if wants_summary else initial_payload
+        display_payload = _attach_cached_missing_episode_items_for_display(initial_payload, cache_key, stats_cache_entries, meta)
+        return _build_missing_episode_summary_payload(display_payload) if wants_summary else display_payload
 
     if not refresh:
         cached = None if wants_summary else _cache_get(cache_key)
         if cached:
-            return _overlay_missing_episode_manual_complete_marks(cached, entries, meta) or cached
+            return _overlay_missing_episode_manual_complete_marks(cached, stats_cache_entries, meta) or cached
         if wants_summary:
-            cached = _load_or_backfill_missing_episode_stats_summary(cache_key, entries)
+            cached = _load_or_backfill_missing_episode_stats_summary(cache_key, stats_cache_entries)
         else:
             cached = _load_missing_episode_stats_cache(cache_key)
         if cached:
             if not wants_summary:
-                cached = _overlay_missing_episode_manual_complete_marks(cached, entries, meta) or cached
+                cached = _overlay_missing_episode_manual_complete_marks(cached, stats_cache_entries, meta) or cached
             cached_key = (cached.get("meta") or {}).get("missing_stats_cache_key") or cache_key
             if cached_key == cache_key and not wants_summary:
                 _cache_set(cache_key, cached, ttl=24 * 60 * 60)
                 if (cached.get("meta") or {}).get("missing_stats_cache_migrated_from"):
-                    _save_missing_episode_stats_cache(cached, cache_key, entries)
+                    _save_missing_episode_stats_cache(cached, cache_key, stats_cache_entries)
             with _missing_episode_stats_lock:
                 _missing_episode_stats_state.update({
                     "cache_key": cached_key,
@@ -3545,6 +4018,17 @@ def library_missing_episode_stats(
                     "error": "",
                 })
             return cached
+        stale = _load_stale_missing_episode_stats_payload(summary_only=wants_summary, meta=meta)
+        if stale:
+            with _missing_episode_stats_lock:
+                _missing_episode_stats_state.update({
+                    "cache_key": (stale.get("meta") or {}).get("missing_stats_cache_key") or "",
+                    "running": False,
+                    "payload": _missing_episode_stats_state.get("payload") if wants_summary else stale,
+                    "progress": stale.get("progress") or {"current": 0, "total": 0},
+                    "error": "",
+                })
+            return stale
     with _missing_episode_stats_lock:
         if _missing_episode_stats_state.get("cache_key") == cache_key and _missing_episode_stats_state.get("payload"):
             payload = _missing_episode_stats_state["payload"]

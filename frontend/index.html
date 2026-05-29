@@ -1917,7 +1917,7 @@
                                     <label class="missing-episode-search-control" title="搜索缺集剧集">
                                         <span class="missing-episode-search-label"><i class="fa-solid fa-magnifying-glass"></i></span>
                                         <div class="missing-episode-search-box">
-                                            <input v-model.trim="missingEpisodeStats.searchQuery" type="search" placeholder="全局搜索标题 / 年份 / TMDB">
+                                            <input v-model.trim="missingEpisodeStats.searchQuery" type="search" placeholder="全局搜索标题 / 年份 / TMDB / 合集">
                                             <button v-if="missingEpisodeStats.searchQuery" type="button" @click="missingEpisodeStats.searchQuery = ''" title="清空搜索">
                                                 <i class="fa-solid fa-xmark"></i>
                                             </button>
@@ -1960,6 +1960,14 @@
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'ended_missing'}" @click="setMissingEpisodeFilter('ended_missing')">
                                             完结缺集
                                             <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
+                                        </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'movie_collection_missing'}" @click="setMissingEpisodeFilter('movie_collection_missing')">
+                                            电影合集缺集
+                                            <strong>{{ missingEpisodeActiveSummary.movieCollectionMissingMovies || 0 }}</strong>
+                                        </button>
+                                        <button type="button" :class="{active: missingEpisodeStats.filter === 'movie_collection_complete'}" @click="setMissingEpisodeFilter('movie_collection_complete')">
+                                            电影合集完整
+                                            <strong>{{ missingEpisodeActiveSummary.movieCollectionCompleteCount || 0 }}</strong>
                                         </button>
                                         <button type="button" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
                                             异常入库
@@ -2006,9 +2014,9 @@
 
                             <div class="missing-episode-workspace">
                                 <aside class="missing-episode-sidebar">
-                                    <div class="missing-episode-status-card">
-                                        <div class="missing-episode-status-head">
-                                            <span>剧集库</span>
+	                                    <div class="missing-episode-status-card">
+	                                        <div class="missing-episode-status-head">
+	                                            <span>统计对象</span>
                                             <div class="missing-episode-progress" v-if="missingEpisodeStats.loading">
                                                 <i class="fa-solid fa-spinner fa-spin"></i>
                                                 {{ missingEpisodeStats.progress.current || 0 }}/{{ missingEpisodeStats.progress.total || 0 }}
@@ -2020,16 +2028,16 @@
                                                 <i class="fa-solid fa-circle-info"></i> 待统计
                                             </div>
                                         </div>
-                                        <div class="missing-episode-big-number">{{ missingEpisodeActiveSummary.tvCount }}</div>
+                                        <div class="missing-episode-big-number">{{ (missingEpisodeActiveSummary.tvCount || 0) + (missingEpisodeActiveSummary.movieCollectionCount || 0) }}</div>
                                         <div class="missing-episode-total-line" v-if="missingEpisodeStats.loaded && missingEpisodeActiveSummary.totalEpisodes">
-                                            {{ missingEpisodeActiveSummary.presentEpisodes }} / {{ missingEpisodeActiveSummary.totalEpisodes }} 集已入库
+                                            {{ missingEpisodeActiveSummary.presentEpisodes }} / {{ missingEpisodeActiveSummary.totalEpisodes }} 项已入库
                                         </div>
                                         <div class="missing-episode-error" v-if="missingEpisodeStats.error">{{ missingEpisodeStats.error }}</div>
                                     </div>
 
                                     <div class="missing-episode-summary-grid">
                                         <div class="missing-episode-summary-card partial">
-                                            <span>缺集电视剧数量</span>
+                                            <span>缺集条目数量</span>
                                             <strong>{{ missingEpisodeActionableMissingCount }}</strong>
                                         </div>
                                         <div class="missing-episode-summary-card error">
@@ -2041,7 +2049,7 @@
                                             <strong>{{ missingEpisodeActiveSummary.completeCount }}</strong>
                                         </div>
                                         <div class="missing-episode-summary-card total">
-                                            <span>缺失集数</span>
+                                            <span>缺失数量</span>
                                             <strong>{{ missingEpisodeActionableEpisodeCount }}</strong>
                                         </div>
                                     </div>
@@ -2064,6 +2072,14 @@
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'ended_missing'}" @click="setMissingEpisodeFilter('ended_missing')">
                                                 完结缺集
                                                 <strong>{{ missingEpisodeActiveSummary.endedMissingCount || 0 }}</strong>
+                                            </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'movie_collection_missing'}" @click="setMissingEpisodeFilter('movie_collection_missing')">
+                                                电影合集缺集
+                                                <strong>{{ missingEpisodeActiveSummary.movieCollectionMissingMovies || 0 }}</strong>
+                                            </button>
+                                            <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'movie_collection_complete'}" @click="setMissingEpisodeFilter('movie_collection_complete')">
+                                                电影合集完整
+                                                <strong>{{ missingEpisodeActiveSummary.movieCollectionCompleteCount || 0 }}</strong>
                                             </button>
                                             <button class="missing-episode-filter-btn" :class="{active: missingEpisodeStats.filter === 'error'}" @click="setMissingEpisodeFilter('error')">
                                                 异常入库
@@ -2127,15 +2143,17 @@
                                         <i class="fa-solid fa-list-check"></i>
                                         <div>点击“开始统计”扫描整个 Emby 电视剧库。</div>
                                     </div>
-                                    <div v-else-if="missingEpisodeStats.loaded && !missingEpisodeActiveSummary.tvCount" class="mp-empty missing-episode-empty">
-                                        <i class="fa-solid fa-tv"></i>
-                                        <div>当前媒体库没有可统计的电视剧。</div>
+                                    <div v-else-if="missingEpisodeStats.loaded && !((missingEpisodeActiveSummary.tvCount || 0) + (missingEpisodeActiveSummary.movieCollectionCount || 0))" class="mp-empty missing-episode-empty">
+                                        <i class="fa-solid fa-list-check"></i>
+                                        <div>当前媒体库没有可统计的剧集或电影合集。</div>
                                     </div>
                                     <div v-else-if="missingEpisodeStatsProblemItems.length" ref="missingEpisodePosterGridRef" class="missing-episode-poster-grid">
                                         <div v-for="(row, idx) in visibleMissingEpisodeStatsProblemItems" :key="row.tmdbId + '_' + row.libraryId" class="missing-episode-poster-card" :data-missing-poster-key="getMissingEpisodePosterKey(row)" @click="openMissingEpisodeCard(row)">
                                             <div class="missing-episode-poster-frame">
                                                 <img v-if="isMissingEpisodePosterReady(row)" :src="row.poster_url" :alt="row.title" loading="lazy" decoding="async">
-                                                <div v-else class="missing-episode-poster-placeholder" :class="{lazy: row.poster_url}"><i class="fa-solid fa-tv"></i></div>
+                                                <div v-else class="missing-episode-poster-placeholder" :class="{lazy: row.poster_url}">
+                                                    <i class="fa-solid" :class="isMovieCollectionRow(row) ? 'fa-film' : 'fa-tv'"></i>
+                                                </div>
                                             </div>
                                             <div class="missing-episode-poster-info">
                                                 <div class="missing-episode-poster-title" :title="row.title">
@@ -2148,7 +2166,7 @@
                                                     </div>
                                                 </div>
                                                 <div class="missing-episode-poster-missing" v-if="row.totalEpisodes">
-                                                    缺 {{ row.missingEpisodes }} / {{ row.totalEpisodes }} 集
+                                                    {{ isMovieCollectionCompleteRow(row) ? '完整' : '缺' }} {{ isMovieCollectionCompleteRow(row) ? row.presentEpisodes : row.missingEpisodes }} / {{ row.totalEpisodes }} {{ isMovieCollectionRow(row) ? '部' : '集' }}
                                                 </div>
                                                 <div class="missing-episode-poster-brief" v-if="row.seasonBrief" :title="row.seasonBrief">
                                                     {{ row.seasonBrief }}
@@ -5889,14 +5907,14 @@
                 <section class="missing-episode-compare-panel">
                     <button class="modal-close-btn missing-episode-compare-close" @click="closeMissingEpisodeCompare"><i class="fa-solid fa-xmark"></i></button>
                     <div class="missing-episode-compare-head">
-                        <div class="missing-episode-compare-kicker">{{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '已标记完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '异常入库对比' : '入库剧集明细') }}</div>
+                        <div class="missing-episode-compare-kicker">{{ isMovieCollectionRow(missingEpisodeCompareModal.row) ? (isMovieCollectionCompleteRow(missingEpisodeCompareModal.row) ? '电影合集完整' : '电影合集缺集') : (isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '已标记完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '异常入库对比' : '入库剧集明细')) }}</div>
                         <span class="detail-library-badge" :class="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) && !isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? 'error' : 'exists'">
-                            {{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '人工完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '需要核对' : '正常入库') }}
+                            {{ isMovieCollectionRow(missingEpisodeCompareModal.row) ? (isMovieCollectionCompleteRow(missingEpisodeCompareModal.row) ? '完整合集' : '缺电影') : (isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '人工完整' : (shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) ? '需要核对' : '正常入库')) }}
                         </span>
                     </div>
                     <div class="missing-episode-compare-media">
                         <img v-if="missingEpisodeCompareModal.row?.poster_url" class="missing-episode-compare-poster" :src="missingEpisodeCompareModal.row.poster_url" :alt="missingEpisodeCompareModal.row.title">
-                        <div v-else class="missing-episode-compare-poster-placeholder"><i class="fa-solid fa-tv"></i></div>
+                        <div v-else class="missing-episode-compare-poster-placeholder"><i class="fa-solid" :class="isMovieCollectionRow(missingEpisodeCompareModal.row) ? 'fa-film' : 'fa-tv'"></i></div>
                         <div class="missing-episode-compare-info">
                             <div class="missing-episode-compare-title">媒体信息</div>
                             <div class="missing-episode-compare-info-main">
@@ -5905,56 +5923,112 @@
                                     <p v-if="missingEpisodeCompareModal.row?.item?.original_title">{{ missingEpisodeCompareModal.row.item.original_title }}</p>
                                 </div>
                                 <div class="missing-episode-compare-action-stack">
-                                    <button
-                                        type="button"
-                                        class="missing-episode-compare-manual-btn"
-                                        :class="{active: isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)}"
+	                                    <button
+	                                        v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row) || (!getSelectedMovieCollectionMovie(missingEpisodeCompareModal.row) && (!isMovieCollectionCompleteRow(missingEpisodeCompareModal.row) || isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)))"
+	                                        type="button"
+	                                        class="missing-episode-compare-manual-btn"
+	                                        :class="{active: isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)}"
                                         :disabled="isMissingEpisodeManualCompleteUpdating(missingEpisodeCompareModal.row)"
                                         @click="toggleMissingEpisodeManualComplete(missingEpisodeCompareModal.row)"
                                     >
                                         <i class="fa-solid" :class="isMissingEpisodeManualCompleteUpdating(missingEpisodeCompareModal.row) ? 'fa-spinner fa-spin' : (isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? 'fa-rotate-left' : 'fa-circle-check')"></i>
                                         <span>{{ isMissingEpisodeManualComplete(missingEpisodeCompareModal.row) ? '取消标记' : '标记完整' }}</span>
                                     </button>
-                                    <button type="button" class="missing-episode-compare-mp-btn" @click="openMissingEpisodeMpSubscribe">
+                                    <button v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-mp-btn" @click="openMissingEpisodeMpSubscribe">
                                         <i class="fa-solid fa-bell"></i>
                                         <span>MP订阅</span>
                                     </button>
-                                    <button type="button" class="missing-episode-compare-resource-btn" @click="openMissingEpisodeResourceSearch">
+                                    <button v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-resource-btn" @click="openMissingEpisodeResourceSearch">
                                         <i class="fa-solid fa-magnifying-glass"></i>
                                         <span>资源搜索</span>
                                     </button>
-                                    <button type="button" class="missing-episode-compare-detail-btn" @click="openMissingEpisodeCompareDetail">
-                                        <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                                        <span>详情页</span>
-                                    </button>
-                                    <button
-                                        v-if="canOpenMissingEpisodeEmby(missingEpisodeCompareModal.row)"
-                                        type="button"
+	                                    <button v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-detail-btn" @click="openMissingEpisodeCompareDetail">
+	                                        <i class="fa-solid fa-arrow-up-right-from-square"></i>
+	                                        <span>详情页</span>
+	                                    </button>
+	                                    <button v-if="isMovieCollectionRow(missingEpisodeCompareModal.row) && getSelectedMovieCollectionMovie(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-mp-btn" @click="openMovieCollectionSelectedMpSubscribe">
+	                                        <i class="fa-solid fa-bell"></i>
+	                                        <span>MP订阅</span>
+	                                    </button>
+	                                    <button v-if="isMovieCollectionRow(missingEpisodeCompareModal.row) && getSelectedMovieCollectionMovie(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-resource-btn" @click="openMovieCollectionSelectedResourceSearch">
+	                                        <i class="fa-solid fa-magnifying-glass"></i>
+	                                        <span>资源搜索</span>
+	                                    </button>
+	                                    <button v-if="isMovieCollectionRow(missingEpisodeCompareModal.row) && getSelectedMovieCollectionMovie(missingEpisodeCompareModal.row)" type="button" class="missing-episode-compare-detail-btn" @click="openMovieCollectionSelectedDetail">
+	                                        <i class="fa-solid fa-arrow-up-right-from-square"></i>
+	                                        <span>详情页</span>
+	                                    </button>
+	                                    <button
+	                                        v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row) && canOpenMissingEpisodeEmby(missingEpisodeCompareModal.row)"
+	                                        type="button"
                                         class="missing-episode-compare-emby-btn"
                                         @click="openMissingEpisodeEmby"
                                     >
-                                        <i class="fa-solid fa-server"></i>
-                                        <span>Emby</span>
-                                    </button>
-                                </div>
+	                                        <i class="fa-solid fa-server"></i>
+	                                        <span>Emby</span>
+	                                    </button>
+	                                    <button
+	                                        v-if="isMovieCollectionRow(missingEpisodeCompareModal.row) && canOpenMovieCollectionSelectedEmby()"
+	                                        type="button"
+	                                        class="missing-episode-compare-emby-btn"
+	                                        @click="openMovieCollectionSelectedEmby"
+	                                    >
+	                                        <i class="fa-solid fa-server"></i>
+	                                        <span>Emby</span>
+	                                    </button>
+	                                </div>
                             </div>
                             <div class="missing-episode-compare-meta">
                                 <span>{{ missingEpisodeCompareModal.row?.year || missingEpisodeCompareModal.row?.localItem?.year || '未知年份' }}</span>
                                 <span>{{ missingEpisodeCompareModal.row?.localItem?.libraryName || missingEpisodeCompareModal.row?.libraryName || '未分类媒体库' }}</span>
                                 <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.tmdbStatus || '未知状态' }}</span>
-                                <span>{{ countLocalEpisodes(missingEpisodeCompareModal.row?.localItem?.seasons) }} 集已入库</span>
+                                <span>{{ isMovieCollectionRow(missingEpisodeCompareModal.row) ? ((missingEpisodeCompareModal.row?.presentEpisodes || 0) + ' 部已入库') : (countLocalEpisodes(missingEpisodeCompareModal.row?.localItem?.seasons) + ' 集已入库') }}</span>
                                 <span v-if="isMissingEpisodeManualComplete(missingEpisodeCompareModal.row)">不计入缺集</span>
-                                <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
+                                <span v-if="isMovieCollectionRow(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 部 TMDB</span>
+                                <span v-else-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)">{{ missingEpisodeCompareModal.row?.totalEpisodes || 0 }} 集 TMDB</span>
                                 <span v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row) && missingEpisodeCompareModal.row?.extraLocalEpisodes">本地多 {{ missingEpisodeCompareModal.row.extraLocalEpisodes }} 集</span>
                                 <span>{{ missingEpisodeCompareModal.row?.label || getMissingEpisodePosterCategoryLabel(missingEpisodeCompareModal.row) }}</span>
                             </div>
                             <div class="missing-episode-compare-id-row">
                                 <span v-if="missingEpisodeCompareModal.row?.localItem?.embyId" class="missing-episode-compare-id">Emby ID: {{ missingEpisodeCompareModal.row.localItem.embyId }}</span>
-                                <span v-if="missingEpisodeCompareModal.row?.tmdbId" class="missing-episode-compare-id">TMDB ID: {{ missingEpisodeCompareModal.row.tmdbId }}</span>
+                                <span v-if="isMovieCollectionRow(missingEpisodeCompareModal.row) && missingEpisodeCompareModal.row?.collectionTmdbId" class="missing-episode-compare-id">TMDB 合集 ID: {{ missingEpisodeCompareModal.row.collectionTmdbId }}</span>
+                                <span v-else-if="missingEpisodeCompareModal.row?.tmdbId" class="missing-episode-compare-id">TMDB ID: {{ missingEpisodeCompareModal.row.tmdbId }}</span>
                             </div>
                         </div>
                     </div>
-                    <div v-if="shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-section local">
+                    <div v-if="isMovieCollectionRow(missingEpisodeCompareModal.row)" class="missing-episode-compare-section tmdb movie-collection">
+                        <div class="missing-episode-compare-section-head">
+                            <div>
+                                <div class="missing-episode-compare-title">合集电影</div>
+                                <strong>{{ missingEpisodeCompareModal.row?.title || missingEpisodeCompareModal.row?.item?.title || '未知合集' }}</strong>
+                            </div>
+                            <span>{{ (missingEpisodeCompareModal.row?.presentMovies || []).length }} 部已入库 · {{ (missingEpisodeCompareModal.row?.missingMovies || []).length }} 部未入库</span>
+                        </div>
+                        <div v-if="getMovieCollectionCompareMovies(missingEpisodeCompareModal.row).length" class="missing-episode-movie-list">
+	                            <div
+	                                v-for="movie in getMovieCollectionCompareMovies(missingEpisodeCompareModal.row)"
+	                                :key="'collection-movie-' + (movie.tmdbId || movie.title)"
+	                                class="missing-episode-movie-row"
+	                                :class="{exists: movie.exists, selected: isSelectedMovieCollectionMovie(movie)}"
+	                                role="button"
+	                                tabindex="0"
+	                                :aria-pressed="isSelectedMovieCollectionMovie(movie)"
+	                                @click="selectMovieCollectionMovie(movie)"
+	                                @keydown.enter.prevent="selectMovieCollectionMovie(movie)"
+	                                @keydown.space.prevent="selectMovieCollectionMovie(movie)"
+	                            >
+                                <img v-if="movie.poster_url" class="missing-episode-movie-thumb" :src="movie.poster_url" :alt="movie.title || movie.originalTitle || movie.tmdbId">
+                                <div v-else class="missing-episode-movie-thumb placeholder"><i class="fa-solid fa-film"></i></div>
+                                <div class="missing-episode-movie-meta">
+                                    <strong>{{ movie.title || movie.originalTitle || ('TMDB ' + movie.tmdbId) }}</strong>
+                                    <span>{{ movie.year || '未知年份' }} · TMDB {{ movie.tmdbId || '未知' }}</span>
+                                </div>
+                                <span class="missing-episode-movie-state" :class="movie.exists ? 'exists' : 'missing'">{{ movie.exists ? '已入库' : '未入库' }}</span>
+                            </div>
+                        </div>
+                        <div v-else class="missing-episode-compare-empty">暂无合集电影明细</div>
+                    </div>
+                    <div v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row) && shouldShowMissingEpisodeTmdbCompare(missingEpisodeCompareModal.row)" class="missing-episode-compare-section local">
                         <div class="missing-episode-compare-section-head">
                             <div>
                                 <div class="missing-episode-compare-title">已入库条目</div>
@@ -5981,7 +6055,7 @@
                         </div>
                         <div v-else class="missing-episode-compare-empty">暂无已入库季集信息</div>
                     </div>
-                    <div class="missing-episode-compare-section tmdb">
+                    <div v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row)" class="missing-episode-compare-section tmdb">
                         <div class="missing-episode-compare-section-head">
                             <div>
                                 <div class="missing-episode-compare-title">TMDB 条目</div>
@@ -6011,14 +6085,14 @@
                         </div>
                         <div v-else class="missing-episode-compare-empty">暂无 TMDB 季集信息，刷新统计后会补齐展开条目</div>
                     </div>
-                    <div class="missing-episode-chip-legend">
+                    <div v-if="!isMovieCollectionRow(missingEpisodeCompareModal.row)" class="missing-episode-chip-legend">
                         <span><i class="exists"></i>已入库</span>
                         <span><i class="aired-missing"></i>已播缺失</span>
                         <span><i class="extra"></i>本地多出</span>
                         <span><i class="missing"></i>未入库/未播</span>
                     </div>
                     <div
-                        v-if="resourceSearchModal.context === 'missing_episode' && (resourceSearchModal.loading || resourceSearchModal.items.length || resourceSearchModal.error)"
+	                        v-if="resourceSearchModal.context === 'missing_episode' && (resourceSearchModal.loading || resourceSearchModal.items.length || resourceSearchModal.error)"
                         class="missing-episode-resource-results"
                     >
                         <div class="missing-episode-resource-results-head">
