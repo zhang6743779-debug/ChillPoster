@@ -90,10 +90,12 @@ def _read_positive_int_env(name: str, default: int) -> int:
 _MEDIA_METADATA_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_METADATA_WORKERS", 20)
 _MEDIA_ORGANIZE_CONCURRENCY = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_CONCURRENCY", 5)
 _MEDIA_ORGANIZE_SYNC_WORKERS = _read_positive_int_env("CHILLPOSTER_MEDIA_ORGANIZE_SYNC_WORKERS", _MEDIA_ORGANIZE_CONCURRENCY)
+_DUPLICATE_MOVE_BATCH_SIZE = _read_positive_int_env("CHILLPOSTER_DUPLICATE_MOVE_BATCH_SIZE", 5000)
+_WASH_REJECT_FLUSH_BATCH_SIZE = _read_positive_int_env("CHILLPOSTER_WASH_REJECT_FLUSH_BATCH_SIZE", 5000)
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
-_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = 45000
+_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = _read_positive_int_env("CHILLPOSTER_SOURCE_CLEANUP_DELETE_BATCH_LIMIT", 1000)
 _SOURCE_CLEANUP_DELETE_TIMEOUT_SECONDS = 300
 _ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
     max_workers=_MEDIA_ORGANIZE_SYNC_WORKERS,
@@ -1723,7 +1725,6 @@ async def _run_organize_async(run_id: str, req):
     pending_duplicate_moves: list[dict] = []
     pending_wash_reject_moves: list[dict] = []
     pending_failed_moves: list[dict] = []
-    duplicate_batch_size = 50000
     organize_cancel_event = threading.Event()
     organize_chain_id = str(getattr(req, "_organize_chain_id", "") or f"organize_chain_{uuid.uuid4().hex[:12]}")
     _raise_cancel_if_requested = globals()["_raise_if_organize_cancelled"]
@@ -1755,15 +1756,24 @@ async def _run_organize_async(run_id: str, req):
         pending_duplicate_moves = []
         logger.info(f"[MediaOrganize] 开始批量移动重复文件: {len(batch)} 条")
         loop = asyncio.get_event_loop()
-        batch_results = await loop.run_in_executor(
-            None,
-            lambda _c=client, _items=batch, _sp=subtitles_by_parent: _execute_duplicate_batch_plan(
-                _c,
-                _items,
-                subtitles_by_parent=_sp,
-                main_loop=_state._main_event_loop,
-            ),
-        )
+        batch_results = []
+        for start in range(0, len(batch), _DUPLICATE_MOVE_BATCH_SIZE):
+            chunk = batch[start:start + _DUPLICATE_MOVE_BATCH_SIZE]
+            if len(batch) > _DUPLICATE_MOVE_BATCH_SIZE:
+                logger.info(
+                    f"[MediaOrganize] 分片批量移动重复文件: "
+                    f"{start + 1}-{start + len(chunk)}/{len(batch)}"
+                )
+            chunk_results = await loop.run_in_executor(
+                None,
+                lambda _c=client, _items=chunk, _sp=subtitles_by_parent: _execute_duplicate_batch_plan(
+                    _c,
+                    _items,
+                    subtitles_by_parent=_sp,
+                    main_loop=_state._main_event_loop,
+                ),
+            )
+            batch_results.extend(chunk_results)
         success_count_local = sum(1 for item in batch_results if item.get("status") == "success")
         failed_items = [item for item in batch_results if item.get("status") != "success"]
         for item in batch_results:
@@ -1775,7 +1785,7 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[MediaOrganize] 重复文件批量移动完成: 成功 {success_count_local}/{len(batch)}")
         return len(failed_items)
 
-    async def _flush_pending_wash_reject_moves():
+    async def _flush_pending_wash_reject_moves(progress_callback: Callable[[int, int], None] | None = None):
         nonlocal pending_wash_reject_moves
         if not pending_wash_reject_moves:
             return 0
@@ -1791,12 +1801,14 @@ async def _run_organize_async(run_id: str, req):
             subtitles_by_parent=subtitles_by_parent,
             target_label=wash_target_label,
             move_top_dir=False,
+            progress_callback=progress_callback,
         )
         moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
-    async def _flush_pending_failed_moves(*, move_top_dir: bool = True, target_label: str = "整理失败目录"):
+    async def _flush_pending_failed_moves(*, move_top_dir: bool = True, target_label: str = "整理失败目录",
+                                          progress_callback: Callable[[int, int], None] | None = None):
         nonlocal pending_failed_moves
         if not pending_failed_moves:
             return 0
@@ -1815,6 +1827,7 @@ async def _run_organize_async(run_id: str, req):
             subtitles_by_parent=subtitles_by_parent,
             target_label=target_label,
             move_top_dir=move_top_dir,
+            progress_callback=progress_callback,
         )
         moved_count = sum(1 for item in batch if str(item.get("id") or item.get("fid", "")) in moved_dirs)
         logger.info(f"[MediaOrganize] 失败{move_mode}统一移动完成: {moved_count}/{len(batch)}")
@@ -2268,6 +2281,13 @@ async def _run_organize_async(run_id: str, req):
                             scan_complete=scan_complete,
                         )
                         _raise_if_organize_cancelled(run_id)
+                        if len(pending_wash_reject_moves) >= _WASH_REJECT_FLUSH_BATCH_SIZE:
+                            logger.info(
+                                f"[Wash] 洗版未通过暂存达到阈值，提前批量移走: "
+                                f"{len(pending_wash_reject_moves)} 条"
+                            )
+                            await _flush_pending_wash_reject_moves()
+                            _raise_if_organize_cancelled(run_id)
                         continue
                     if media_type == 'tv' and season_num is None:
                         season_num = 1
@@ -3216,7 +3236,7 @@ async def _run_organize_async(run_id: str, req):
                             "pickcode": vf.get("pickcode", ""),
                         },
                     })
-                    if len(pending_duplicate_moves) >= duplicate_batch_size:
+                    if len(pending_duplicate_moves) >= _DUPLICATE_MOVE_BATCH_SIZE:
                         await _flush_pending_duplicate_moves()
                 _update_streaming_progress(
                     run_id,
@@ -3343,7 +3363,7 @@ async def _run_organize_async(run_id: str, req):
                                 "pickcode": vf.get("pickcode", ""),
                             },
                         })
-                        if len(pending_duplicate_moves) >= duplicate_batch_size:
+                        if len(pending_duplicate_moves) >= _DUPLICATE_MOVE_BATCH_SIZE:
                             await _flush_pending_duplicate_moves()
                     _update_streaming_progress(
                         run_id,
@@ -3571,27 +3591,99 @@ async def _run_organize_async(run_id: str, req):
                 logger.info(f"[MediaOrganize] 取消前已写入待处理媒体库缓存: {flushed_count} 条")
         except Exception as flush_err:
             logger.error(f"[MediaOrganize] 取消前批量写缓存失败: {flush_err}")
+        cleanup_state = {
+            "stage": "准备移动待处理文件",
+            "wash_done": 0,
+            "wash_total": 0,
+            "failed_done": 0,
+            "failed_total": 0,
+        }
+
+        def _update_cancel_cleanup_progress(force: bool = False):
+            cleanup_total = int(cleanup_state["wash_total"] or 0) + int(cleanup_state["failed_total"] or 0)
+            cleanup_done = int(cleanup_state["wash_done"] or 0) + int(cleanup_state["failed_done"] or 0)
+            percent_base = int((len(results) / max(scanned_video_count or 1, 1)) * 100)
+            detail = {
+                "total": scanned_video_count,
+                "processed": len(results),
+                "success": success_count,
+                "failed": _count_error_results(results),
+                "strm": strm_generated_count,
+                "phase": "cancel_cleanup",
+                "cleanup_stage": cleanup_state["stage"],
+                "cleanup_total": cleanup_total,
+                "cleanup_done": cleanup_done,
+                "cleanup_wash_total": cleanup_state["wash_total"],
+                "cleanup_wash_done": cleanup_state["wash_done"],
+                "cleanup_failed_total": cleanup_state["failed_total"],
+                "cleanup_failed_done": cleanup_state["failed_done"],
+            }
+            update_task_progress(
+                run_id,
+                f"整理取消中: 清理待移动文件 {cleanup_done}/{cleanup_total}（{cleanup_state['stage']}）",
+                min(99, max(percent_base, 1)),
+                "running",
+                detail=detail,
+            )
+            if force:
+                set_task_detail(run_id, detail, force=True)
+
+        async def _cancel_cleanup_heartbeat():
+            while True:
+                _update_cancel_cleanup_progress()
+                await asyncio.sleep(30)
+
+        heartbeat_task = None
         try:
             failed_pending_count = len(pending_failed_moves)
             wash_pending_count = len(pending_wash_reject_moves)
+            cleanup_state["failed_total"] = failed_pending_count
+            cleanup_state["wash_total"] = wash_pending_count
             if failed_pending_count or wash_pending_count:
                 logger.info(
                     f"[MediaOrganize] 取消前处理待移动文件: "
                     f"失败 {failed_pending_count} 条，洗版未通过 {wash_pending_count} 条"
                 )
+                _update_cancel_cleanup_progress(force=True)
+                heartbeat_task = asyncio.create_task(_cancel_cleanup_heartbeat())
             if wash_pending_count:
-                wash_left = await _flush_pending_wash_reject_moves()
+                cleanup_state["stage"] = "移动洗版未通过文件"
+
+                def _wash_cleanup_progress(done: int, total: int):
+                    cleanup_state["wash_done"] = done
+                    cleanup_state["wash_total"] = total
+                    _update_cancel_cleanup_progress()
+
+                wash_left = await _flush_pending_wash_reject_moves(progress_callback=_wash_cleanup_progress)
                 moved_wash = max(0, wash_pending_count - int(wash_left or 0))
+                cleanup_state["wash_done"] = moved_wash
+                cleanup_state["wash_total"] = wash_pending_count
+                _update_cancel_cleanup_progress(force=True)
                 logger.info(f"[Wash] 取消前洗版未通过文件移动完成: {moved_wash}/{wash_pending_count}")
             if failed_pending_count:
+                cleanup_state["stage"] = "移动整理失败文件"
+
+                def _failed_cleanup_progress(done: int, total: int):
+                    cleanup_state["failed_done"] = done
+                    cleanup_state["failed_total"] = total
+                    _update_cancel_cleanup_progress()
+
                 failed_left = await _flush_pending_failed_moves(
                     move_top_dir=False,
                     target_label="整理失败目录（取消时仅移动失败文件）",
+                    progress_callback=_failed_cleanup_progress,
                 )
                 moved_failed = max(0, failed_pending_count - int(failed_left or 0))
+                cleanup_state["failed_done"] = moved_failed
+                cleanup_state["failed_total"] = failed_pending_count
+                _update_cancel_cleanup_progress(force=True)
                 logger.info(f"[MediaOrganize] 取消前失败文件移动完成: {moved_failed}/{failed_pending_count}")
         except Exception as move_err:
             logger.warning(f"[MediaOrganize] 取消前移动待处理文件失败: {move_err}")
+        finally:
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
         try:
             if metadata_executor:
                 metadata_executor.shutdown(wait=False, cancel_futures=True)
@@ -4618,17 +4710,28 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
         raise RuntimeError("缺少主事件循环，无法执行异步重命名/移动")
 
     target_cid = str(plan_items[0].get("target_cid", "") or "")
-    batch_result = _await_on_main_loop(
-        _rename_115_files_batch(
-            client,
-            [item.get("file_op", {}) for item in plan_items],
-            target_cid=target_cid,
-            target_path="",
-        ),
-        main_loop,
-    )
+    move_ids = []
+    valid_items = []
+    for item in plan_items:
+        vf = item.get("vf") or {}
+        fid = int(vf.get("id") or (item.get("file_op") or {}).get("fid") or 0)
+        if not fid:
+            valid_items.append({
+                "status": "error",
+                "file": str(vf.get("name", "") or ""),
+                "message": "重复文件移动失败: 缺少文件ID",
+            })
+            continue
+        move_ids.append(fid)
+        valid_items.append(item)
 
-    if batch_result.get("ok"):
+    if not move_ids:
+        return valid_items
+
+    movable_items = [item for item in valid_items if item.get("status") != "error"]
+
+    try:
+        _await_on_main_loop(_move_115_items(client, move_ids, target_cid), main_loop)
         subtitle_result_map = {}
         if subtitles_by_parent:
             subtitle_result_map = _await_on_main_loop(
@@ -4640,7 +4743,7 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
                             "file_item": item.get("vf") or {},
                             "video_new_name": str((item.get("vf") or {}).get("name", "") or ""),
                         }
-                        for item in plan_items
+                        for item in movable_items
                     ],
                     subtitles_by_parent,
                     target_cid=target_cid,
@@ -4651,7 +4754,10 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
             )
 
         executed = []
-        for item in plan_items:
+        for item in valid_items:
+            if item.get("status") == "error":
+                executed.append(item)
+                continue
             vf = item.get("vf") or {}
             file_id = str(vf.get("id", "") or "")
             _record_organized_source_path(file_id, "", source_path=vf.get("path", ""))
@@ -4661,31 +4767,26 @@ def _execute_duplicate_batch_plan(client, plan_items: list[dict], subtitles_by_p
                 "moved_subtitles": subtitle_result_map.get(file_id, []),
             })
         return executed
+    except Exception as e:
+        logger.warning(
+            f"[MediaOrganize] 重复文件批量移动失败，将回退逐条处理: "
+            f"文件数={len(move_ids)}, target={target_cid}, err={type(e).__name__}: {e}"
+        )
 
     executed = []
-    rename_done = bool(batch_result.get("rename_done"))
-    move_done = bool(batch_result.get("move_done"))
-    for item in plan_items:
+    for item in valid_items:
+        if item.get("status") == "error":
+            executed.append(item)
+            continue
         vf = item.get("vf") or {}
         file_name = str(vf.get("name", "") or "")
-        file_for_fallback = dict(vf)
-        target_cid_for_fallback = None if move_done else target_cid
-        fallback_name = "" if rename_done else file_name
-        ok = _await_on_main_loop(
-            _rename_115_file(
-                client,
-                file_for_fallback,
-                fallback_name,
-                target_cid=target_cid_for_fallback,
-                target_path="",
-            ),
-            main_loop,
-        )
-        if not ok:
+        try:
+            _await_on_main_loop(_move_115_items(client, int(vf.get("id") or 0), target_cid), main_loop)
+        except Exception as e:
             executed.append({
                 "status": "error",
                 "file": file_name,
-                "message": f"重复文件移动失败: {file_name}",
+                "message": f"重复文件移动失败: {file_name} ({e})",
             })
             continue
         _record_organized_source_path(str(vf.get("id", "") or ""), "", source_path=vf.get("path", ""))

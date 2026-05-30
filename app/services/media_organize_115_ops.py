@@ -317,6 +317,7 @@ _LAST_TREE_SCAN_FINISHED_AT = 0.0
 _FILE_OP_TIMING_INFO_THRESHOLD_SECONDS = 10.0
 _FILE_OP_WRITE_SUBMIT_INFO_THRESHOLD_SECONDS = 5.0
 _FILE_OP_MOVE_WAIT_INFO_THRESHOLD_SECONDS = 5.0
+_FAILED_MOVE_BATCH_SIZE = 5000
 
 
 def _read_positive_int_env(name: str, default: int) -> int:
@@ -1383,11 +1384,13 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
                                    failed_dir_cid: str, moved_dirs: set,
                                    subtitles_by_parent: dict | None = None,
                                    target_label: str = "整理失败目录",
-                                   move_top_dir: bool = True):
-    """批量将文件或文件所在源目录顶层文件夹移到指定兜底目录，一次 API 请求。"""
+                                   move_top_dir: bool = True,
+                                   progress_callback: Callable[[int, int], None] | None = None):
+    """批量将文件或文件所在源目录顶层文件夹移到指定兜底目录。"""
     ids_to_move = []
     seen_targets = set()
     file_ids_by_target = {}
+    items_by_target = {}
     moving_dir_by_target = {}
     direct_file_ids = set()
     for fi in group_failed:
@@ -1398,6 +1401,8 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
             target_id = file_id
             moving_dir = False
             target_name = str(fi.get("name", "") or "")
+        if target_id:
+            items_by_target.setdefault(target_id, []).append(fi)
         if target_id and file_id:
             file_ids_by_target.setdefault(target_id, []).append(file_id)
         if target_id and file_id and not moving_dir:
@@ -1410,28 +1415,57 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
     if not ids_to_move:
         return
 
-    try:
-        await _move_115_items(client, [int(fid) for fid, _ in ids_to_move], failed_dir_cid)
-        for target_id, name in ids_to_move:
-            moved_dirs.add(target_id)
-            for source_file_id in file_ids_by_target.get(target_id, []):
-                moved_dirs.add(source_file_id)
-            label = "目录" if moving_dir_by_target.get(target_id) else "文件"
-            logger.debug(f"[MediaOrganize] 移动{label}到{target_label}: {name}")
-    except Exception as e:
-        logger.warning(f"[MediaOrganize] 批量移动条目到{target_label}失败: 条目数={len(ids_to_move)}, err={e}")
-        # 降级逐个移动
-        for fi in group_failed:
-            await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,
-                                          subtitles_by_parent=subtitles_by_parent,
-                                          target_label=target_label,
-                                          move_top_dir=move_top_dir)
-        return
+    def _emit_move_progress(done: int, total: int):
+        if not progress_callback:
+            return
+        try:
+            progress_callback(max(0, min(int(done), int(total))), int(total))
+        except Exception as e:
+            logger.debug(f"[MediaOrganize] 移动进度回调失败: {e}")
+
+    fallback_file_ids = set()
+    total_targets = len(ids_to_move)
+    processed_targets = 0
+    _emit_move_progress(0, total_targets)
+    for start in range(0, total_targets, _FAILED_MOVE_BATCH_SIZE):
+        chunk = ids_to_move[start:start + _FAILED_MOVE_BATCH_SIZE]
+        try:
+            if total_targets > _FAILED_MOVE_BATCH_SIZE:
+                logger.info(
+                    f"[MediaOrganize] 分片批量移动条目到{target_label}: "
+                    f"{start + 1}-{start + len(chunk)}/{total_targets}"
+                )
+            await _move_115_items(client, [int(fid) for fid, _ in chunk], failed_dir_cid)
+            for target_id, name in chunk:
+                moved_dirs.add(target_id)
+                for source_file_id in file_ids_by_target.get(target_id, []):
+                    moved_dirs.add(source_file_id)
+                label = "目录" if moving_dir_by_target.get(target_id) else "文件"
+                logger.debug(f"[MediaOrganize] 移动{label}到{target_label}: {name}")
+            processed_targets += len(chunk)
+            _emit_move_progress(processed_targets, total_targets)
+        except Exception as e:
+            logger.warning(
+                f"[MediaOrganize] 批量移动条目到{target_label}失败，回退当前分片逐条移动: "
+                f"条目数={len(chunk)}, 总条目数={total_targets}, err={e}"
+            )
+            for target_id, _ in chunk:
+                for fi in items_by_target.get(target_id, []):
+                    file_id = str(fi.get("id") or fi.get("fid", ""))
+                    if file_id:
+                        fallback_file_ids.add(file_id)
+                    await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,
+                                                  subtitles_by_parent=subtitles_by_parent,
+                                                  target_label=target_label,
+                                                  move_top_dir=move_top_dir)
+                processed_targets += 1
+                if processed_targets % 50 == 0 or processed_targets == total_targets:
+                    _emit_move_progress(processed_targets, total_targets)
 
     if subtitles_by_parent:
         for fi in group_failed:
             file_id = str(fi.get("id") or fi.get("fid", ""))
-            if file_id in direct_file_ids and file_id in moved_dirs:
+            if file_id in direct_file_ids and file_id in moved_dirs and file_id not in fallback_file_ids:
                 await _move_matched_subtitles_to_target(
                     client, fi, subtitles_by_parent,
                     target_cid=str(failed_dir_cid), target_path="",
