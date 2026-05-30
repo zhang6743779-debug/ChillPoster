@@ -124,6 +124,12 @@ class EmbyLibraryLocaleFixPayload(BaseModel):
     once_only: bool = True
 
 
+class EmbyLibraryScraperSyncPayload(BaseModel):
+    server_idx: int = 0
+    enabled: bool = False
+    refresh_cache: bool = True
+
+
 _DEFAULT_SCRAPE_FIELDS = {
     "emby_scrapers_enabled": False,
     "scrape_enabled": True,
@@ -961,6 +967,67 @@ async def fix_emby_library_locale_defaults(payload: Optional[EmbyLibraryLocaleFi
             "cache_count": cache_count,
             **result,
         }
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+@router.post("/emby_libraries/sync_scrapers")
+async def sync_emby_library_scrapers(payload: Optional[EmbyLibraryScraperSyncPayload] = None):
+    """同步已有 Emby 媒体库的联网刮削器开关。"""
+    from app.routers.config_302 import get_emby_config_by_index_sync
+    from core.emby_client import EmbyClient
+
+    req = payload or EmbyLibraryScraperSyncPayload()
+    server = get_emby_config_by_index_sync(req.server_idx)
+    if not isinstance(server, dict) or not server.get("url") or not server.get("key"):
+        return {
+            "status": "skipped",
+            "message": "未配置 Emby 服务器，已跳过刮削器同步",
+            "server_idx": req.server_idx,
+            "enabled": req.enabled,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "items": [],
+        }
+
+    client = EmbyClient(server["url"], server["key"], server.get("public_host") or server.get("url"))
+    try:
+        result = client.sync_library_scraper_settings(enabled=req.enabled)
+        cache_count = None
+        if req.refresh_cache:
+            try:
+                from app.services.emby_library_cache import refresh_cache
+                cache_count = refresh_cache()
+            except Exception as e:
+                logger.warning(f"[MediaOrganize] 同步 Emby 刮削器后刷新快照失败: {e}")
+
+        updated = int(result.get("updated", 0) or 0)
+        skipped = int(result.get("skipped", 0) or 0)
+        failed = int(result.get("failed", 0) or 0)
+        action = "开启" if req.enabled else "关闭"
+        status = "success" if failed == 0 else "partial_success"
+        message = f"已{action}已有 Emby 媒体库刮削器：更新 {updated} 个，跳过 {skipped} 个"
+        if failed:
+            message += f"，失败 {failed} 个"
+
+        return {
+            "status": status,
+            "message": message,
+            "server_idx": req.server_idx,
+            "enabled": req.enabled,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "items": result.get("items", []),
+            "cache_count": cache_count,
+        }
+    except Exception as e:
+        logger.error(f"[MediaOrganize] 同步 Emby 刮削器失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         try:
             client.close()

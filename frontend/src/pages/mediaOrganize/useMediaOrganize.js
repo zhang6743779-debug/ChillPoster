@@ -345,6 +345,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             return opts;
         };
         const embyCacheRefreshing = ref(false);
+        const embyScraperSyncing = ref(false);
         async function refreshEmbyCache() {
             embyCacheRefreshing.value = true;
             try {
@@ -919,6 +920,30 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
             applyDefaultScrapeSettings();
         };
 
+        const syncEmbyScraperSettings = async ({ showResult = true } = {}) => {
+            embyScraperSyncing.value = true;
+            try {
+                const resp = await axios.post('/api/media_organize/emby_libraries/sync_scrapers', {
+                    enabled: !!mediaOrganizeConfig.emby_scrapers_enabled,
+                    refresh_cache: true,
+                });
+                const data = resp.data || {};
+                if (showResult) {
+                    const type = data.status === 'partial_success' ? 'warning' : (data.status === 'skipped' ? 'info' : 'success');
+                    showToast(data.message || 'Emby 刮削器设置已同步', type);
+                }
+                return data;
+            } catch (e) {
+                const message = e.response?.data?.detail || e.message;
+                if (showResult) {
+                    showToast('同步 Emby 刮削器失败: ' + message, 'error');
+                }
+                throw e;
+            } finally {
+                embyScraperSyncing.value = false;
+            }
+        };
+
         const saveMediaOrganizeConfig = async () => {
             if (needs115Setup.value) {
                 notify115SetupRequired();
@@ -928,7 +953,15 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
                 normalizeOrganizeParseMode();
                 applyDefaultScrapeSettings();
                 await axios.post('/api/media_organize/save', { ...mediaOrganizeConfig, drive_index: 0 });
-                showToast('媒体整理配置已保存', 'success');
+                try {
+                    const syncData = await syncEmbyScraperSettings({ showResult: false });
+                    const syncType = syncData?.status === 'partial_success' ? 'warning' : (syncData?.status === 'skipped' ? 'info' : 'success');
+                    const syncMessage = syncData?.message ? `；${syncData.message}` : '';
+                    showToast(`媒体整理配置已保存${syncMessage}`, syncType);
+                } catch (syncError) {
+                    const message = syncError.response?.data?.detail || syncError.message;
+                    showToast('媒体整理配置已保存；同步 Emby 刮削器失败: ' + message, 'warning');
+                }
                 return true;
             } catch (e) {
                 showToast('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
@@ -959,27 +992,18 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         };
 
         const toggleEmbyScrapers = async (event) => {
+            if (embyScraperSyncing.value) return;
+            const previousChecked = !!mediaOrganizeConfig.emby_scrapers_enabled;
             const nextChecked = !!event?.target?.checked;
             mediaOrganizeConfig.emby_scrapers_enabled = nextChecked;
             if (nextChecked) {
                 showToast('建议关闭，你会更快乐~', 'warning');
-                if (!mediaOrganizeConfig.emby_locale_defaults_fixed) {
-                    try {
-                        const resp = await axios.post('/api/media_organize/emby_libraries/fix_locale_defaults', {
-                            overwrite: false,
-                            once_only: true,
-                        });
-                        const data = resp.data || {};
-                        if (data.status === 'success' || data.status === 'partial_success') {
-                            mediaOrganizeConfig.emby_locale_defaults_fixed = true;
-                            showToast(data.message || '已修复已有 Emby 媒体库语言设置', data.failed ? 'warning' : 'success');
-                        } else if (data.status === 'skipped') {
-                            mediaOrganizeConfig.emby_locale_defaults_fixed = true;
-                        }
-                    } catch (e) {
-                        showToast('修复已有 Emby 媒体库语言设置失败: ' + (e.response?.data?.detail || e.message), 'error');
-                    }
-                }
+            }
+            try {
+                await syncEmbyScraperSettings();
+            } catch (e) {
+                mediaOrganizeConfig.emby_scrapers_enabled = previousChecked;
+                if (event?.target) event.target.checked = previousChecked;
             }
         };
 
@@ -1515,6 +1539,7 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         embyLibCount,
         embyLibLevelOptions,
         embyCacheRefreshing,
+        embyScraperSyncing,
         refreshEmbyCache,
         onLevelDragStart,
         onLevelDragOver,

@@ -30,7 +30,6 @@ _level = "level1"
 
 # Emby 可用性索引：整部媒体、标题映射、剧集季/集状态
 DISCOVER_INDEX_VERSION = 3
-DISCOVER_INDEX_TTL_SECONDS = 24 * 60 * 60
 DISCOVER_INDEX_MIN_REFRESH_INTERVAL = 5 * 60
 
 
@@ -471,11 +470,8 @@ def init_cache():
     except Exception as e:
         logger.warning(f"[EmbyLibCache] 初始化失败: {e}")
 
-    if load_discover_index_cache(_server_idx):
-        if _discover_index_cache_stale():
-            schedule_discover_index_refresh(server_idx=_server_idx, reason="startup_stale_cache", delay_sec=60)
-    else:
-        schedule_discover_index_refresh(server_idx=_server_idx, reason="startup_cache_miss", delay_sec=5, force=True)
+    if not load_discover_index_cache(_server_idx):
+        logger.info("[EmbyLibCache] 未找到 Emby 可用性索引缓存，启动时不自动全量扫描")
 
 
 def apply_settings(sc: dict):
@@ -1197,12 +1193,6 @@ def load_discover_index_cache(server_idx: int = 0) -> bool:
             f"series={meta.get('series_count', 0)} updated_at={meta.get('updated_at', 0)}"
         )
     return loaded
-
-
-def _discover_index_cache_stale() -> bool:
-    with _discover_index_lock:
-        updated_at = float(_discover_index_meta.get("updated_at", 0) or 0)
-    return not updated_at or time.time() - updated_at > DISCOVER_INDEX_TTL_SECONDS
 
 
 def get_discover_index_meta() -> dict:

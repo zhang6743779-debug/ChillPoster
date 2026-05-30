@@ -2158,6 +2158,14 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             return imdbId ? `https://www.imdb.com/title/${imdbId}` : '';
         };
 
+        const getTmdbLink = (detail = detailModal.detail) => {
+            const tmdbId = detail?.tmdb_id || detail?.id;
+            if (!tmdbId) return '';
+            const mediaType = String(detail?.media_type || '').toLowerCase();
+            const tmdbType = mediaType === 'tv' || mediaType === 'series' ? 'tv' : 'movie';
+            return `https://www.themoviedb.org/${tmdbType}/${tmdbId}`;
+        };
+
         const getTvdbLink = (detail = detailModal.detail) => {
             const tvdbId = detail?.tvdb_id || detail?.external_ids?.tvdb_id;
             return tvdbId ? `https://www.thetvdb.com/series/${tvdbId}` : '';
@@ -3160,6 +3168,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         subscribeMedia,
         unsubscribeMedia,
         getImdbLink,
+        getTmdbLink,
         getTvdbLink,
         gridModal,
         gridModalEl,

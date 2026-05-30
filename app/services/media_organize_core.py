@@ -1903,12 +1903,6 @@ async def _run_organize_async(run_id: str, req):
                 str(config_data.get("source_name", "") or ""),
                 organize_chain_id,
             )
-
-            try:
-                from app.services.emby_library_cache import schedule_discover_index_refresh
-                schedule_discover_index_refresh(reason="media_organize:finished", delay_sec=90)
-            except Exception:
-                pass
         except Exception as e:
             logger.warning(f"[MediaOrganize] 整理结束后台维护失败: {e}")
 

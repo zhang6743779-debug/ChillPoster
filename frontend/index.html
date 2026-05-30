@@ -2789,7 +2789,7 @@
                                         </button>
                                         <div class="organize-toggle-item organize-scraper-toggle">
                                             <label class="ios-switch">
-                                                <input type="checkbox" :checked="mediaOrganizeConfig.emby_scrapers_enabled" @change="toggleEmbyScrapers($event)">
+                                                <input type="checkbox" :checked="mediaOrganizeConfig.emby_scrapers_enabled" :disabled="embyScraperSyncing" @change="toggleEmbyScrapers($event)">
                                                 <span class="ios-slider"></span>
                                             </label>
                                             <span class="organize-toggle-label">emby刮削器</span>
@@ -6430,6 +6430,9 @@
                                             <button v-if="detailModal.detail.media_type === 'tv' && !(detailModal.selectedSeason != null && detailModal.seasonSubscribed)" @click="openDetailMpSubscribe" class="btn-subscribe">
                                                 <i class="fa-solid fa-bell"></i> {{ detailModal.selectedSeason != null ? `MP订阅第 ${detailModal.selectedSeason} 季` : 'MP订阅' }}
                                             </button>
+                                            <a v-if="getTmdbLink()" :href="getTmdbLink()" target="_blank" rel="noopener noreferrer" class="detail-external-link">
+                                                <i class="fa-solid fa-database"></i> TMDB
+                                            </a>
                                             <a v-if="getImdbLink()" :href="getImdbLink()" target="_blank" rel="noopener noreferrer" class="detail-external-link">
                                                 <i class="fa-brands fa-imdb"></i> IMDb
                                             </a>

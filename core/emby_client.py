@@ -39,6 +39,100 @@ DEFAULT_LIBRARY_LOCALE_OPTIONS = {
     "PreferredImageLanguage": "zh",
 }
 
+
+def _build_library_type_options(enable_scrapers=False):
+    if enable_scrapers:
+        return [
+            {"Type": "Movie", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"], "ImageOptions": []},
+            {"Type": "Series", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"], "ImageOptions": []},
+            {"Type": "Season", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"]},
+            {"Type": "Episode", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb", "Image Capture"], "ImageOptions": []},
+        ]
+    return [
+        {"Type": "Movie", "MetadataFetchers": [], "ImageFetchers": [], "ImageOptions": []},
+        {"Type": "Series", "MetadataFetchers": [], "ImageFetchers": [], "ImageOptions": []},
+        {"Type": "Season", "MetadataFetchers": [], "ImageFetchers": []},
+        {"Type": "Episode", "MetadataFetchers": [], "ImageFetchers": []},
+    ]
+
+
+def _build_library_options(enable_scrapers=False):
+    options = {
+        **DEFAULT_LIBRARY_LOCALE_OPTIONS,
+        "EnableArchiveMediaFiles": False,
+        "EnablePhotos": False,
+        "EnableRealtimeMonitor": True,
+        "ExtractChapterImagesDuringLibraryScan": False,
+        "DownloadImagesInAdvance": False,
+        "SaveLocalMetadata": bool(enable_scrapers),
+        "EnableInternetProviders": bool(enable_scrapers),
+        "DisabledSubtitleFetchers": ["Open Subtitles"],
+        "TypeOptions": _build_library_type_options(enable_scrapers),
+    }
+    if enable_scrapers:
+        options.update({
+            "EnableMarkerDetection": True,
+            "MetadataSavers": ["Nfo"],
+            "LocalMetadataReaderOrder": ["Nfo"],
+        })
+    return options
+
+
+def _patch_library_scraper_options(options: dict, enable_scrapers=False):
+    next_options = deepcopy(options)
+    changed_fields = []
+
+    target_options = _build_library_options(enable_scrapers)
+    for key, value in target_options.items():
+        if key in DEFAULT_LIBRARY_LOCALE_OPTIONS:
+            current = next_options.get(key)
+            if current is not None and str(current).strip() != "":
+                continue
+        if key == "TypeOptions":
+            continue
+        if next_options.get(key) != value:
+            next_options[key] = deepcopy(value)
+            changed_fields.append(key)
+
+    target_type_options = _build_library_type_options(enable_scrapers)
+    existing_type_options = next_options.get("TypeOptions")
+    if not isinstance(existing_type_options, list):
+        existing_type_options = []
+
+    patched_type_options = []
+    by_type = {}
+    for item in existing_type_options:
+        if not isinstance(item, dict):
+            patched_type_options.append(item)
+            continue
+        item_type = str(item.get("Type") or "").strip().lower()
+        if item_type:
+            by_type[item_type] = item
+        patched_type_options.append(item)
+
+    for target in target_type_options:
+        item_type = str(target.get("Type") or "").strip()
+        item_key = item_type.lower()
+        existing = by_type.get(item_key)
+        if existing is None:
+            patched_type_options.append(deepcopy(target))
+            changed_fields.append(f"TypeOptions.{item_type}")
+            continue
+
+        for key in ("MetadataFetchers", "ImageFetchers", "ImageOptions"):
+            if key not in target:
+                continue
+            value = target[key]
+            if existing.get(key) != value:
+                existing[key] = deepcopy(value)
+                changed_fields.append(f"TypeOptions.{item_type}.{key}")
+
+    if next_options.get("TypeOptions") != patched_type_options:
+        next_options["TypeOptions"] = patched_type_options
+
+    return next_options, changed_fields
+
+
 class EmbyClient:
     """
     Emby API 客户端 (V6.3 - 优化版)
@@ -996,45 +1090,7 @@ class EmbyClient:
 
         logger.info(f"正在创建新媒体库: {name} -> {path}")
         
-        if enable_scrapers:
-            lib_options = {
-                **DEFAULT_LIBRARY_LOCALE_OPTIONS,
-                "EnableArchiveMediaFiles": False,
-                "EnablePhotos": False,
-                "EnableRealtimeMonitor": True,
-                "EnableMarkerDetection": True,
-                "ExtractChapterImagesDuringLibraryScan": False,
-                "DownloadImagesInAdvance": False,
-                "SaveLocalMetadata": True,
-                "MetadataSavers": ["Nfo"],
-                "LocalMetadataReaderOrder": ["Nfo"],
-                "EnableInternetProviders": True,
-                "DisabledSubtitleFetchers": ["Open Subtitles"],
-                "TypeOptions": [
-                    {"Type": "Movie", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"], "ImageOptions": []},
-                    {"Type": "Series", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"], "ImageOptions": []},
-                    {"Type": "Season", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb"]},
-                    {"Type": "Episode", "MetadataFetchers": ["TheMovieDb"], "ImageFetchers": ["TheMovieDb", "Image Capture"], "ImageOptions": []},
-                ]
-            }
-        else:
-            lib_options = {
-                **DEFAULT_LIBRARY_LOCALE_OPTIONS,
-                "EnableArchiveMediaFiles": False,
-                "EnablePhotos": False,
-                "EnableRealtimeMonitor": True,
-                "ExtractChapterImagesDuringLibraryScan": False,
-                "DownloadImagesInAdvance": False,
-                "SaveLocalMetadata": False,
-                "EnableInternetProviders": False,
-                "DisabledSubtitleFetchers": ["Open Subtitles"],
-                "TypeOptions": [
-                    {"Type": "Movie", "MetadataFetchers": [], "ImageFetchers": [], "ImageOptions": []},
-                    {"Type": "Series", "MetadataFetchers": [], "ImageFetchers": [], "ImageOptions": []},
-                    {"Type": "Season", "MetadataFetchers": [], "ImageFetchers": []},
-                    {"Type": "Episode", "MetadataFetchers": [], "ImageFetchers": []}
-                ]
-            }
+        lib_options = _build_library_options(enable_scrapers)
 
         try:
             params = {
@@ -1150,6 +1206,114 @@ class EmbyClient:
                     "changed_fields": changed_fields,
                 })
                 logger.warning(f"修复媒体库语言/地区设置失败: {lib_name} ({lib_id}) -> {e}")
+
+        return {
+            "updated": updated_count,
+            "skipped": skipped_count,
+            "failed": failed_count,
+            "items": results,
+        }
+
+    def sync_library_scraper_settings(self, enabled=False):
+        """同步已有媒体库的 Emby 联网刮削器设置。"""
+        results = []
+        updated_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        try:
+            data = self._request("GET", "emby/Library/VirtualFolders/Query")
+        except Exception:
+            data = self._request("GET", "emby/Library/VirtualFolders")
+
+        folders = data.get("Items") if isinstance(data, dict) else data
+        if not isinstance(folders, list):
+            return {
+                "updated": 0,
+                "skipped": 0,
+                "failed": 0,
+                "items": results,
+            }
+
+        for folder in folders:
+            if not isinstance(folder, dict):
+                continue
+
+            lib_id = str(folder.get("ItemId") or folder.get("Id") or "").strip()
+            lib_name = str(folder.get("Name") or "").strip() or lib_id
+            options = folder.get("LibraryOptions")
+            collection_type = str(folder.get("CollectionType") or "").strip().lower()
+
+            if not lib_id or not isinstance(options, dict):
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "missing_library_options",
+                })
+                continue
+
+            type_options = options.get("TypeOptions")
+            has_video_type = any(
+                str(item.get("Type") or "").strip().lower() in {"movie", "series", "season", "episode"}
+                for item in (type_options if isinstance(type_options, list) else [])
+                if isinstance(item, dict)
+            )
+            if collection_type and collection_type not in {"movies", "tvshows", "mixed"} and not has_video_type:
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "not_video_library",
+                })
+                continue
+
+            next_options, changed_fields = _patch_library_scraper_options(options, enabled)
+            if not changed_fields:
+                skipped_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "skipped",
+                    "reason": "already_set",
+                })
+                continue
+
+            try:
+                self._request(
+                    "POST",
+                    "emby/Library/VirtualFolders/LibraryOptions",
+                    json={
+                        "Id": lib_id,
+                        "LibraryOptions": next_options,
+                    },
+                )
+                updated_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "updated",
+                    "enabled": bool(enabled),
+                    "changed_fields": changed_fields,
+                })
+                logger.info(
+                    f"已{'开启' if enabled else '关闭'}媒体库 Emby 刮削器: {lib_name} ({lib_id})"
+                )
+            except Exception as e:
+                failed_count += 1
+                results.append({
+                    "name": lib_name,
+                    "id": lib_id,
+                    "status": "failed",
+                    "enabled": bool(enabled),
+                    "message": str(e),
+                    "changed_fields": changed_fields,
+                })
+                logger.warning(
+                    f"{'开启' if enabled else '关闭'}媒体库 Emby 刮削器失败: {lib_name} ({lib_id}) -> {e}"
+                )
 
         return {
             "updated": updated_count,
