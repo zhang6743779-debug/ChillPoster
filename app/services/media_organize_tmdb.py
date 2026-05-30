@@ -1111,6 +1111,38 @@ def _build_movie_weak_title_variants(title: str) -> list[str]:
     return [v for v in variants if v]
 
 
+def _movie_weak_result_is_plausible(weak_title: str, result: dict, year: Optional[int]) -> bool:
+    norm_weak = _normalize_title_for_match(weak_title)
+    if not norm_weak or not isinstance(result, dict):
+        return False
+
+    result_titles = [
+        result.get('title') or '',
+        result.get('original_title') or '',
+    ]
+    normalized_titles = [
+        _normalize_title_for_match(title)
+        for title in result_titles
+        if title
+    ]
+    normalized_titles = [title for title in normalized_titles if title]
+    if not normalized_titles:
+        return False
+
+    for norm_title in normalized_titles:
+        if norm_title == norm_weak or norm_weak in norm_title:
+            return True
+
+    if year:
+        result_year = str(result.get('release_date') or '')[:4]
+        if result_year == str(year):
+            for norm_title in normalized_titles:
+                if len(norm_title) >= 4 and norm_title in norm_weak:
+                    return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # TMDb season verification
 # ---------------------------------------------------------------------------
@@ -1162,6 +1194,9 @@ AUXILIARY_CN_STEM_FULLMATCH_RE = re.compile(
 
 NOISY_SHORT_WORDS = {'disc', 'cd', 'dvd', 'part', 'episode', 'ep', 'vol'}
 SEASON_DIR_PATTERN = re.compile(r'^(season\s*\d+|s\d+|第.{0,3}季|\d{1,2})$', re.IGNORECASE)
+CN_TRAILING_EPISODE_STEM_RE = re.compile(r'^(.{2,80}?)(\d{1,4})$')
+EPISODE_RANGE_DIR_RE = re.compile(r'^\s*(\d{1,4})\s*[-_~～—–至到]\s*(\d{1,4})\s*$')
+TV_CONTEXT_TEXT_RE = re.compile(r'(连续剧|連續劇|电视剧|電視劇|剧集|劇集|短剧|短劇|剧版|劇版|迷你剧|迷你劇)')
 
 
 def _should_use_parent_title_for_file_stem(stem: str, parent_dir_name: str, file_tmdbid: Optional[int], file_doubanid: Optional[str]) -> bool:
@@ -1188,6 +1223,81 @@ def _build_meta_from_path(filename: str, file_path: str):
     if file_path:
         return MetaInfoPath(Path(file_path))
     return MetaInfo(filename)
+
+
+def _parse_cn_trailing_episode_stem(stem: str) -> tuple[str, Optional[int]]:
+    text = re.sub(r'\s+', ' ', str(stem or '')).strip()
+    if not text:
+        return "", None
+    match = CN_TRAILING_EPISODE_STEM_RE.match(text)
+    if not match:
+        return "", None
+    title = str(match.group(1) or "").strip().rstrip('.-_ ')
+    if not title or not re.search(r'[一-鿿]', title):
+        return "", None
+    if re.search(r'[集话話期幕季]\s*$', title):
+        return "", None
+    try:
+        episode = int(match.group(2))
+    except (TypeError, ValueError):
+        return "", None
+    if not 0 < episode < 10000:
+        return "", None
+    if len(_normalize_title_for_match(title)) < 2:
+        return "", None
+    return title, episode
+
+
+def _is_episode_range_dir(dir_name: str, episode: Optional[int] = None) -> bool:
+    match = EPISODE_RANGE_DIR_RE.match(str(dir_name or ""))
+    if not match:
+        return False
+    try:
+        start = int(match.group(1))
+        end = int(match.group(2))
+    except (TypeError, ValueError):
+        return False
+    if start <= 0 or end <= 0 or start > end:
+        return False
+    if episode is not None and not (start <= int(episode) <= end):
+        return False
+    return True
+
+
+def _has_tv_context_text(text: str) -> bool:
+    value = str(text or "")
+    if not value:
+        return False
+    return bool(TV_CONTEXT_TEXT_RE.search(value) or _has_total_episode_count_marker(value))
+
+
+def _path_has_tv_context_for_trailing_episode(file_path: str, title: str, episode: int) -> bool:
+    if not file_path or not title:
+        return False
+    try:
+        dir_names = [
+            parent.name
+            for parent in list(Path(file_path).parents)[:4]
+            if parent.name and parent.name not in {"/", "."}
+        ]
+    except Exception:
+        return False
+    if not dir_names:
+        return False
+
+    title_norm = _normalize_title_for_match(title)
+    context_dirs = [name for name in dir_names if _has_tv_context_text(name)]
+    has_episode_range = any(_is_episode_range_dir(name, episode) for name in dir_names[:2])
+
+    if not context_dirs:
+        return False
+    if has_episode_range:
+        return True
+
+    for dir_name in context_dirs:
+        if title_norm and title_norm in _normalize_title_for_match(dir_name):
+            return True
+    return False
 
 
 def _normalize_display_meta_info(meta_info: dict) -> dict:
@@ -1643,6 +1753,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     has_explicit_episode_marker = _has_explicit_season_or_episode_marker(filename, file_path)
     has_total_episode_count_marker = _has_total_episode_count_marker(filename, file_path)
     explicit_season, explicit_episode = _parse_explicit_season_episode_marker(filename, file_path)
+    trailing_episode_context_match = False
 
     if has_explicit_episode_marker:
         if explicit_season is not None:
@@ -1656,7 +1767,27 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         season = 0
         episode = None
 
-    if not has_explicit_episode_marker and (season is not None or episode is not None) and not force_movie:
+    if not has_explicit_episode_marker and season is None and episode is None:
+        trailing_title, trailing_episode = _parse_cn_trailing_episode_stem(stem)
+        if (
+            trailing_title
+            and trailing_episode is not None
+            and _path_has_tv_context_for_trailing_episode(file_path, trailing_title, trailing_episode)
+        ):
+            cn_name = trailing_title
+            en_name = ""
+            season = 1
+            episode = trailing_episode
+            force_movie = False
+            trailing_episode_context_match = True
+            title_source = "trailing_episode_context"
+            if not quiet:
+                logger.debug(
+                    f"[MediaIdentify] 中文尾号按剧集识别: {filename} -> "
+                    f"{trailing_title} S01E{trailing_episode:02d}"
+                )
+
+    if not has_explicit_episode_marker and not trailing_episode_context_match and (season is not None or episode is not None) and not force_movie:
         season = None
         episode = None
         if has_total_episode_count_marker:
@@ -2026,7 +2157,14 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
                 return (year_penalty, -float(r.get('popularity') or 0))
 
             weak_results = sorted(weak_results, key=_sort_key)
-            picked = weak_results[0]
+            picked = None
+            for weak_result in weak_results:
+                if _movie_weak_result_is_plausible(weak_title, weak_result, year):
+                    picked = weak_result
+                    break
+            if not picked:
+                logger.debug(f"{log_prefix} 弱匹配候选相似度不足，跳过: '{filename}' -> '{weak_title}'")
+                continue
             tmdb_id = picked.get('id')
             res_title = picked.get('title') or picked.get('original_title') or ''
             logger.debug(f"{log_prefix} 弱匹配命中: '{filename}' -> '{weak_title}' -> {res_title} (ID: {tmdb_id})")
