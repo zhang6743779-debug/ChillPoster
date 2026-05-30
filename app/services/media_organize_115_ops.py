@@ -432,6 +432,19 @@ def _is_115_rate_limited_response(response: Any) -> bool:
     )
 
 
+def _is_115_backend_busy_response(response: Any) -> bool:
+    if not isinstance(response, dict):
+        return False
+    text = str(response)
+    return (
+        str(response.get("code", "")) == "990019"
+        or str(response.get("errno", "")) == "990019"
+        or str(response.get("errNo", "")) == "990019"
+        or "990019" in text
+        or "操作尚未执行完成" in text
+    )
+
+
 def _get_115_rate_limit_backoff_seconds(attempt: int) -> float:
     if 0 <= attempt < len(_WRITE_API_RATE_LIMIT_BACKOFF_SECONDS):
         return _WRITE_API_RATE_LIMIT_BACKOFF_SECONDS[attempt]
@@ -517,6 +530,7 @@ def run_115_write_request_sync(
     request_factory: Callable[[Any], Any],
     *,
     raise_on_state_false: bool = True,
+    retry_backend_busy: bool = True,
 ):
     global _LAST_WRITE_API_AT
 
@@ -532,7 +546,11 @@ def run_115_write_request_sync(
         response = request_factory(write_client)
 
         if isinstance(response, dict) and not response.get("state", True):
-            if _is_115_rate_limited_response(response) and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
+            should_retry_rate_limit = (
+                _is_115_rate_limited_response(response)
+                and (retry_backend_busy or not _is_115_backend_busy_response(response))
+            )
+            if should_retry_rate_limit and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
                 backoff = _get_115_rate_limit_backoff_seconds(attempt)
                 logger.warning(
                     f"[115风控(Sync)] {request_name} 触发 990009，退避 {backoff:.1f}s 后重试 "
@@ -555,6 +573,7 @@ async def run_115_write_request(
     *,
     raise_on_state_false: bool = True,
     timeout: float = _WRITE_REQUEST_TIMEOUT_SECONDS,
+    retry_backend_busy: bool = True,
 ):
     global _LAST_WRITE_API_AT
 
@@ -583,7 +602,11 @@ async def run_115_write_request(
             raise TimeoutError(f"{request_name}超时: {elapsed:.2f}s") from e
 
         if isinstance(result, dict) and not result.get("state", True):
-            if _is_115_rate_limited_response(result) and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
+            should_retry_rate_limit = (
+                _is_115_rate_limited_response(result)
+                and (retry_backend_busy or not _is_115_backend_busy_response(result))
+            )
+            if should_retry_rate_limit and attempt < _WRITE_API_RATE_LIMIT_MAX_RETRIES:
                 backoff = _get_115_rate_limit_backoff_seconds(attempt)
                 logger.warning(
                     f"[115风控] {request_name} 触发 990009，退避 {backoff:.1f}s 后重试 "

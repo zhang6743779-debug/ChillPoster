@@ -36,11 +36,12 @@ _GATEWAY_DIRECT_LOW_PRIORITY_GRACE_SECONDS = 0.15
 _GATEWAY_DIRECT_PRIORITY_PLAYBACK = 0
 _GATEWAY_DIRECT_PRIORITY_DIRECT = 10
 _115_APP_LIST_SAFE_PAGE_SIZE = 7000
-_115_CLEANUP_DELETE_BATCH_SIZE = 1150
-_115_CLEANUP_DELETE_BATCH_PAUSE_SECONDS = 3.0
+_115_CLEANUP_FILE_DELETE_BATCH_SIZE = 4000
+_115_CLEANUP_DIR_DELETE_BATCH_SIZE = 4000
+_115_CLEANUP_DELETE_BATCH_PAUSE_SECONDS = 1.0
 _115_CLEANUP_DELETE_TIMEOUT_SECONDS = 300
-_115_CLEANUP_DELETE_RETRY_DELAYS_SECONDS = (0.0, 3.0, 10.0)
-_115_CLEANUP_PRE_DELETE_DELAY_SECONDS = 5.0
+_115_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS = (5.0, 10.0, 20.0, 40.0, 80.0)
+_115_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS = 1.0
 _115_CLEANUP_VERIFY_DELAYS_SECONDS = (3.0, 15.0, 30.0, 60.0)
 
 class Drive115Service:
@@ -2340,23 +2341,33 @@ class Drive115Service:
             "message": "",
         }
 
-    async def _delete_115_ids_batched_with_retry(self, client, ids: list[int], log_label: str):
+    def _is_115_cleanup_backend_busy_error(self, error) -> bool:
+        text = str(error or "")
+        return "990019" in text or "操作尚未执行完成" in text
+
+    async def _delete_115_ids_batched_with_retry(
+        self,
+        client,
+        ids: list[int],
+        log_label: str,
+        *,
+        batch_size: int = _115_CLEANUP_FILE_DELETE_BATCH_SIZE,
+    ):
         if not ids:
             return True, None
         last_error = None
         unique_ids = list(dict.fromkeys(int(item_id) for item_id in ids if int(item_id or 0) > 0))
         if not unique_ids:
             return True, None
+        batch_size = max(1, int(batch_size or _115_CLEANUP_FILE_DELETE_BATCH_SIZE))
         batches = [
-            unique_ids[index:index + _115_CLEANUP_DELETE_BATCH_SIZE]
-            for index in range(0, len(unique_ids), _115_CLEANUP_DELETE_BATCH_SIZE)
+            unique_ids[index:index + batch_size]
+            for index in range(0, len(unique_ids), batch_size)
         ]
         for batch_index, batch_ids in enumerate(batches, start=1):
             batch_label = f"{log_label} batch={batch_index}/{len(batches)} size={len(batch_ids)}"
-            for attempt, delay in enumerate(_115_CLEANUP_DELETE_RETRY_DELAYS_SECONDS, start=1):
-                if delay > 0:
-                    logger.warning(f"[CleanUp] 批量删除失败，{delay:.0f}秒后重试: {batch_label}")
-                    await asyncio.sleep(delay)
+            attempt = 0
+            while True:
                 try:
                     resp = await run_115_write_request(
                         client,
@@ -2364,6 +2375,7 @@ class Drive115Service:
                         lambda write_client, _ids=batch_ids: write_client.fs_delete_app(_ids, async_=False),
                         raise_on_state_false=False,
                         timeout=_115_CLEANUP_DELETE_TIMEOUT_SECONDS,
+                        retry_backend_busy=False,
                     )
                     if isinstance(resp, dict) and resp.get("state") is False:
                         raise RuntimeError(resp)
@@ -2371,8 +2383,16 @@ class Drive115Service:
                     break
                 except Exception as e:
                     last_error = e
-                    if attempt < len(_115_CLEANUP_DELETE_RETRY_DELAYS_SECONDS):
+                    if self._is_115_cleanup_backend_busy_error(e) and attempt < len(_115_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS):
+                        delay = _115_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS[attempt]
+                        logger.warning(
+                            f"[CleanUp] 115后台删除未完成，等待 {delay:.0f} 秒后重试当前批次 "
+                            f"({attempt + 1}/{len(_115_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS)}): {batch_label}"
+                        )
+                        attempt += 1
+                        await asyncio.sleep(delay)
                         continue
+                    break
             if last_error is not None:
                 return False, last_error
             if batch_index < len(batches):
@@ -2438,39 +2458,39 @@ class Drive115Service:
 
             dir_ids = list(dict.fromkeys(result.get("dir_ids") or []))
             if dir_ids:
-                logger.info(f"[CleanUp] 准备按批删除目录最外层文件夹: {task_name} | {label} | {len(dir_ids)} 项")
-                await asyncio.sleep(_115_CLEANUP_PRE_DELETE_DELAY_SECONDS)
-                ok, error = await self._delete_115_ids_batched_with_retry(client, dir_ids, f"{task_name} {label} dirs={len(dir_ids)}")
+                logger.info(f"[CleanUp] 准备删除目录最外层文件夹: {task_name} | {label} | {len(dir_ids)} 项")
+                ok, error = await self._delete_115_ids_batched_with_retry(
+                    client,
+                    dir_ids,
+                    f"{task_name} {label} dirs={len(dir_ids)}",
+                    batch_size=_115_CLEANUP_DIR_DELETE_BATCH_SIZE,
+                )
                 if not ok:
-                    message = f"按批删除文件夹失败: {label} | {error}"
+                    message = f"删除文件夹失败: {label} | {error}"
                     folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
                     logger.error(f"[CleanUp] {message}")
                     return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
 
                 deleted_count += len(dir_ids)
-                dirs_done, verify_result = await self._wait_115_cleanup_folder_state(
-                    client,
-                    cid,
-                    label,
-                    remaining_key="dir_ids",
-                    remaining_label="最外层文件夹",
-                )
-                if not dirs_done:
-                    if verify_result.get("status") != "ok":
-                        message = verify_result.get("message", "") or f"复查目录失败: {label}"
-                    else:
-                        remaining = len(list(dict.fromkeys(verify_result.get("dir_ids") or [])))
-                        message = f"目录清空未完成: {label} | 最后一次等待 60 秒后仍剩余最外层文件夹 {remaining} 项"
-                    folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
-                    logger.error(f"[CleanUp] {message}")
-                    return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
-                result = verify_result
+                if result.get("file_ids"):
+                    logger.info(
+                        f"[CleanUp] 文件夹删除请求已提交，等待 {_115_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS:.0f} 秒后继续删除文件: "
+                        f"{task_name} | {label}"
+                    )
+                    await asyncio.sleep(_115_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS)
 
             file_ids = list(dict.fromkeys(result.get("file_ids") or []))
             if file_ids:
-                logger.info(f"[CleanUp] 准备按批删除目录最外层文件: {task_name} | {label} | {len(file_ids)} 项")
-                await asyncio.sleep(_115_CLEANUP_PRE_DELETE_DELAY_SECONDS)
-                ok, error = await self._delete_115_ids_batched_with_retry(client, file_ids, f"{task_name} {label} files={len(file_ids)}")
+                logger.info(
+                    f"[CleanUp] 准备按批删除目录最外层文件: {task_name} | {label} | "
+                    f"{len(file_ids)} 项，每批 {_115_CLEANUP_FILE_DELETE_BATCH_SIZE} 项"
+                )
+                ok, error = await self._delete_115_ids_batched_with_retry(
+                    client,
+                    file_ids,
+                    f"{task_name} {label} files={len(file_ids)}",
+                    batch_size=_115_CLEANUP_FILE_DELETE_BATCH_SIZE,
+                )
                 if not ok:
                     message = f"按批删除文件失败: {label} | {error}"
                     folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
@@ -2478,22 +2498,6 @@ class Drive115Service:
                     return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
 
                 deleted_count += len(file_ids)
-                empty, verify_result = await self._wait_115_cleanup_folder_state(
-                    client,
-                    cid,
-                    label,
-                    remaining_key="ids",
-                    remaining_label="最外层条目",
-                )
-                if not empty:
-                    if verify_result.get("status") != "ok":
-                        message = verify_result.get("message", "") or f"复查目录失败: {label}"
-                    else:
-                        remaining = len(list(dict.fromkeys(verify_result.get("ids") or [])))
-                        message = f"目录清空未完成: {label} | 最后一次等待 60 秒后仍剩余最外层 {remaining} 项"
-                    folder_results.append({"cid": cid, "label": label, "status": "error", "deleted_count": deleted_count, "message": message})
-                    logger.error(f"[CleanUp] {message}")
-                    return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
 
             if deleted_count <= 0:
                 folder_results.append({

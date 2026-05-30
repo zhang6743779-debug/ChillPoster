@@ -95,8 +95,15 @@ _WASH_REJECT_FLUSH_BATCH_SIZE = _read_positive_int_env("CHILLPOSTER_WASH_REJECT_
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_WAIT_SECONDS = 0.75
 _MEDIA_ORGANIZE_POSTPROCESS_BATCH_MAX_GROUPS = max(1, _MEDIA_ORGANIZE_CONCURRENCY * 4)
 _MAIN_LOOP_AWAIT_TIMEOUT_SECONDS = 60
-_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = _read_positive_int_env("CHILLPOSTER_SOURCE_CLEANUP_DELETE_BATCH_LIMIT", 1000)
+_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT = _read_positive_int_env(
+    "CHILLPOSTER_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT",
+    _read_positive_int_env("CHILLPOSTER_SOURCE_CLEANUP_DELETE_BATCH_LIMIT", 4000),
+)
+_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT = _read_positive_int_env("CHILLPOSTER_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT", 4000)
+_SOURCE_CLEANUP_DELETE_BATCH_LIMIT = _SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT
 _SOURCE_CLEANUP_DELETE_TIMEOUT_SECONDS = 300
+_SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS = (5.0, 10.0, 20.0, 40.0, 80.0)
+_SOURCE_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS = 1.0
 _ORGANIZE_SYNC_EXECUTOR = ThreadPoolExecutor(
     max_workers=_MEDIA_ORGANIZE_SYNC_WORKERS,
     thread_name_prefix="chillposter-organize-sync",
@@ -6006,16 +6013,14 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
         deleted_dirs = 0
         failed_files = 0
         failed_dirs = 0
-        def _is_delete_pending_error(err) -> bool:
+        def _is_delete_backend_busy_error(err) -> bool:
             err_str = str(err)
-            return "操作尚未执行完成" in err_str or "990009" in err_str
+            return "操作尚未执行完成" in err_str or "990019" in err_str
 
         async def _delete_ids_with_retry(ids: list[int], log_label: str):
-            retry_delays = (0.0, 1.0, 2.0, 3.0)
             last_error = None
-            for attempt, delay in enumerate(retry_delays, start=1):
-                if delay > 0:
-                    await asyncio.sleep(delay)
+            attempt = 0
+            while True:
                 try:
                     resp = await run_115_write_request(
                         client,
@@ -6023,34 +6028,42 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                         lambda write_client: write_client.fs_delete_app(ids, async_=False),
                         raise_on_state_false=False,
                         timeout=_SOURCE_CLEANUP_DELETE_TIMEOUT_SECONDS,
+                        retry_backend_busy=False,
                     )
                     if isinstance(resp, dict) and resp.get("state") is False:
                         raise RuntimeError(resp)
-                    if attempt > 1:
-                        logger.info(f"[MediaOrganize] 删除重试成功: {log_label} attempt={attempt}")
+                    if attempt > 0:
+                        logger.info(f"[MediaOrganize] 删除重试成功: {log_label} attempt={attempt + 1}")
                     return True, None
                 except Exception as e:
                     last_error = e
-                    if not _is_delete_pending_error(e) or attempt == len(retry_delays):
-                        return False, e
-                    logger.info(f"[MediaOrganize] 删除任务仍在执行，等待后重试: {log_label} attempt={attempt}")
+                    if _is_delete_backend_busy_error(e) and attempt < len(_SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS):
+                        delay = _SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS[attempt]
+                        logger.warning(
+                            f"[MediaOrganize] 115后台删除未完成，等待 {delay:.0f} 秒后重试当前清理批次 "
+                            f"({attempt + 1}/{len(_SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS)}): {log_label}"
+                        )
+                        attempt += 1
+                        await asyncio.sleep(delay)
+                        continue
+                    return False, e
             return False, last_error
 
         def _chunk_items(items: list[tuple[str, str, bool]], chunk_size: int):
             for idx in range(0, len(items), chunk_size):
                 yield items[idx:idx + chunk_size]
 
-        async def _flush_batches(items: list[tuple[str, str, bool]]):
+        async def _flush_batches(items: list[tuple[str, str, bool]], *, chunk_size: int, label_prefix: str):
             nonlocal deleted_files, deleted_dirs, failed_files, failed_dirs
             if not items:
                 return
 
-            batches = list(_chunk_items(items, _SOURCE_CLEANUP_DELETE_BATCH_LIMIT))
+            batches = list(_chunk_items(items, max(1, int(chunk_size or 1))))
             for batch_index, batch in enumerate(batches, start=1):
                 batch_ids = [int(did) for did, _, _ in batch]
                 batch_files = sum(1 for _, _, is_dir in batch if not is_dir)
                 batch_dirs = sum(1 for _, _, is_dir in batch if is_dir)
-                log_label = f"批次 {batch_index}/{len(batches)}，{len(batch)} 项"
+                log_label = f"{label_prefix} 批次 {batch_index}/{len(batches)}，{len(batch)} 项"
                 ok, error = await _delete_ids_with_retry(batch_ids, log_label)
                 if ok:
                     deleted_dirs += batch_dirs
@@ -6062,7 +6075,23 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                     logger.warning(f"[MediaOrganize] 批量删除失败: {log_label} | {error}")
                 await asyncio.sleep(1)
 
-        await _flush_batches(to_delete)
+        dir_items = [item for item in to_delete if item[2]]
+        file_items = [item for item in to_delete if not item[2]]
+        if dir_items:
+            logger.info(
+                f"[MediaOrganize] 准备清理非视频残留目录: {len(dir_items)} 项，每批 {_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT} 项"
+            )
+            await _flush_batches(dir_items, chunk_size=_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT, label_prefix="目录")
+            if file_items:
+                logger.info(
+                    f"[MediaOrganize] 残留目录删除请求已提交，等待 {_SOURCE_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS:.0f} 秒后清理根目录非视频文件"
+                )
+                await asyncio.sleep(_SOURCE_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS)
+        if file_items:
+            logger.info(
+                f"[MediaOrganize] 准备清理根目录非视频文件: {len(file_items)} 项，每批 {_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT} 项"
+            )
+            await _flush_batches(file_items, chunk_size=_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT, label_prefix="文件")
 
         parts = []
         if deleted_files:
