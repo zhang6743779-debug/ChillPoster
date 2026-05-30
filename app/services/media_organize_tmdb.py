@@ -49,6 +49,9 @@ _TMDB_SEARCH_CACHE_MISS_TTL_SECONDS = 6 * 60 * 60
 _EXPLICIT_SEASON_OR_EPISODE_MARKER_RE = re.compile(
     r'(?i)(\bS\d{1,3}E[P]?\d{1,4}\b|\bS\d{1,3}\b|\bE[P]?\d{1,4}\b|Episode\s+\d{1,4}|Season\s+\d{1,3}|[第\s]*\d{1,4}\s*[集话話期幕]|第\s*[0-9一二三四五六七八九十百零]+\s*季)'
 )
+_TOTAL_EPISODE_COUNT_RE = re.compile(
+    r'(?i)([全共]\s*[0-9一二三四五六七八九十百零]+\s*[集话話期幕]|(?<![第\dA-Za-z])[0-9一二三四五六七八九十百零]+\s*[集话話期幕]\s*全)'
+)
 
 
 def _build_direct_tmdb_cache_key(title_key: tuple, media_type: str, file_path: str) -> tuple:
@@ -1424,9 +1427,32 @@ def _extract_tmdb_id_from_dirs(file_path: str, media_type: str) -> tuple[Optiona
 
 
 
+def _strip_total_episode_count_markers(text: str) -> str:
+    return _TOTAL_EPISODE_COUNT_RE.sub(" ", str(text or ""))
+
+
+def _has_total_episode_count_marker(*texts: str) -> bool:
+    return any(_TOTAL_EPISODE_COUNT_RE.search(str(text or "")) for text in texts)
+
+
+def _parse_numeric_video_stem_episode(text: str) -> Optional[int]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    basename = os.path.basename(raw.replace("\\", "/"))
+    stem, ext = os.path.splitext(basename)
+    if not ext or not stem.isdigit() or len(stem) >= 5:
+        return None
+    episode = int(stem)
+    return episode if 0 < episode < 10000 else None
+
+
 def _has_explicit_season_or_episode_marker(*texts: str) -> bool:
     for text in texts:
-        if text and _EXPLICIT_SEASON_OR_EPISODE_MARKER_RE.search(str(text)):
+        if _parse_numeric_video_stem_episode(text) is not None:
+            return True
+        cleaned = _strip_total_episode_count_markers(text)
+        if cleaned and _EXPLICIT_SEASON_OR_EPISODE_MARKER_RE.search(cleaned):
             return True
     return False
 
@@ -1437,6 +1463,10 @@ def _parse_explicit_season_episode_marker(*texts: str) -> tuple[Optional[int], O
         raw = str(text or "")
         if not raw:
             continue
+        numeric_episode = _parse_numeric_video_stem_episode(raw)
+        if numeric_episode is not None:
+            return None, numeric_episode
+        raw = _strip_total_episode_count_markers(raw)
 
         match = re.search(r'(?i)\bS(\d{1,3})E[P]?(\d{1,4})\b', raw)
         if match:
@@ -1479,6 +1509,65 @@ def _parse_explicit_season_episode_marker(*texts: str) -> tuple[Optional[int], O
             return None, int(match.group(1))
 
     return None, None
+
+
+def _collect_same_title_year_candidates(file_path: str, title: str, file_meta, parsed_year) -> list[dict]:
+    if not title:
+        return []
+
+    title_norm = _normalize_title_for_match(title)
+    if not title_norm:
+        return []
+
+    from core.meta import MetaInfo
+
+    candidates: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(candidate_title: str, candidate_year, source: str):
+        candidate_title = str(candidate_title or "").strip()
+        candidate_year = str(candidate_year or "").strip()
+        candidate_norm = _normalize_title_for_match(candidate_title)
+        if not candidate_norm or candidate_norm != title_norm or not candidate_year:
+            return
+        key = (candidate_norm, candidate_year)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({
+            "title": candidate_title,
+            "title_norm": candidate_norm,
+            "year": candidate_year,
+            "source": source,
+        })
+
+    file_cn, file_en, file_title = _select_titles_from_meta(file_meta)
+    _add(file_title, getattr(file_meta, "year", None), "filename")
+
+    for parent in list(Path(file_path).parents)[:4]:
+        dir_name = parent.name
+        if not dir_name or dir_name in {"/", "."}:
+            continue
+        if SEASON_DIR_PATTERN.match(dir_name):
+            continue
+
+        cleaned_dir_name = _strip_tmdb_id_from_text(dir_name)
+        cleaned_dir_name = _strip_total_episode_count_markers(cleaned_dir_name)
+        cleaned_dir_name = _preprocess_dir_name(cleaned_dir_name)
+        if not cleaned_dir_name:
+            continue
+
+        try:
+            dir_meta = MetaInfo(cleaned_dir_name)
+        except Exception:
+            continue
+
+        _, _, dir_title = _select_titles_from_meta(dir_meta)
+        _add(dir_title, dir_meta.year, "folder")
+
+    if not candidates:
+        _add(title, parsed_year, "parsed")
+    return candidates
 
 
 
@@ -1552,6 +1641,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
                 title_source = "sequel_fix"
 
     has_explicit_episode_marker = _has_explicit_season_or_episode_marker(filename, file_path)
+    has_total_episode_count_marker = _has_total_episode_count_marker(filename, file_path)
     explicit_season, explicit_episode = _parse_explicit_season_episode_marker(filename, file_path)
 
     if has_explicit_episode_marker:
@@ -1569,8 +1659,11 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     if not has_explicit_episode_marker and (season is not None or episode is not None) and not force_movie:
         season = None
         episode = None
-        force_movie = True
-        title_source = "implicit_episode_movie_fix"
+        if has_total_episode_count_marker:
+            title_source = "total_episode_count_fix"
+        else:
+            force_movie = True
+            title_source = "implicit_episode_movie_fix"
 
     if _should_treat_leading_number_as_title(cn_name, filename, season, episode):
         season = None
@@ -1663,6 +1756,12 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
                 f"[MediaIdentify] 文件名标题与目录TMDb线索不一致，优先使用文件名: 文件名标题={title} | 目录ID来源={conflict_dir_tmdb_source}"
             )
 
+    title_year_candidates = (
+        _collect_same_title_year_candidates(file_path, title, file_meta, year)
+        if media_type == "tv"
+        else []
+    )
+
     title_key = (
         _normalize_title_for_match(cn_name),
         _normalize_title_for_match(en_name),
@@ -1743,6 +1842,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         "media_type": media_type,
         "meta_info": meta_info,
         "titles_to_try": titles_to_try,
+        "title_year_candidates": title_year_candidates,
         "folder_fallback_titles": folder_fallback_titles,
         "folder_fallback_title": folder_fallback_title,
         "folder_fallback_cn_name": folder_fallback_cn_name,
@@ -1799,8 +1899,12 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
         if media_type == "tv" and year and season is not None and len(year_results or []) == 1:
             result = (year_results or [])[0]
             tmdb_id = result.get('id')
-            if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
-                res_title = result.get('name') or result.get('original_name') or ''
+            res_title = result.get('name') or ''
+            res_orig = result.get('original_name') or ''
+            if (
+                (_normalize_title_for_match(res_title) == norm_search or _normalize_title_for_match(res_orig) == norm_search)
+                and _is_valid_tv_match(media_type, season, tmdb_id, api_key)
+            ):
                 logger.debug(f"{log_prefix} 剧集年份唯一候选匹配: '{filename}' -> {res_title} S{season} ({year}) (ID: {tmdb_id})")
                 return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
@@ -1822,6 +1926,10 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
             for result in results:
                 tmdb_id = result.get('id')
                 if not tmdb_id or tmdb_id in season_year_seen:
+                    continue
+                res_title = result.get('name') or ''
+                res_orig = result.get('original_name') or ''
+                if _normalize_title_for_match(res_title) != norm_search and _normalize_title_for_match(res_orig) != norm_search:
                     continue
                 if _tv_season_year_matches(media_type, season, year, tmdb_id, api_key):
                     season_year_matches.append(result)
@@ -1863,7 +1971,7 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
             if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
                 return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
-        if year:
+        if year and media_type != "tv":
             for result in contains_matches:
                 tmdb_id = result.get('id')
                 date_field = result.get('release_date') if item_type == 'movie' else result.get('first_air_date')
@@ -1888,7 +1996,10 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
             res_year = str(date_field)[:4] if date_field else None
             if res_year and res_year == str(year):
                 res_title = result.get('title') if item_type == 'movie' else result.get('name')
+                res_orig = result.get('original_title') if item_type == 'movie' else result.get('original_name')
                 tmdb_id = result.get('id')
+                if media_type == "tv" and _normalize_title_for_match(res_title) != norm_search and _normalize_title_for_match(res_orig) != norm_search:
+                    continue
                 logger.debug(f"{log_prefix} 年份匹配: '{filename}' -> {res_title} ({res_year}) (ID: {tmdb_id})")
                 if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
                     return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
@@ -2106,6 +2217,7 @@ def _tmdb_search_cache_key(parsed: dict) -> str:
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],
+        "title_year_candidates": parsed.get("title_year_candidates") or [],
         "folder_fallback_titles": parsed.get("folder_fallback_titles") or [],
         "year": parsed.get("year"),
         "season": parsed.get("season"),
@@ -2207,7 +2319,25 @@ def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -
         failed_cache.add(series_key)
         return None
 
-    matched = _search_tmdb_candidates(titles_to_try, filename, media_type, year, season, api_key)
+    candidate_years = []
+    seen_candidate_years = set()
+    for item in parsed.get("title_year_candidates") or []:
+        candidate_year = str((item or {}).get("year") or "").strip()
+        if candidate_year and candidate_year not in seen_candidate_years:
+            candidate_years.append(candidate_year)
+            seen_candidate_years.add(candidate_year)
+    if year and str(year) not in seen_candidate_years:
+        candidate_years.append(str(year))
+        seen_candidate_years.add(str(year))
+
+    matched = None
+    if candidate_years:
+        for candidate_year in candidate_years:
+            matched = _search_tmdb_candidates(titles_to_try, filename, media_type, candidate_year, season, api_key)
+            if matched:
+                break
+    else:
+        matched = _search_tmdb_candidates(titles_to_try, filename, media_type, year, season, api_key)
     if not matched and parsed.get("title_source") == "filename_conflict_priority":
         folder_fallback_titles = parsed.get("folder_fallback_titles") or []
         if folder_fallback_titles:

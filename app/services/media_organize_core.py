@@ -5983,7 +5983,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                     lambda: _build_source_cleanup_delete_queue(client, int(source_cid)),
                 )
                 if attempt > 1:
-                    logger.info(f"[MediaOrganize] 清理扫描重试成功: source_cid={source_cid} attempt={attempt}")
+                    logger.info(f"[MediaOrganize] 清理扫描恢复: source_cid={source_cid}")
                 break
             except Exception as scan_err:
                 if not _is_115_request_blocked_error(scan_err):
@@ -5995,8 +5995,7 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                     )
                     return
                 logger.warning(
-                    f"[MediaOrganize] 清理扫描被 115 拦截，{scan_retry_delays[attempt]:.1f}s 后重试: "
-                    f"source_cid={source_cid} attempt={attempt}/{len(scan_retry_delays)}"
+                    f"[MediaOrganize] 清理扫描暂时受限，稍后继续: source_cid={source_cid}"
                 )
 
         if to_delete is None:
@@ -6033,16 +6032,13 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                     if isinstance(resp, dict) and resp.get("state") is False:
                         raise RuntimeError(resp)
                     if attempt > 0:
-                        logger.info(f"[MediaOrganize] 删除重试成功: {log_label} attempt={attempt + 1}")
+                        logger.info(f"[MediaOrganize] 清理请求恢复: {log_label}")
                     return True, None
                 except Exception as e:
                     last_error = e
                     if _is_delete_backend_busy_error(e) and attempt < len(_SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS):
                         delay = _SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS[attempt]
-                        logger.warning(
-                            f"[MediaOrganize] 115后台删除未完成，等待 {delay:.0f} 秒后重试当前清理批次 "
-                            f"({attempt + 1}/{len(_SOURCE_CLEANUP_BACKEND_BUSY_RETRY_DELAYS_SECONDS)}): {log_label}"
-                        )
+                        logger.warning(f"[MediaOrganize] 115后台删除未完成，稍后继续清理: {log_label}")
                         attempt += 1
                         await asyncio.sleep(delay)
                         continue
@@ -6063,34 +6059,32 @@ async def _cleanup_empty_source_dirs(client, source_cid: str):
                 batch_ids = [int(did) for did, _, _ in batch]
                 batch_files = sum(1 for _, _, is_dir in batch if not is_dir)
                 batch_dirs = sum(1 for _, _, is_dir in batch if is_dir)
-                log_label = f"{label_prefix} 批次 {batch_index}/{len(batches)}，{len(batch)} 项"
+                log_label = (
+                    f"{label_prefix}清理进度 {batch_index}/{len(batches)}"
+                    if len(batches) > 1
+                    else f"{label_prefix}清理任务"
+                )
                 ok, error = await _delete_ids_with_retry(batch_ids, log_label)
                 if ok:
                     deleted_dirs += batch_dirs
                     deleted_files += batch_files
-                    logger.info(f"[MediaOrganize] 批量删除成功: {log_label}")
+                    logger.info(f"[MediaOrganize] 清理请求成功: {log_label}")
                 else:
                     failed_dirs += batch_dirs
                     failed_files += batch_files
-                    logger.warning(f"[MediaOrganize] 批量删除失败: {log_label} | {error}")
+                    logger.warning(f"[MediaOrganize] 清理请求失败: {log_label} | {error}")
                 await asyncio.sleep(1)
 
         dir_items = [item for item in to_delete if item[2]]
         file_items = [item for item in to_delete if not item[2]]
         if dir_items:
-            logger.info(
-                f"[MediaOrganize] 准备清理非视频残留目录: {len(dir_items)} 项，每批 {_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT} 项"
-            )
+            logger.info(f"[MediaOrganize] 准备清理非视频残留目录: {len(dir_items)} 项")
             await _flush_batches(dir_items, chunk_size=_SOURCE_CLEANUP_DIR_DELETE_BATCH_LIMIT, label_prefix="目录")
             if file_items:
-                logger.info(
-                    f"[MediaOrganize] 残留目录删除请求已提交，等待 {_SOURCE_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS:.0f} 秒后清理根目录非视频文件"
-                )
+                logger.info("[MediaOrganize] 残留目录删除请求已提交，继续清理根目录非视频文件")
                 await asyncio.sleep(_SOURCE_CLEANUP_AFTER_DIR_DELETE_DELAY_SECONDS)
         if file_items:
-            logger.info(
-                f"[MediaOrganize] 准备清理根目录非视频文件: {len(file_items)} 项，每批 {_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT} 项"
-            )
+            logger.info(f"[MediaOrganize] 准备清理根目录非视频文件: {len(file_items)} 项")
             await _flush_batches(file_items, chunk_size=_SOURCE_CLEANUP_FILE_DELETE_BATCH_LIMIT, label_prefix="文件")
 
         parts = []
