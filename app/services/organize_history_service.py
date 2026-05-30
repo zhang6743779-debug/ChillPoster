@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from core.cache_db import cache_db
 from core.configs import CONFIG_DIR
 
 HISTORY_FILE = os.path.join(CONFIG_DIR, "organize_history.json")
-MAX_HISTORY_RECORDS = 3000
+DEFAULT_HISTORY_QUERY_LIMIT = 3000
 _LOCK = threading.RLock()
 _DB_READY = False
 logger = logging.getLogger("ChillPoster.organize_history")
@@ -22,6 +23,26 @@ HISTORY_COLUMNS = (
     "timestamp",
     "category",
     "status",
+    "title",
+    "year",
+    "season_episode",
+    "media_type",
+    "tmdb_id",
+    "source_file",
+    "target_file",
+    "source_path",
+    "target_path",
+    "library_location",
+    "quality",
+    "video",
+    "audio",
+    "size",
+    "reason",
+    "decision",
+    "summary",
+)
+
+SEARCH_COLUMNS = (
     "title",
     "year",
     "season_episode",
@@ -139,25 +160,29 @@ def _insert_record_unlocked(conn, item: dict) -> None:
     )
 
 
-def _trim_history_unlocked(conn) -> None:
-    conn.execute(
-        """
-        DELETE FROM organize_history
-        WHERE id NOT IN (
-            SELECT id
-            FROM organize_history
-            ORDER BY timestamp DESC, rowid DESC
-            LIMIT ?
-        )
+def _insert_record_ignore_unlocked(conn, item: dict) -> bool:
+    placeholders = ", ".join("?" for _ in HISTORY_COLUMNS)
+    columns = ", ".join(HISTORY_COLUMNS)
+    cursor = conn.execute(
+        f"""
+        INSERT OR IGNORE INTO organize_history({columns})
+        VALUES({placeholders})
         """,
-        (MAX_HISTORY_RECORDS,),
+        tuple(item.get(column, "") for column in HISTORY_COLUMNS),
     )
+    return cursor.rowcount > 0
+
+
+def _normalize_legacy_record(record: dict) -> dict:
+    item = _normalize_record(record)
+    if record.get("id"):
+        return item
+    fingerprint = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+    item["id"] = f"legacy-{hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:16]}"
+    return item
 
 
 def _migrate_json_history_unlocked(conn) -> None:
-    row = conn.execute("SELECT COUNT(*) AS count FROM organize_history").fetchone()
-    if row and int(row["count"] or 0) > 0:
-        return
     records = _load_records_unlocked()
     if not records:
         return
@@ -165,11 +190,10 @@ def _migrate_json_history_unlocked(conn) -> None:
     for record in records:
         if not isinstance(record, dict):
             continue
-        _insert_record_unlocked(conn, _normalize_record(record))
-        migrated += 1
+        if _insert_record_ignore_unlocked(conn, _normalize_legacy_record(record)):
+            migrated += 1
     if migrated:
-        _trim_history_unlocked(conn)
-        logger.info(f"[OrganizeHistory] 已迁移整理记录 JSON 到 SQLite: {migrated} 条")
+        logger.info(f"[OrganizeHistory] 已合并整理记录 JSON 到 SQLite: {migrated} 条")
 
 
 def _ensure_db_ready() -> None:
@@ -189,30 +213,82 @@ def _row_to_record(row) -> dict:
     return {column: row[column] for column in HISTORY_COLUMNS}
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _build_where_clause(category: str = "", keyword: str = "") -> tuple[str, list[Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    category = (category or "").strip()
+    keyword = (keyword or "").strip()
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    if keyword:
+        pattern = f"%{_escape_like(keyword)}%"
+        keyword_clause = " OR ".join(f"{column} LIKE ? ESCAPE '\\'" for column in SEARCH_COLUMNS)
+        clauses.append(f"({keyword_clause})")
+        params.extend(pattern for _ in SEARCH_COLUMNS)
+    if not clauses:
+        return "", params
+    return "WHERE " + " AND ".join(clauses), params
+
+
 def append_organize_history(record: dict) -> dict:
     item = _normalize_record(record)
     with _LOCK:
         _ensure_db_ready()
         with cache_db(write=True) as conn:
             _insert_record_unlocked(conn, item)
-            _trim_history_unlocked(conn)
     return item
 
 
-def list_organize_history() -> list[dict]:
+def count_organize_history_by_category(keyword: str = "") -> dict[str, int]:
     with _LOCK:
         _ensure_db_ready()
+        where_clause, params = _build_where_clause(keyword=keyword)
         with cache_db() as conn:
             rows = conn.execute(
-                """
+                f"""
+                SELECT category, COUNT(*) AS count
+                FROM organize_history
+                {where_clause}
+                GROUP BY category
+                """,
+                params,
+            ).fetchall()
+        return {str(row["category"] or ""): int(row["count"] or 0) for row in rows}
+
+
+def list_organize_history_page(
+    *,
+    category: str = "",
+    keyword: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    limit = max(1, int(limit or 50))
+    offset = max(0, int(offset or 0))
+    with _LOCK:
+        _ensure_db_ready()
+        where_clause, params = _build_where_clause(category=category, keyword=keyword)
+        with cache_db() as conn:
+            rows = conn.execute(
+                f"""
                 SELECT id, created_at, timestamp, category, status, title, year,
                        season_episode, media_type, tmdb_id, source_file, target_file,
                        source_path, target_path, library_location, quality, video,
                        audio, size, reason, decision, summary
                 FROM organize_history
+                {where_clause}
                 ORDER BY timestamp DESC, rowid DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (MAX_HISTORY_RECORDS,),
+                [*params, limit, offset],
             ).fetchall()
         return [_row_to_record(row) for row in rows]
+
+
+def list_organize_history(limit: int = DEFAULT_HISTORY_QUERY_LIMIT) -> list[dict]:
+    return list_organize_history_page(limit=limit)

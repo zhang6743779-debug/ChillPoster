@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
+import posixpath
 import queue
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+import httpx
 from p115client import P115Client
+from p115client.tool.attr import get_attr
+from p115pickcode import to_id
 
-from app.services.media_organize_115_ops import _check_and_move, _ensure_115_dir_chain_cached
+from app.services.media_organize_115_ops import _check_and_move, _ensure_115_dir_chain_cached, _mkdir_115_dir
 from core.logger import logger
 
 
@@ -25,6 +31,14 @@ MAX_QUEUE_SIZE = 200
 MAX_HISTORY = 100
 DEFAULT_UPLOAD_WORKERS = 5
 MAX_UPLOAD_WORKERS = 30
+CLOUD_RAPID_LIST_LIMIT = 1150
+CLOUD_RAPID_MAX_FILES = 5000
+CLOUD_RAPID_RESULT_LIMIT = 200
+CLOUD_RAPID_JOB_KEEP_SECONDS = 24 * 60 * 60
+CLOUD_RAPID_JOB_HISTORY_LIMIT = 20
+CLOUD_RAPID_DEFAULT_CONCURRENCY = 1
+CLOUD_RAPID_MAX_CONCURRENCY = 10
+CLOUD_RAPID_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36"
 TEMP_SUFFIXES = (
     ".crdownload",
     ".part",
@@ -58,6 +72,7 @@ class Drive115UploadService:
         self._active_count: dict[str, int] = {}
         self._active_jobs: dict[str, dict[str, Any]] = {}
         self._dir_chain_cache: dict[tuple[str, str, str, str], str] = {}
+        self._cloud_rapid_jobs: dict[str, dict[str, Any]] = {}
 
     def start(self) -> None:
         with self._lock:
@@ -260,6 +275,12 @@ class Drive115UploadService:
 
     def get_client(self, drive_index: int = 0):
         cookie = self._get_cookie(drive_index)
+        return self.get_client_by_cookie(cookie)
+
+    def get_client_by_cookie(self, cookie: str):
+        cookie = str(cookie or "").strip()
+        if not cookie:
+            raise RuntimeError("Cookie 未配置")
         with self._lock:
             cached = self._client_cache.get(cookie)
             if cached:
@@ -271,6 +292,796 @@ class Drive115UploadService:
         with self._lock:
             self._client_cache[cookie] = client
         return client
+
+    def browse_cloud_115(self, cookie: str, cid: str = "0", include_files: bool = True) -> dict[str, Any]:
+        client = self.get_client_by_cookie(cookie)
+        cid = str(cid or "0").strip() or "0"
+        entries = self._list_cloud_115_children(client, cid, include_files=include_files, recursive=False)
+        dirs = [entry for entry in entries if entry.get("type") == "dir"]
+        files = [entry for entry in entries if entry.get("type") == "file"]
+        return {"status": "ok", "dirs": dirs, "files": files}
+
+    def start_cloud_rapid_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = self._validate_cloud_rapid_payload(payload)
+        job_id = f"cloud_rapid_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        now = int(time.time())
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "message": "等待开始",
+            "summary": "",
+            "selected_count": len(task["items"]),
+            "target_cid": task["target_cid"],
+            "target_path": task["target_path"],
+            "concurrency": task["concurrency"],
+            "total_files": 0,
+            "processed": 0,
+            "success": 0,
+            "skipped": 0,
+            "failed": 0,
+            "folders": 0,
+            "progress": 0,
+            "current": "",
+            "results": [],
+            "truncated": False,
+            "started_at": now,
+            "updated_at": now,
+            "finished_at": 0,
+        }
+        with self._lock:
+            self._prune_cloud_rapid_jobs_locked()
+            self._cloud_rapid_jobs[job_id] = job
+        thread = threading.Thread(
+            target=self._cloud_rapid_transfer_worker,
+            args=(job_id, task),
+            name=f"drive115-cloud-rapid-{job_id[-8:]}",
+            daemon=True,
+        )
+        thread.start()
+        return {"status": "ok", "job": self.get_cloud_rapid_job(job_id)}
+
+    def get_cloud_rapid_job(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self._cloud_rapid_jobs.get(str(job_id or ""))
+            if not job:
+                raise KeyError("任务不存在")
+            return copy.deepcopy(job)
+
+    def cloud_rapid_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = self._validate_cloud_rapid_payload(payload)
+        return self._run_cloud_rapid_transfer(task)
+
+    def _validate_cloud_rapid_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source_cookie = str(payload.get("source_cookie") or "").strip()
+        target_cookie = str(payload.get("target_cookie") or "").strip()
+        target_cid = str(payload.get("target_cid") or "").strip()
+        target_path = str(payload.get("target_path") or "").strip()
+        raw_items = payload.get("items") or []
+        try:
+            concurrency = int(payload.get("concurrency") or CLOUD_RAPID_DEFAULT_CONCURRENCY)
+        except (TypeError, ValueError):
+            concurrency = CLOUD_RAPID_DEFAULT_CONCURRENCY
+        concurrency = max(1, min(CLOUD_RAPID_MAX_CONCURRENCY, concurrency))
+        if not source_cookie:
+            raise ValueError("请填写来源账号 CK")
+        if not target_cookie:
+            raise ValueError("请填写目标账号 CK")
+        if not target_cid or not target_cid.isdigit() or target_cid == "0":
+            raise ValueError("请选择目标网盘的非根目录")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ValueError("请选择需要秒传的文件或文件夹")
+
+        items = []
+        for raw_item in raw_items:
+            item = self._normalize_cloud_selected_item(raw_item)
+            if item:
+                items.append(item)
+        if not items:
+            raise ValueError("请选择有效的文件或文件夹")
+        return {
+            "source_cookie": source_cookie,
+            "target_cookie": target_cookie,
+            "target_cid": target_cid,
+            "target_path": target_path,
+            "concurrency": concurrency,
+            "items": items,
+        }
+
+    def _cloud_rapid_transfer_worker(self, job_id: str, task: dict[str, Any]) -> None:
+        try:
+            self._update_cloud_rapid_job(
+                job_id,
+                status="running",
+                stage="scanning",
+                message="正在连接 115 账号",
+            )
+            result = self._run_cloud_rapid_transfer(task, job_id=job_id)
+            status = "success" if result.get("status") == "ok" else str(result.get("status") or "error")
+            self._update_cloud_rapid_job(
+                job_id,
+                status=status,
+                stage="finished" if status != "error" else "failed",
+                message=str(result.get("summary") or "网盘资源秒传完成"),
+                summary=str(result.get("summary") or ""),
+                total_files=int(result.get("total_files") or 0),
+                processed=int(result.get("processed") or 0),
+                success=int(result.get("success") or 0),
+                skipped=int(result.get("skipped") or 0),
+                failed=int(result.get("failed") or 0),
+                folders=int(result.get("folders") or 0),
+                concurrency=int(result.get("concurrency") or task.get("concurrency") or CLOUD_RAPID_DEFAULT_CONCURRENCY),
+                progress=100,
+                finished_at=int(time.time()),
+            )
+        except Exception as e:
+            logger.exception(f"[CloudRapid] 网盘资源秒传任务失败: {e}")
+            self._update_cloud_rapid_job(
+                job_id,
+                status="error",
+                stage="failed",
+                message=str(e),
+                summary=f"网盘资源秒传失败: {e}",
+                finished_at=int(time.time()),
+            )
+
+    def _run_cloud_rapid_transfer(self, task: dict[str, Any], job_id: str | None = None) -> dict[str, Any]:
+        source_client = self.get_client_by_cookie(task["source_cookie"])
+        target_client = self.get_client_by_cookie(task["target_cookie"])
+        target_cid = str(task.get("target_cid") or "")
+        target_path = str(task.get("target_path") or "")
+        concurrency = max(1, min(CLOUD_RAPID_MAX_CONCURRENCY, int(task.get("concurrency") or CLOUD_RAPID_DEFAULT_CONCURRENCY)))
+        counters = {"success": 0, "failed": 0, "skipped": 0, "folders": 0, "total_files": 0, "processed": 0}
+        results: list[dict[str, Any]] = []
+        file_tasks: list[dict[str, Any]] = []
+        dir_chain_cache: dict[tuple[str, str, str, str], str] = {}
+        task_key = f"cloud_rapid:{int(time.time())}:{uuid.uuid4().hex[:8]}"
+        progress_lock = threading.Lock()
+
+        self._sync_cloud_rapid_job(
+            job_id,
+            counters,
+            status="running",
+            stage="scanning",
+            message="正在扫描来源目录",
+            concurrency=concurrency,
+        )
+        for item in task["items"]:
+            try:
+                if item["type"] == "dir":
+                    self._cloud_rapid_collect_dir(
+                        source_client,
+                        target_client,
+                        item,
+                        target_cid,
+                        target_path,
+                        file_tasks,
+                        counters,
+                        results,
+                        task_key,
+                        dir_chain_cache,
+                        job_id=job_id,
+                    )
+                else:
+                    self._cloud_rapid_collect_file(
+                        item,
+                        target_cid,
+                        str(item.get("name") or ""),
+                        file_tasks,
+                        counters,
+                        job_id=job_id,
+                    )
+            except Exception as e:
+                self._record_cloud_rapid_result(
+                    job_id,
+                    counters,
+                    results,
+                    {
+                        "status": "failed",
+                        "type": item.get("type", "file"),
+                        "name": item.get("name", ""),
+                        "path": item.get("path", item.get("name", "")),
+                        "message": str(e),
+                    },
+                    count_processed=False,
+                )
+
+        if file_tasks:
+            self._sync_cloud_rapid_job(
+                job_id,
+                counters,
+                status="running",
+                stage="transferring",
+                current="",
+                message=f"扫描完成，开始秒传，并发 {concurrency}",
+            )
+            if concurrency <= 1 or len(file_tasks) <= 1:
+                for file_task in file_tasks:
+                    self._execute_cloud_rapid_file_task(
+                        source_client,
+                        target_client,
+                        file_task,
+                        counters,
+                        results,
+                        job_id,
+                        progress_lock,
+                    )
+            else:
+                with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="cloud-rapid-file") as executor:
+                    futures = [
+                        executor.submit(
+                            self._execute_cloud_rapid_file_task,
+                            source_client,
+                            target_client,
+                            file_task,
+                            counters,
+                            results,
+                            job_id,
+                            progress_lock,
+                        )
+                        for file_task in file_tasks
+                    ]
+                    for future in as_completed(futures):
+                        future.result()
+
+        status = "ok" if counters["failed"] == 0 and counters["skipped"] == 0 else (
+            "partial" if counters["success"] or counters["skipped"] else "error"
+        )
+        summary = (
+            f"总文件 {counters['total_files']}，成功 {counters['success']}，"
+            f"跳过 {counters['skipped']}，失败 {counters['failed']}，目录 {counters['folders']}，并发 {concurrency}"
+        )
+        return {
+            "status": status,
+            "summary": summary,
+            "success": counters["success"],
+            "failed": counters["failed"],
+            "skipped": counters["skipped"],
+            "folders": counters["folders"],
+            "total_files": counters["total_files"],
+            "processed": counters["processed"],
+            "concurrency": concurrency,
+            "results": results[:CLOUD_RAPID_RESULT_LIMIT],
+            "truncated": len(results) > CLOUD_RAPID_RESULT_LIMIT,
+        }
+
+    def _prune_cloud_rapid_jobs_locked(self) -> None:
+        now = int(time.time())
+        finished = [
+            (str(job_id), int(job.get("finished_at") or job.get("updated_at") or 0))
+            for job_id, job in self._cloud_rapid_jobs.items()
+            if str(job.get("status") or "") in {"success", "partial", "error"}
+        ]
+        for job_id, finished_at in finished:
+            if finished_at and now - finished_at > CLOUD_RAPID_JOB_KEEP_SECONDS:
+                self._cloud_rapid_jobs.pop(job_id, None)
+        if len(self._cloud_rapid_jobs) <= CLOUD_RAPID_JOB_HISTORY_LIMIT:
+            return
+        removable = sorted(
+            [
+                (str(job_id), int(job.get("finished_at") or job.get("updated_at") or 0))
+                for job_id, job in self._cloud_rapid_jobs.items()
+                if str(job.get("status") or "") in {"success", "partial", "error"}
+            ],
+            key=lambda item: item[1],
+        )
+        while len(self._cloud_rapid_jobs) > CLOUD_RAPID_JOB_HISTORY_LIMIT and removable:
+            job_id, _ = removable.pop(0)
+            self._cloud_rapid_jobs.pop(job_id, None)
+
+    def _update_cloud_rapid_job(self, job_id: str | None, **updates: Any) -> None:
+        if not job_id:
+            return
+        with self._lock:
+            job = self._cloud_rapid_jobs.get(str(job_id))
+            if not job:
+                return
+            job.update(updates)
+            job["updated_at"] = int(time.time())
+            if "progress" not in updates:
+                total = int(job.get("total_files") or 0)
+                processed = int(job.get("processed") or 0)
+                if total > 0:
+                    progress = int(processed / total * 100)
+                    if str(job.get("status") or "") in {"running", "queued"}:
+                        progress = min(progress, 99)
+                    job["progress"] = max(0, min(100, progress))
+
+    def _sync_cloud_rapid_job(self, job_id: str | None, counters: dict[str, int], **updates: Any) -> None:
+        if not job_id:
+            return
+        fields = {
+            "total_files": int(counters.get("total_files") or 0),
+            "processed": int(counters.get("processed") or 0),
+            "success": int(counters.get("success") or 0),
+            "skipped": int(counters.get("skipped") or 0),
+            "failed": int(counters.get("failed") or 0),
+            "folders": int(counters.get("folders") or 0),
+        }
+        fields.update(updates)
+        self._update_cloud_rapid_job(job_id, **fields)
+
+    def _record_cloud_rapid_result(
+        self,
+        job_id: str | None,
+        counters: dict[str, int],
+        results: list[dict[str, Any]],
+        record: dict[str, Any],
+        *,
+        count_processed: bool = True,
+        progress_lock: threading.Lock | None = None,
+    ) -> None:
+        if progress_lock:
+            with progress_lock:
+                self._record_cloud_rapid_result(
+                    job_id,
+                    counters,
+                    results,
+                    record,
+                    count_processed=count_processed,
+                    progress_lock=None,
+                )
+            return
+        status = str(record.get("status") or "")
+        if status in {"success", "failed", "skipped"}:
+            counters[status] = int(counters.get(status) or 0) + 1
+        if count_processed:
+            counters["processed"] = int(counters.get("processed") or 0) + 1
+        results.append(record)
+        if job_id:
+            with self._lock:
+                job = self._cloud_rapid_jobs.get(str(job_id))
+                if job:
+                    job_results = job.setdefault("results", [])
+                    if len(job_results) < CLOUD_RAPID_RESULT_LIMIT:
+                        job_results.append(copy.deepcopy(record))
+                    else:
+                        job["truncated"] = True
+            self._sync_cloud_rapid_job(
+                job_id,
+                counters,
+                status="running",
+                stage="transferring",
+                current=str(record.get("path") or record.get("name") or ""),
+                message=str(record.get("message") or ""),
+            )
+
+    def _normalize_cloud_selected_item(self, raw_item: Any) -> dict[str, Any] | None:
+        if not isinstance(raw_item, dict):
+            return None
+        item_type = "dir" if str(raw_item.get("type") or "").lower() == "dir" else "file"
+        item_id = str(raw_item.get("id") or raw_item.get("cid") or raw_item.get("file_id") or "").strip()
+        if not item_id:
+            return None
+        name = str(raw_item.get("name") or "").strip() or item_id
+        return {
+            "type": item_type,
+            "id": item_id,
+            "cid": str(raw_item.get("cid") or item_id).strip(),
+            "file_id": str(raw_item.get("file_id") or item_id).strip(),
+            "name": name,
+            "path": str(raw_item.get("path") or name).strip() or name,
+            "pickcode": str(raw_item.get("pickcode") or raw_item.get("pick_code") or "").strip(),
+            "sha1": str(raw_item.get("sha1") or "").strip().upper(),
+            "size": int(raw_item.get("size") or 0),
+        }
+
+    def _list_cloud_115_children(self, client, cid: str, include_files: bool, recursive: bool) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        offset = 0
+        cid = str(cid or "0").strip() or "0"
+        while True:
+            resp = client.fs_files_app(
+                {
+                    "cid": int(cid),
+                    "limit": CLOUD_RAPID_LIST_LIMIT,
+                    "offset": offset,
+                    "fc_mix": 1 if include_files else 0,
+                },
+                app="android",
+                base_url="https://proapi.115.com",
+                headers={"user-agent": CLOUD_RAPID_UA},
+                timeout=20,
+            )
+            if not isinstance(resp, dict) or not resp.get("state"):
+                raise RuntimeError("读取 115 目录失败")
+            data = self._extract_115_list_data(resp)
+            if not data:
+                break
+            for raw in data:
+                entry = self._normalize_cloud_115_entry(raw)
+                if not entry:
+                    continue
+                if entry["type"] == "dir" or include_files:
+                    entries.append(entry)
+            if not recursive or len(data) < CLOUD_RAPID_LIST_LIMIT:
+                break
+            offset += CLOUD_RAPID_LIST_LIMIT
+        return entries
+
+    def _extract_115_list_data(self, resp: dict[str, Any]) -> list:
+        data = resp.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("list") or data.get("files") or data.get("data") or data.get("items") or []
+        return data if isinstance(data, list) else []
+
+    def _normalize_cloud_115_entry(self, item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        name = str(
+            item.get("fn")
+            or item.get("n")
+            or item.get("name")
+            or item.get("file_name")
+            or ""
+        ).strip()
+        item_id = str(
+            item.get("fid")
+            or item.get("id")
+            or item.get("cid")
+            or item.get("file_id")
+            or item.get("category_id")
+            or ""
+        ).strip()
+        if not item_id:
+            return None
+        is_dir = item.get("is_dir") is True or str(item.get("fc", "") or "") == "0"
+        if is_dir:
+            return {
+                "type": "dir",
+                "id": item_id,
+                "cid": item_id,
+                "name": name or item_id,
+            }
+        size = int(item.get("fs") or item.get("size") or item.get("file_size") or 0)
+        return {
+            "type": "file",
+            "id": item_id,
+            "file_id": item_id,
+            "name": name or item_id,
+            "size": size,
+            "pickcode": str(item.get("pc") or item.get("pickcode") or item.get("pick_code") or "").strip(),
+            "sha1": str(item.get("sha1") or item.get("sha") or "").strip().upper(),
+        }
+
+    def _list_cloud_115_tree_entries(self, client, cid: str) -> list[dict[str, Any]]:
+        from p115client.tool.iterdir import traverse_tree_with_path
+
+        entries = list(traverse_tree_with_path(
+            client,
+            cid=int(str(cid or "0").strip() or 0),
+            with_ancestors=True,
+            app="android",
+            max_workers=0,
+            timeout=30,
+        ))
+        normalized: list[dict[str, Any]] = []
+        for raw in entries:
+            entry = self._normalize_cloud_115_entry(raw)
+            if not entry:
+                continue
+            relpath = self._cloud_tree_entry_relpath(raw, entry)
+            entry["path"] = relpath or entry.get("name", "")
+            entry["relpath"] = relpath or entry.get("name", "")
+            entry["parent_id"] = str(raw.get("parent_id") or raw.get("pid") or "")
+            normalized.append(entry)
+        return normalized
+
+    def _cloud_tree_entry_relpath(self, raw: dict[str, Any], entry: dict[str, Any]) -> str:
+        relpath = str(raw.get("relpath") or "").strip("/")
+        if relpath:
+            return relpath
+        path = str(raw.get("path") or "").strip("/")
+        top_path = str(raw.get("top_path") or "").strip("/")
+        if path and top_path:
+            if path == top_path:
+                return ""
+            prefix = top_path.rstrip("/") + "/"
+            if path.startswith(prefix):
+                return path[len(prefix):].strip("/")
+        name = str(entry.get("name") or raw.get("name") or "").strip()
+        if path and name and path.endswith("/" + name):
+            return name
+        if path:
+            return path
+        return name
+
+    def _cloud_rapid_collect_dir(
+        self,
+        source_client,
+        target_client,
+        item: dict[str, Any],
+        target_parent_cid: str,
+        target_parent_path: str,
+        file_tasks: list[dict[str, Any]],
+        counters: dict[str, int],
+        results: list[dict[str, Any]],
+        task_key: str,
+        dir_chain_cache: dict,
+        job_id: str | None = None,
+    ) -> None:
+        if counters["total_files"] >= CLOUD_RAPID_MAX_FILES:
+            raise RuntimeError(f"本次文件数超过上限 {CLOUD_RAPID_MAX_FILES}")
+        dir_name = str(item.get("name") or item.get("cid") or "未命名目录")
+        dir_path = "/".join(part for part in [str(target_parent_path or "").strip("/"), dir_name] if part)
+        self._sync_cloud_rapid_job(
+            job_id,
+            counters,
+            status="running",
+            stage="scanning",
+            current=dir_path or dir_name,
+            message=f"正在全量同步扫描目录: {dir_name}",
+        )
+        target_cid, _ = _mkdir_115_dir(
+            target_client,
+            str(target_parent_cid),
+            dir_name,
+            task_key=task_key,
+            dir_path=dir_path,
+        )
+        counters["folders"] += 1
+        self._sync_cloud_rapid_job(job_id, counters, message=f"已确认目标目录: {dir_path or dir_name}")
+        entries = self._list_cloud_115_tree_entries(source_client, str(item.get("cid") or item.get("id")))
+        target_dir_map: dict[str, str] = {"": str(target_cid)}
+        dirs = sorted(
+            [entry for entry in entries if entry.get("type") == "dir"],
+            key=lambda entry: str(entry.get("relpath") or entry.get("path") or "").count("/"),
+        )
+        files = [entry for entry in entries if entry.get("type") == "file"]
+        for child in dirs:
+            try:
+                rel_dir = str(child.get("relpath") or child.get("path") or child.get("name") or "").strip("/")
+                if not rel_dir:
+                    continue
+                parent_rel = posixpath.dirname(rel_dir).strip("/")
+                child_name = posixpath.basename(rel_dir) or str(child.get("name") or "")
+                parent_target_cid = target_dir_map.get(parent_rel, str(target_cid))
+                child_target_path = "/".join(part for part in [dir_path, rel_dir] if part)
+                child_target_cid, _ = _mkdir_115_dir(
+                    target_client,
+                    parent_target_cid,
+                    child_name,
+                    task_key=task_key,
+                    dir_path=child_target_path,
+                )
+                target_dir_map[rel_dir] = str(child_target_cid)
+                counters["folders"] += 1
+                self._sync_cloud_rapid_job(
+                    job_id,
+                    counters,
+                    status="running",
+                    stage="scanning",
+                    current=child_target_path,
+                    message=f"已确认目标目录: {child_target_path}",
+                )
+            except Exception as e:
+                self._record_cloud_rapid_result(
+                    job_id,
+                    counters,
+                    results,
+                    {
+                        "status": "failed",
+                        "type": child.get("type", "file"),
+                        "name": child.get("name", ""),
+                        "path": "/".join(part for part in [dir_path, str(child.get("name") or "")] if part),
+                        "message": str(e),
+                    },
+                    count_processed=False,
+                )
+        for child in files:
+            rel_file = str(child.get("relpath") or child.get("path") or child.get("name") or "").strip("/")
+            parent_rel = posixpath.dirname(rel_file).strip("/")
+            relative_name = "/".join(part for part in [dir_path, rel_file] if part)
+            self._cloud_rapid_collect_file(
+                child,
+                target_dir_map.get(parent_rel, str(target_cid)),
+                relative_name,
+                file_tasks,
+                counters,
+                job_id=job_id,
+            )
+
+    def _cloud_rapid_collect_file(
+        self,
+        item: dict[str, Any],
+        target_cid: str,
+        display_path: str,
+        file_tasks: list[dict[str, Any]],
+        counters: dict[str, int],
+        job_id: str | None = None,
+    ) -> None:
+        if counters["total_files"] >= CLOUD_RAPID_MAX_FILES:
+            raise RuntimeError(f"本次文件数超过上限 {CLOUD_RAPID_MAX_FILES}")
+        counters["total_files"] += 1
+        file_tasks.append({
+            "item": copy.deepcopy(item),
+            "target_cid": str(target_cid),
+            "display_path": display_path or str(item.get("name") or ""),
+        })
+        self._sync_cloud_rapid_job(
+            job_id,
+            counters,
+            status="running",
+            stage="scanning",
+            current=display_path or str(item.get("name") or ""),
+            message=f"已扫描文件: {item.get('name') or display_path}",
+        )
+
+    def _execute_cloud_rapid_file_task(
+        self,
+        source_client,
+        target_client,
+        file_task: dict[str, Any],
+        counters: dict[str, int],
+        results: list[dict[str, Any]],
+        job_id: str | None,
+        progress_lock: threading.Lock,
+    ) -> None:
+        item = dict(file_task.get("item") or {})
+        display_path = str(file_task.get("display_path") or item.get("name") or "")
+        try:
+            self._cloud_rapid_transfer_file(
+                source_client,
+                target_client,
+                item,
+                str(file_task.get("target_cid") or ""),
+                display_path,
+                counters,
+                results,
+                job_id=job_id,
+                progress_lock=progress_lock,
+            )
+        except Exception as e:
+            self._record_cloud_rapid_result(
+                job_id,
+                counters,
+                results,
+                {
+                    "status": "failed",
+                    "type": item.get("type", "file"),
+                    "name": item.get("name", ""),
+                    "path": display_path or item.get("path", item.get("name", "")),
+                    "message": str(e),
+                },
+                progress_lock=progress_lock,
+            )
+
+    def _cloud_rapid_transfer_file(
+        self,
+        source_client,
+        target_client,
+        item: dict[str, Any],
+        target_cid: str,
+        display_path: str,
+        counters: dict[str, int],
+        results: list[dict[str, Any]],
+        job_id: str | None = None,
+        progress_lock: threading.Lock | None = None,
+    ) -> None:
+        self._sync_cloud_rapid_job(
+            job_id,
+            counters,
+            status="running",
+            stage="transferring",
+            current=display_path or str(item.get("name") or ""),
+            message=f"准备秒传: {item.get('name') or display_path}",
+        )
+        info = self._resolve_cloud_source_file_info(source_client, item)
+        filename = str(info.get("name") or item.get("name") or "video.mkv")
+        pickcode = str(info.get("pickcode") or "")
+        if not pickcode:
+            raise RuntimeError(f"缺少 pickcode: {filename}")
+        if not info.get("sha1") or not int(info.get("size") or 0):
+            raise RuntimeError(f"缺少 SHA1 或大小: {filename}")
+        download_url = self._get_cloud_download_url(source_client, pickcode)
+        if not download_url:
+            raise RuntimeError(f"无法获取来源直链: {filename}")
+
+        def read_range_callback(sign_check: str) -> str:
+            return self._read_cloud_range_sha1(download_url, sign_check)
+
+        result = target_client.upload_file_init(
+            filename=filename,
+            filesize=int(info["size"]),
+            filesha1=str(info["sha1"]).upper(),
+            read_range_bytes_or_hash=read_range_callback,
+            pid=int(target_cid),
+            async_=False,
+            timeout=30,
+        )
+        if not isinstance(result, dict) or not result.get("state"):
+            error = result.get("error") or result.get("message") if isinstance(result, dict) else "无响应"
+            raise RuntimeError(error or "秒传初始化失败")
+        if not result.get("reuse"):
+            self._record_cloud_rapid_result(
+                job_id,
+                counters,
+                results,
+                {
+                    "status": "skipped",
+                    "type": "file",
+                    "name": filename,
+                    "path": display_path or filename,
+                    "size": int(info["size"]),
+                    "message": "秒传未命中，需要真实上传",
+                },
+                progress_lock=progress_lock,
+            )
+            return
+        self._record_cloud_rapid_result(job_id, counters, results, {
+            "status": "success",
+            "type": "file",
+            "name": filename,
+            "path": display_path or filename,
+            "size": int(info["size"]),
+            "pickcode": str(result.get("pickcode") or ""),
+            "message": "秒传成功",
+        }, progress_lock=progress_lock)
+
+    def _resolve_cloud_source_file_info(self, source_client, item: dict[str, Any]) -> dict[str, Any]:
+        info = {
+            "name": str(item.get("name") or ""),
+            "file_id": str(item.get("file_id") or item.get("id") or ""),
+            "pickcode": str(item.get("pickcode") or "").strip(),
+            "sha1": str(item.get("sha1") or "").strip().upper(),
+            "size": int(item.get("size") or 0),
+        }
+        if info["pickcode"] and (not info["file_id"] or not info["sha1"] or not info["size"]):
+            try:
+                info["file_id"] = str(to_id(info["pickcode"]))
+            except Exception:
+                pass
+        if info["file_id"] and (not info["pickcode"] or not info["sha1"] or not info["size"] or not info["name"]):
+            attr = get_attr(source_client, int(info["file_id"])) or {}
+            info["name"] = info["name"] or str(attr.get("name") or attr.get("file_name") or "")
+            info["pickcode"] = info["pickcode"] or str(attr.get("pickcode") or attr.get("pick_code") or "")
+            info["sha1"] = info["sha1"] or str(attr.get("sha1") or "").strip().upper()
+            info["size"] = info["size"] or int(attr.get("size") or 0)
+        return info
+
+    def _get_cloud_download_url(self, client, pickcode: str) -> str:
+        resp = client.download_url_app(
+            {"pickcode": str(pickcode or "").strip()},
+            user_agent=CLOUD_RAPID_UA,
+            app="chrome",
+            async_=False,
+            timeout=15,
+        )
+        if not isinstance(resp, dict) or not resp.get("state"):
+            return ""
+        data = resp.get("data") or {}
+        if isinstance(data, dict) and "url" in data:
+            return self._extract_download_url_value(data.get("url"))
+        if isinstance(data, dict):
+            for value in data.values():
+                if isinstance(value, dict):
+                    url = self._extract_download_url_value(value.get("url") or value)
+                    if url:
+                        return url
+        return ""
+
+    def _extract_download_url_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            return str(value.get("url") or "").strip()
+        return ""
+
+    def _read_cloud_range_sha1(self, download_url: str, sign_check: str) -> str:
+        try:
+            resp = httpx.get(
+                download_url,
+                headers={"Range": f"bytes={sign_check}", "User-Agent": CLOUD_RAPID_UA},
+                timeout=15,
+                verify=False,
+                follow_redirects=True,
+            )
+            if resp.status_code not in (200, 206):
+                return ""
+            return hashlib.sha1(resp.content).hexdigest().upper()
+        except Exception as e:
+            logger.warning(f"[CloudRapid] 范围校验失败: {e}")
+            return ""
 
     def _load_locked(self) -> None:
         if self._loaded:

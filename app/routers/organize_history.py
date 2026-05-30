@@ -1,7 +1,6 @@
 import os
 import re
 import json
-from collections import Counter
 from datetime import datetime
 from typing import Any
 
@@ -9,7 +8,10 @@ from fastapi import APIRouter, Query
 
 from core.configs import APP_LOG_FILE
 from core.logger import sanitize_log_text, should_hide_console_log_line
-from app.services.organize_history_service import list_organize_history
+from app.services.organize_history_service import (
+    count_organize_history_by_category,
+    list_organize_history_page,
+)
 
 router = APIRouter(prefix="/api/organize-history", tags=["OrganizeHistory"])
 
@@ -376,16 +378,6 @@ def _build_record(line: str, index: int) -> dict[str, Any] | None:
     }
 
 
-def _matches_keyword(record: dict[str, Any], keyword: str) -> bool:
-    if not keyword:
-        return True
-    haystack = " ".join(
-        str(record.get(key, ""))
-        for key in ("title", "subtitle", "message", "raw", "category_label", "source_path", "target_path", "reason")
-    ).lower()
-    return keyword.lower() in haystack
-
-
 @router.get("/records")
 async def get_organize_history(
     category: str = Query("organize_success"),
@@ -405,36 +397,37 @@ async def get_organize_history(
     if not isinstance(page_size, int):
         page_size = DEFAULT_PAGE_SIZE
 
-    records = [
-        record
-        for record in (_normalize_structured_record(item) for item in list_organize_history())
-        if record is not None
-    ]
-
     keyword = (keyword or "").strip()
-    keyword_records = [record for record in records if _matches_keyword(record, keyword)]
-    counts = Counter(record["category"] for record in keyword_records)
+    active_category = category if category in CATEGORY_MAP else "organize_success"
+    counts = count_organize_history_by_category(keyword)
 
     category_items = []
     for item in CATEGORY_DEFS:
         count = counts.get(item["key"], 0)
         category_items.append({**item, "count": count})
 
-    if category in CATEGORY_MAP:
-        visible_records = [record for record in keyword_records if record["category"] == category]
-    else:
-        visible_records = [record for record in keyword_records if record["category"] == "organize_success"]
-
-    total = len(visible_records)
+    total = counts.get(active_category, 0)
     page_size = max(10, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_RESPONSE_LIMIT))
     page_count = max(1, (total + page_size - 1) // page_size)
     page = max(1, min(int(page or 1), page_count))
     start = (page - 1) * page_size
-    end = start + page_size
+    visible_records = [
+        record
+        for record in (
+            _normalize_structured_record(item)
+            for item in list_organize_history_page(
+                category=active_category,
+                keyword=keyword,
+                limit=page_size,
+                offset=start,
+            )
+        )
+        if record is not None
+    ]
 
     return {
         "categories": category_items,
-        "records": visible_records[start:end],
+        "records": visible_records,
         "total": total,
         "page": page,
         "page_size": page_size,

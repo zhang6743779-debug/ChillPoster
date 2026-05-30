@@ -49,6 +49,8 @@ class DoubanApi:
     _backoff_until: float = 0.0
     _backoff_base_seconds: float = 60.0
     _backoff_max_seconds: float = 600.0
+    _backoff_skip_log_interval_seconds: float = 60.0
+    _backoff_last_skip_log_at: float = 0.0
     
     # --- 代理配置 (默认为空，直连模式) ---
     _proxies: Optional[Dict] = None
@@ -168,6 +170,7 @@ class DoubanApi:
         with cls._cooldown_lock:
             cls._backoff_seconds = 0.0
             cls._backoff_until = 0.0
+            cls._backoff_last_skip_log_at = 0.0
 
     @classmethod
     def _trigger_backoff(cls, reason: str) -> float:
@@ -175,8 +178,21 @@ class DoubanApi:
             wait_seconds = cls._backoff_seconds or cls._backoff_base_seconds
             cls._backoff_until = time.time() + wait_seconds
             cls._backoff_seconds = min(wait_seconds * 2, cls._backoff_max_seconds)
+            cls._backoff_last_skip_log_at = 0.0
             logger.warning(f"  [Douban] {reason}，触发退避 {wait_seconds:.0f} 秒")
             return wait_seconds
+
+    @classmethod
+    def _should_log_backoff_skip(cls, wait_time: float) -> bool:
+        with cls._cooldown_lock:
+            now = time.time()
+            if cls._backoff_last_skip_log_at <= 0:
+                cls._backoff_last_skip_log_at = now
+                return True
+            if now - cls._backoff_last_skip_log_at >= cls._backoff_skip_log_interval_seconds:
+                cls._backoff_last_skip_log_at = now
+                return True
+            return wait_time <= 1.0
 
     def __invoke(self, url: str, **kwargs) -> Dict[str, Any]:
         """通用 GET 请求执行器"""
@@ -204,7 +220,10 @@ class DoubanApi:
 
         backoff_active, wait_time = DoubanApi._is_backoff_active()
         if backoff_active:
-            logger.warning(f"  [Douban] 退避中跳过请求: {wait_time:.0f} 秒后再试")
+            if DoubanApi._should_log_backoff_skip(wait_time):
+                logger.warning(f"  [Douban] 退避中跳过请求: {wait_time:.0f} 秒后再试")
+            else:
+                logger.debug(f"  [Douban] 退避中跳过请求: {wait_time:.0f} 秒后再试")
             return self._make_error_dict("rate_limit", f"Cooldown active: {wait_time:.0f}s")
 
         DoubanApi._apply_cooldown()

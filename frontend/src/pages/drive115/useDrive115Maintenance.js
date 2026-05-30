@@ -53,7 +53,39 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             history: [],
             dirs: []
         });
+        const cloud115Form = reactive({
+            source_cookie: '',
+            target_cookie: '',
+            target_cid: '',
+            target_name: '',
+            target_path: '',
+            concurrency: 1,
+            selected_items: []
+        });
+        const cloud115SourceBrowser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: [],
+            files: []
+        });
+        const cloud115TargetBrowser = reactive({
+            visible: false,
+            loading: false,
+            currentCid: '0',
+            currentPath: '/',
+            history: [],
+            dirs: []
+        });
+        const cloud115Transfer = reactive({
+            loading: false,
+            result: null,
+            recent: []
+        });
         let upload115PollingTimer = null;
+        let cloud115PollingTimer = null;
 
         const fetch115CleanupTasks = async () => {
             try {
@@ -228,6 +260,56 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 clearInterval(upload115PollingTimer);
                 upload115PollingTimer = null;
             }
+        };
+
+        const isCloud115TransferTerminal = (job) => ['success', 'partial', 'error', 'ok'].includes(String(job?.status || ''));
+
+        const rememberCloud115TransferJob = (job) => {
+            if (!job) return;
+            const jobId = job.job_id || `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            if (cloud115Transfer.recent.some(item => String(item.job_id || item.id) === String(jobId))) return;
+            cloud115Transfer.recent.unshift({ ...job, id: jobId });
+            cloud115Transfer.recent.splice(5);
+        };
+
+        const stopCloud115TransferPolling = () => {
+            if (cloud115PollingTimer) {
+                clearInterval(cloud115PollingTimer);
+                cloud115PollingTimer = null;
+            }
+        };
+
+        const fetchCloud115TransferJob = async (jobId, silent = true) => {
+            if (!jobId) return null;
+            try {
+                const res = await axios.get(`/api/drive115_upload/cloud/jobs/${jobId}`);
+                const job = res.data?.job || null;
+                if (!job) return null;
+                cloud115Transfer.result = job;
+                if (isCloud115TransferTerminal(job)) {
+                    cloud115Transfer.loading = false;
+                    stopCloud115TransferPolling();
+                    rememberCloud115TransferJob(job);
+                    if (!silent) {
+                        showToast(job.summary || job.message || '网盘资源秒传完成', job.status === 'error' ? 'error' : 'success');
+                    }
+                }
+                return job;
+            } catch (e) {
+                if (!silent) showToast('获取网盘秒传进度失败: ' + (e.response?.data?.detail || e.message), 'error');
+                return null;
+            }
+        };
+
+        const startCloud115TransferPolling = (jobId) => {
+            stopCloud115TransferPolling();
+            fetchCloud115TransferJob(jobId, true);
+            cloud115PollingTimer = setInterval(async () => {
+                const job = await fetchCloud115TransferJob(jobId, true);
+                if (job && isCloud115TransferTerminal(job)) {
+                    showToast(job.summary || job.message || '网盘资源秒传完成', job.status === 'error' ? 'error' : 'success');
+                }
+            }, 1500);
         };
 
         const reset115UploadForm = () => {
@@ -434,6 +516,228 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             showToast('已选择本地监听目录', 'success');
         };
 
+        const cloud115ItemKey = (item) => `${item?.type || 'file'}:${item?.id || item?.cid || item?.file_id || item?.name || ''}`;
+
+        const isCloud115ItemSelected = (item) => {
+            const key = cloud115ItemKey(item);
+            return cloud115Form.selected_items.some(selected => cloud115ItemKey(selected) === key);
+        };
+
+        const normalizeCloud115ItemForSelection = (item) => {
+            const name = item?.name || '';
+            const currentPath = cloud115SourceBrowser.currentPath === '/' ? '' : cloud115SourceBrowser.currentPath;
+            return {
+                type: item?.type || 'file',
+                id: String(item?.id || item?.cid || item?.file_id || ''),
+                cid: String(item?.cid || item?.id || ''),
+                file_id: String(item?.file_id || item?.id || ''),
+                name,
+                path: `${currentPath}/${name}`.replace(/\/+/g, '/'),
+                pickcode: item?.pickcode || '',
+                sha1: item?.sha1 || '',
+                size: Number(item?.size || 0)
+            };
+        };
+
+        const loadCloud115SourceDir = async (cid = '0', path = '/') => {
+            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源账号 CK', 'error');
+            cloud115SourceBrowser.loading = true;
+            try {
+                const res = await axios.post('/api/drive115_upload/cloud/browse', {
+                    cookie: cloud115Form.source_cookie,
+                    cid,
+                    include_files: true
+                });
+                if (res.data?.status !== 'ok') throw new Error(res.data?.message || '读取目录失败');
+                cloud115SourceBrowser.currentCid = String(cid || '0');
+                cloud115SourceBrowser.currentPath = path || '/';
+                cloud115SourceBrowser.dirs = (res.data.dirs || []).map(item => ({ ...item, type: 'dir' }));
+                cloud115SourceBrowser.files = (res.data.files || []).map(item => ({ ...item, type: 'file' }));
+            } catch (e) {
+                showToast('浏览来源网盘失败: ' + (e.message || e), 'error');
+            } finally {
+                cloud115SourceBrowser.loading = false;
+            }
+        };
+
+        const openCloud115SourceBrowser = () => {
+            if (cloud115SourceBrowser.visible) {
+                cloud115SourceBrowser.visible = false;
+                return;
+            }
+            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源账号 CK', 'error');
+            cloud115SourceBrowser.visible = true;
+            cloud115SourceBrowser.history.splice(0);
+            loadCloud115SourceDir('0', '/');
+        };
+
+        const selectCloud115SourceDir = (dir) => {
+            cloud115SourceBrowser.history.push({ cid: cloud115SourceBrowser.currentCid, path: cloud115SourceBrowser.currentPath });
+            const nextPath = cloud115SourceBrowser.currentPath === '/' ? `/${dir.name}` : `${cloud115SourceBrowser.currentPath}/${dir.name}`;
+            loadCloud115SourceDir(dir.cid || dir.id, nextPath);
+        };
+
+        const cloud115SourceUp = () => {
+            const prev = cloud115SourceBrowser.history.pop();
+            if (!prev) return;
+            loadCloud115SourceDir(prev.cid, prev.path);
+        };
+
+        const toggleCloud115SourceItem = (item) => {
+            const normalized = normalizeCloud115ItemForSelection(item);
+            if (!normalized.id) return;
+            const key = cloud115ItemKey(normalized);
+            const idx = cloud115Form.selected_items.findIndex(selected => cloud115ItemKey(selected) === key);
+            if (idx >= 0) {
+                cloud115Form.selected_items.splice(idx, 1);
+            } else {
+                cloud115Form.selected_items.push(normalized);
+            }
+        };
+
+        const removeCloud115SelectedItem = (item) => {
+            const key = cloud115ItemKey(item);
+            const idx = cloud115Form.selected_items.findIndex(selected => cloud115ItemKey(selected) === key);
+            if (idx >= 0) cloud115Form.selected_items.splice(idx, 1);
+        };
+
+        const clearCloud115SelectedItems = () => {
+            cloud115Form.selected_items.splice(0);
+        };
+
+        const loadCloud115TargetDir = async (cid = '0', path = '/') => {
+            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标账号 CK', 'error');
+            cloud115TargetBrowser.loading = true;
+            try {
+                const res = await axios.post('/api/drive115_upload/cloud/browse', {
+                    cookie: cloud115Form.target_cookie,
+                    cid,
+                    include_files: false
+                });
+                if (res.data?.status !== 'ok') throw new Error(res.data?.message || '读取目录失败');
+                cloud115TargetBrowser.currentCid = String(cid || '0');
+                cloud115TargetBrowser.currentPath = path || '/';
+                cloud115TargetBrowser.dirs = (res.data.dirs || []).map(item => ({ ...item, type: 'dir' }));
+            } catch (e) {
+                showToast('浏览目标网盘失败: ' + (e.message || e), 'error');
+            } finally {
+                cloud115TargetBrowser.loading = false;
+            }
+        };
+
+        const openCloud115TargetBrowser = () => {
+            if (cloud115TargetBrowser.visible) {
+                cloud115TargetBrowser.visible = false;
+                return;
+            }
+            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标账号 CK', 'error');
+            cloud115TargetBrowser.visible = true;
+            cloud115TargetBrowser.history.splice(0);
+            loadCloud115TargetDir('0', '/');
+        };
+
+        const selectCloud115TargetDir = (dir) => {
+            cloud115TargetBrowser.history.push({ cid: cloud115TargetBrowser.currentCid, path: cloud115TargetBrowser.currentPath });
+            const nextPath = cloud115TargetBrowser.currentPath === '/' ? `/${dir.name}` : `${cloud115TargetBrowser.currentPath}/${dir.name}`;
+            loadCloud115TargetDir(dir.cid || dir.id, nextPath);
+        };
+
+        const cloud115TargetUp = () => {
+            const prev = cloud115TargetBrowser.history.pop();
+            if (!prev) return;
+            loadCloud115TargetDir(prev.cid, prev.path);
+        };
+
+        const selectCurrentCloud115TargetFolder = () => {
+            if (!cloud115TargetBrowser.currentCid || cloud115TargetBrowser.currentCid === '0') return showToast('不能选择根目录', 'error');
+            const path = cloud115TargetBrowser.currentPath || cloud115TargetBrowser.currentCid;
+            const name = path.split('/').filter(Boolean).pop() || path;
+            cloud115Form.target_cid = cloud115TargetBrowser.currentCid;
+            cloud115Form.target_name = name;
+            cloud115Form.target_path = path;
+            cloud115TargetBrowser.visible = false;
+            showToast('已选择目标网盘目录', 'success');
+        };
+
+        const runCloud115RapidTransfer = async () => {
+            if (!cloud115Form.source_cookie.trim()) return showToast('请填写来源账号 CK', 'error');
+            if (!cloud115Form.target_cookie.trim()) return showToast('请填写目标账号 CK', 'error');
+            if (!cloud115Form.selected_items.length) return showToast('请选择需要秒传的文件或文件夹', 'error');
+            if (!cloud115Form.target_cid || cloud115Form.target_cid === '0') return showToast('请选择目标网盘目录', 'error');
+            const concurrency = Math.max(1, Math.min(10, parseInt(cloud115Form.concurrency || 1, 10) || 1));
+            cloud115Form.concurrency = concurrency;
+            const ok = await showConfirm(
+                '开始网盘资源秒传',
+                `将 ${cloud115Form.selected_items.length} 个文件/文件夹秒传到「${cloud115Form.target_path || cloud115Form.target_name}」，并发 ${concurrency}。确定继续吗？`,
+                'warning'
+            );
+            if (!ok) return;
+            cloud115Transfer.loading = true;
+            stopCloud115TransferPolling();
+            cloud115Transfer.result = {
+                status: 'queued',
+                stage: 'queued',
+                message: '任务已提交，等待开始',
+                selected_count: cloud115Form.selected_items.length,
+                total_files: 0,
+                processed: 0,
+                success: 0,
+                skipped: 0,
+                failed: 0,
+                folders: 0,
+                concurrency,
+                progress: 0,
+                results: []
+            };
+            try {
+                const payload = {
+                    source_cookie: cloud115Form.source_cookie,
+                    target_cookie: cloud115Form.target_cookie,
+                    target_cid: cloud115Form.target_cid,
+                    target_path: cloud115Form.target_path,
+                    concurrency,
+                    items: cloud115Form.selected_items
+                };
+                const res = await axios.post('/api/drive115_upload/cloud/rapid_transfer', payload);
+                const result = res.data?.job || res.data || {};
+                cloud115Transfer.result = result;
+                if (result.job_id && !isCloud115TransferTerminal(result)) {
+                    startCloud115TransferPolling(result.job_id);
+                    showToast('网盘资源秒传任务已开始', 'success');
+                } else {
+                    cloud115Transfer.loading = false;
+                    rememberCloud115TransferJob(result);
+                    showToast(result.summary || '网盘资源秒传完成', result.status === 'error' ? 'error' : 'success');
+                }
+            } catch (e) {
+                showToast('网盘资源秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
+                cloud115Transfer.loading = false;
+                stopCloud115TransferPolling();
+            }
+        };
+
+        const getCloud115TransferCount = (field) => Number(cloud115Transfer.result?.[field] || 0);
+
+        const getCloud115TransferPending = () => {
+            const total = getCloud115TransferCount('total_files');
+            const processed = getCloud115TransferCount('processed');
+            return Math.max(0, total - processed);
+        };
+
+        const getCloud115TransferProgress = () => Math.max(0, Math.min(100, Number(cloud115Transfer.result?.progress || 0)));
+
+        const getCloud115TransferStatusLabel = () => {
+            const status = String(cloud115Transfer.result?.status || '');
+            const stage = String(cloud115Transfer.result?.stage || '');
+            if (status === 'success' || status === 'ok') return '已完成';
+            if (status === 'partial') return '部分完成';
+            if (status === 'error') return '失败';
+            if (stage === 'scanning') return '扫描中';
+            if (stage === 'transferring') return '秒传中';
+            if (status === 'queued') return '排队中';
+            return cloud115Transfer.loading ? '处理中' : '未开始';
+        };
+
         const get115UploadTaskState = (taskId) => upload115Status.value?.tasks?.[taskId] || { queue_size: 0, active: [], recent: [], failed: [] };
 
         const format115UploadSize = (size) => {
@@ -481,10 +785,15 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         showCreate115Upload,
         upload115Browser,
         upload115LocalBrowser,
+        cloud115Form,
+        cloud115SourceBrowser,
+        cloud115TargetBrowser,
+        cloud115Transfer,
         fetch115UploadTasks,
         fetch115UploadStatus,
         start115UploadPolling,
         stop115UploadPolling,
+        stopCloud115TransferPolling,
         openCreate115Upload,
         reset115UploadForm,
         save115UploadTask,
@@ -502,6 +811,22 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         select115UploadLocalDir,
         upload115LocalUp,
         selectCurrent115UploadLocalFolder,
+        openCloud115SourceBrowser,
+        selectCloud115SourceDir,
+        cloud115SourceUp,
+        toggleCloud115SourceItem,
+        isCloud115ItemSelected,
+        removeCloud115SelectedItem,
+        clearCloud115SelectedItems,
+        openCloud115TargetBrowser,
+        selectCloud115TargetDir,
+        cloud115TargetUp,
+        selectCurrentCloud115TargetFolder,
+        runCloud115RapidTransfer,
+        getCloud115TransferCount,
+        getCloud115TransferPending,
+        getCloud115TransferProgress,
+        getCloud115TransferStatusLabel,
         get115UploadTaskState,
         format115UploadSize,
         get115UploadStageLabel,

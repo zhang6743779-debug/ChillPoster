@@ -3241,6 +3241,42 @@ button.upgrade-badge.muted:hover { color: var(--color-text-main); border-color: 
 .upload115-progress-bar { flex: 1; height: 6px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
 .upload115-progress-fill { height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.2s ease; }
 .upload115-progress-wrap > span { min-width: 42px; text-align: right; margin: 0; }
+.cloud115-rapid-card { margin-bottom: 40px; }
+.cloud115-cookie-input { min-height: 86px; resize: vertical; }
+.cloud115-option-row { display: grid; grid-template-columns: 80px 160px; align-items: center; gap: 10px; }
+.cloud115-option-row label { margin: 0; font-size: 13px; }
+.cloud115-option-row input { min-width: 0; }
+.cloud115-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.cloud115-selected-list { max-height: 260px; overflow-y: auto; padding-right: 2px; }
+.cloud115-selected-list .cleanup-folder-chip strong { display: flex; align-items: center; gap: 7px; }
+.cloud115-selected-list .fa-folder { color: #f59e0b; }
+.cloud115-selected-list .fa-file { color: #93c5fd; }
+.cleanup-browser-row.cloud115-browser-row { grid-template-columns: 18px 20px minmax(0, 1fr) 16px; }
+.cloud115-checkbox {
+    width: 16px !important;
+    min-height: 16px !important;
+    height: 16px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    accent-color: var(--accent);
+}
+.cloud115-browser-file-row .fa-file-video { color: #93c5fd; }
+.cloud115-browser-row span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud115-browser-row small { display: block; margin-top: 2px; color: var(--color-text-subtle); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud115-progress-panel { border-top: 1px solid var(--color-border); padding-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.cloud115-stat-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.cloud115-stat-card { border: 1px solid var(--color-border); border-radius: 8px; padding: 10px 12px; background: rgba(255,255,255,0.025); min-width: 0; }
+.cloud115-stat-card span { display: block; color: var(--color-text-muted); font-size: 11px; margin-bottom: 4px; }
+.cloud115-stat-card strong { display: block; color: var(--color-text-main); font-size: 20px; line-height: 1.15; }
+.cloud115-stat-success strong { color: #22c55e; }
+.cloud115-stat-skip strong { color: #f59e0b; }
+.cloud115-stat-failed strong { color: #ef4444; }
+.cloud115-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--color-text-muted); }
+.cloud115-progress-head strong { color: var(--color-text-main); min-width: 44px; text-align: right; }
+.cloud115-progress-bar { width: 100%; height: 8px; }
+.cloud115-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--color-text-subtle); font-size: 11px; }
+.cloud115-progress-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud115-record-row-skipped { border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.06); }
 .section-top-divider { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; }
 .inline-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .inline-label-row label { font-size: 13px; margin: 0; }
@@ -16820,6 +16856,8 @@ html[data-theme="light"] .network-connectivity-skeleton {
     .stats-grid-5,
     .stats-grid-3,
     .rapid-account-grid,
+    .cloud115-grid,
+    .cloud115-stat-grid,
     .rename-editor-layout,
     .translation-row,
     .mc-layout,
@@ -16844,6 +16882,7 @@ html[data-theme="light"] .network-connectivity-skeleton {
     .stats-grid-5 > *,
     .stats-grid-3 > *,
     .rapid-account-grid > *,
+    .cloud115-grid > *,
     .translation-row > * {
         min-width: 0 !important;
     }

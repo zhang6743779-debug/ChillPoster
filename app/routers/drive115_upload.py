@@ -45,6 +45,21 @@ class ScanPayload(BaseModel):
     force: bool = True
 
 
+class CloudBrowsePayload(BaseModel):
+    cookie: str
+    cid: str = "0"
+    include_files: bool = True
+
+
+class CloudRapidPayload(BaseModel):
+    source_cookie: str
+    target_cookie: str
+    target_cid: str
+    target_path: str = ""
+    concurrency: int = 1
+    items: list[dict[str, Any]]
+
+
 def _payload_dict(payload: BaseModel) -> dict[str, Any]:
     return payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
 
@@ -143,6 +158,34 @@ def browse_115(payload: Browse115Payload):
         return drive115_upload_service.browse_115(payload.cid, payload.drive_index)
     except Exception as e:
         return {"status": "error", "message": f"浏览失败: {e}", "dirs": []}
+
+
+@router.post("/cloud/browse")
+def browse_cloud_115(payload: CloudBrowsePayload):
+    try:
+        return drive115_upload_service.browse_cloud_115(
+            payload.cookie,
+            payload.cid,
+            include_files=payload.include_files,
+        )
+    except Exception as e:
+        return {"status": "error", "message": f"浏览失败: {e}", "dirs": [], "files": []}
+
+
+@router.post("/cloud/rapid_transfer")
+def rapid_transfer_cloud_115(payload: CloudRapidPayload):
+    try:
+        return drive115_upload_service.start_cloud_rapid_transfer(_payload_dict(payload))
+    except Exception as e:
+        _raise_for_error(e)
+
+
+@router.get("/cloud/jobs/{job_id}")
+def get_cloud_rapid_job(job_id: str):
+    try:
+        return {"status": "ok", "job": drive115_upload_service.get_cloud_rapid_job(job_id)}
+    except Exception as e:
+        _raise_for_error(e)
 
 
 @router.post("/browse_local")

@@ -35,7 +35,7 @@ from app.services.strm_service import (
 )
 from app.services.media_organize_115_ops import (
     _get_115_client, _get_115_fs, _list_115_tree_entries, _iter_115_media_entries_from_tree,
-    _rename_115_file, _rename_115_files_batch, _match_and_move_subtitles, _move_top_dir_to_failed, _move_failed_files_batch,
+    _rename_115_file, _rename_115_files_batch, _match_and_move_subtitles, _move_failed_files_batch,
     _move_matched_subtitles_to_target, _match_and_move_subtitles_batch, _ensure_115_dir_chain_cached,
     _collect_event_video_sha1s_for_cache, _mkdir_115_dir, _move_115_items, _run_115_write_request_sync,
     _get_115_direct_url, _get_115_direct_urls, run_115_read_request, run_115_read_request_sync, run_115_scan_request,
@@ -1807,6 +1807,22 @@ async def _run_organize_async(run_id: str, req):
         logger.info(f"[Wash] 洗版未通过文件批量移动完成: {moved_count}/{len(batch)}")
         return len(batch) - moved_count
 
+    async def _queue_pending_wash_reject_move(file_item_for_move: dict, *, reason: str = "洗版未通过"):
+        if not (wash_dir_cid and file_item_for_move):
+            return
+        pending_wash_reject_moves.append(file_item_for_move)
+        logger.debug(
+            f"[Wash] 已暂存{reason}文件，整理结束后批量移走: "
+            f"{file_item_for_move.get('name', '')}"
+        )
+        if len(pending_wash_reject_moves) >= _WASH_REJECT_FLUSH_BATCH_SIZE:
+            logger.info(
+                f"[Wash] 洗版未通过暂存达到阈值，提前批量移走: "
+                f"{len(pending_wash_reject_moves)} 条"
+            )
+            await _flush_pending_wash_reject_moves()
+            _raise_if_organize_cancelled(run_id)
+
     async def _flush_pending_failed_moves(*, move_top_dir: bool = True, target_label: str = "整理失败目录",
                                           progress_callback: Callable[[int, int], None] | None = None):
         nonlocal pending_failed_moves
@@ -2498,9 +2514,7 @@ async def _run_organize_async(run_id: str, req):
                             reason_text=_human_wash_reason(wash_reason),
                             decision_text="洗版未通过，已保留旧资源",
                         ))
-                        if wash_dir_cid:
-                            pending_wash_reject_moves.append(file_item)
-                            logger.debug(f"[Wash] 已暂存洗版未通过文件，整理结束后批量移走: {file_name}")
+                        await _queue_pending_wash_reject_move(file_item)
                         _processed = len(results)
                         _update_streaming_progress(
                             run_id,
@@ -2750,17 +2764,10 @@ async def _run_organize_async(run_id: str, req):
                                     media_type="tv",
                                     title=existing_name,
                                 )
-                                if wash_dir_cid:
-                                    await _move_top_dir_to_failed(
-                                        client,
-                                        existing_plan.get("vf") or {},
-                                        str(source_cid),
-                                        wash_dir_cid,
-                                        moved_dirs,
-                                        subtitles_by_parent=subtitles_by_parent,
-                                        move_top_dir=False,
-                                        target_label=wash_target_label,
-                                    )
+                                await _queue_pending_wash_reject_move(
+                                    existing_plan.get("vf") or {},
+                                    reason="同批次重复洗版未通过",
+                                )
                             else:
                                 logger.info(
                                     "[Wash] 同批次重复剧集命中，保留旧文件: 新文件：%s；旧文件：%s | 第%02d季第%02d集 | 原因：%s | 新文件大小：%.2fGB | 旧文件大小：%.2fGB",
@@ -2784,17 +2791,10 @@ async def _run_organize_async(run_id: str, req):
                                     media_type="tv",
                                     title=file_name,
                                 )
-                                if wash_dir_cid:
-                                    await _move_top_dir_to_failed(
-                                        client,
-                                        file_item,
-                                        str(source_cid),
-                                        wash_dir_cid,
-                                        moved_dirs,
-                                        subtitles_by_parent=subtitles_by_parent,
-                                        move_top_dir=False,
-                                        target_label=wash_target_label,
-                                    )
+                                await _queue_pending_wash_reject_move(
+                                    file_item,
+                                    reason="同批次重复洗版未通过",
+                                )
                                 continue
 
                         pending_tv_batches[batch_key]["items"].append(plan)

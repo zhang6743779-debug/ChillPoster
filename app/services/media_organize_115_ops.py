@@ -300,13 +300,30 @@ _DIRECT_URL_LOW_PRIORITY_GRACE_SECONDS = 0.15
 _WRITE_API_RATE_LOCK = threading.Lock()
 _LAST_WRITE_API_AT = 0.0
 _LAST_DIRECT_URL_AT = 0.0
+
+
+def _read_positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(f"[115] 环境变量 {name}={raw!r} 无效，使用默认值 {default:g}")
+        return default
+    if value <= 0:
+        logger.warning(f"[115] 环境变量 {name}={raw!r} 必须大于 0，使用默认值 {default:g}")
+        return default
+    return value
+
+
 _DIRECT_URL_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_TIMEOUT_MAX_RETRIES = 1
 _DIRECT_URL_QUEUE: "queue.PriorityQueue[tuple[int, int, str, Callable[[], Any], concurrent.futures.Future]]" = queue.PriorityQueue()
 _DIRECT_URL_SEQUENCE = itertools.count(1)
 _DIRECT_URL_WORKER_THREAD: Optional[threading.Thread] = None
 _DIRECT_URL_WORKER_LOCK = threading.Lock()
-_WRITE_REQUEST_TIMEOUT_SECONDS = 20
+_WRITE_REQUEST_TIMEOUT_SECONDS = _read_positive_float_env("CHILLPOSTER_115_WRITE_TIMEOUT_SECONDS", 120.0)
 _WRITE_API_RATE_LIMIT_MAX_RETRIES = 3
 _WRITE_API_RATE_LIMIT_BACKOFF_SECONDS = (5.0, 10.0, 20.0)
 _MOVE_PROGRESS_POLL_INTERVAL_SECONDS = 2.0
@@ -1423,7 +1440,6 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
         except Exception as e:
             logger.debug(f"[MediaOrganize] 移动进度回调失败: {e}")
 
-    fallback_file_ids = set()
     total_targets = len(ids_to_move)
     processed_targets = 0
     _emit_move_progress(0, total_targets)
@@ -1451,11 +1467,8 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
             )
             for target_id, _ in chunk:
                 for fi in items_by_target.get(target_id, []):
-                    file_id = str(fi.get("id") or fi.get("fid", ""))
-                    if file_id:
-                        fallback_file_ids.add(file_id)
                     await _move_top_dir_to_failed(client, fi, source_cid, failed_dir_cid, moved_dirs,
-                                                  subtitles_by_parent=subtitles_by_parent,
+                                                  subtitles_by_parent=None,
                                                   target_label=target_label,
                                                   move_top_dir=move_top_dir)
                 processed_targets += 1
@@ -1463,13 +1476,24 @@ async def _move_failed_files_batch(client, group_failed: list, source_cid: str,
                     _emit_move_progress(processed_targets, total_targets)
 
     if subtitles_by_parent:
+        subtitle_plans = []
         for fi in group_failed:
             file_id = str(fi.get("id") or fi.get("fid", ""))
-            if file_id in direct_file_ids and file_id in moved_dirs and file_id not in fallback_file_ids:
-                await _move_matched_subtitles_to_target(
-                    client, fi, subtitles_by_parent,
-                    target_cid=str(failed_dir_cid), target_path="",
-                )
+            if file_id in direct_file_ids and file_id in moved_dirs:
+                subtitle_plans.append({
+                    "video_id": file_id,
+                    "file_item": fi,
+                    "video_new_name": str(fi.get("name", "") or ""),
+                })
+        if subtitle_plans:
+            await _match_and_move_subtitles_batch(
+                client,
+                subtitle_plans,
+                subtitles_by_parent,
+                target_cid=str(failed_dir_cid),
+                target_path="",
+                preserve_subtitle_name=True,
+            )
 
 
 def _upload_file_to_115(client, local_path: str, target_cid: str, skip_move_check: bool = False) -> bool:

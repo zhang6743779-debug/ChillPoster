@@ -1559,6 +1559,170 @@
                                 </div>
                                 <div v-if="upload115Tasks.length === 0" class="empty-state-card">暂无 115 上传监听任务</div>
                             </div>
+
+                            <div class="module-card cloud115-rapid-card mt-20">
+                                <div class="mc-header">
+                                    <div class="mc-title"><i class="fa-solid fa-cloud-bolt"></i> 网盘资源秒传</div>
+                                    <div class="module-card-actions-split">
+                                        <button class="btn btn-ghost btn-sm" @click="clearCloud115SelectedItems" :disabled="cloud115Transfer.loading || cloud115Form.selected_items.length === 0">清空选择</button>
+                                        <button class="btn btn-primary btn-sm" @click="runCloud115RapidTransfer" :disabled="cloud115Transfer.loading">
+                                            <i class="fa-solid" :class="cloud115Transfer.loading ? 'fa-spinner fa-spin' : 'fa-bolt'"></i>
+                                            {{ cloud115Transfer.loading ? '秒传中...' : '开始秒传' }}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="mc-body">
+                                    <div class="form-grid-2-tight">
+                                        <div>
+                                            <label>来源账号 CK</label>
+                                            <textarea v-model="cloud115Form.source_cookie" class="mono-textarea cloud115-cookie-input" rows="3" placeholder="UID=...; CID=...; SEID=..."></textarea>
+                                        </div>
+                                        <div>
+                                            <label>目标账号 CK</label>
+                                            <textarea v-model="cloud115Form.target_cookie" class="mono-textarea cloud115-cookie-input" rows="3" placeholder="UID=...; CID=...; SEID=..."></textarea>
+                                        </div>
+                                    </div>
+                                    <div class="cloud115-option-row">
+                                        <label>并发数</label>
+                                        <input type="number" min="1" max="10" step="1" v-model.number="cloud115Form.concurrency" :disabled="cloud115Transfer.loading">
+                                    </div>
+
+                                    <div class="cloud115-grid">
+                                        <div class="cleanup-folder-section">
+                                            <div class="inline-label-row">
+                                                <label>来源文件/文件夹</label>
+                                                <button class="btn btn-ghost btn-sm" @click="openCloud115SourceBrowser">
+                                                    <i class="fa-solid" :class="cloud115SourceBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                    {{ cloud115SourceBrowser.visible ? '关闭浏览' : '浏览来源网盘' }}
+                                                </button>
+                                            </div>
+                                            <div v-if="cloud115Form.selected_items.length === 0" class="empty-state-card cleanup-empty">尚未选择来源资源</div>
+                                            <div v-else class="cleanup-folder-list cloud115-selected-list">
+                                                <div v-for="item in cloud115Form.selected_items" :key="`${item.type}:${item.id}`" class="cleanup-folder-chip">
+                                                    <div>
+                                                        <strong><i class="fa-solid" :class="item.type === 'dir' ? 'fa-folder' : 'fa-file'"></i> {{ item.path || item.name }}</strong>
+                                                        <span>{{ item.type === 'dir' ? '文件夹' : format115UploadSize(item.size) }}</span>
+                                                    </div>
+                                                    <button class="icon-btn danger" @click="removeCloud115SelectedItem(item)" :disabled="cloud115Transfer.loading"><i class="fa-solid fa-xmark"></i></button>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="cleanup-folder-section">
+                                            <div class="inline-label-row">
+                                                <label>目标网盘目录</label>
+                                                <button class="btn btn-ghost btn-sm" @click="openCloud115TargetBrowser">
+                                                    <i class="fa-solid" :class="cloud115TargetBrowser.visible ? 'fa-folder-closed' : 'fa-folder-open'"></i>
+                                                    {{ cloud115TargetBrowser.visible ? '关闭浏览' : '浏览目标网盘' }}
+                                                </button>
+                                            </div>
+                                            <div v-if="!cloud115Form.target_cid" class="empty-state-card cleanup-empty">尚未选择目标目录</div>
+                                            <div v-else class="cleanup-folder-list">
+                                                <div class="cleanup-folder-chip">
+                                                    <div>
+                                                        <strong>{{ cloud115Form.target_path || cloud115Form.target_name }}</strong>
+                                                        <span>CID: {{ cloud115Form.target_cid }}</span>
+                                                    </div>
+                                                    <button class="icon-btn danger" @click="cloud115Form.target_cid = ''; cloud115Form.target_name = ''; cloud115Form.target_path = ''" :disabled="cloud115Transfer.loading"><i class="fa-solid fa-xmark"></i></button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="cloud115-progress-panel">
+                                        <div class="upload115-section-title">传输统计</div>
+                                        <div class="cloud115-stat-grid">
+                                            <div class="cloud115-stat-card">
+                                                <span>总文件数</span>
+                                                <strong>{{ getCloud115TransferCount('total_files') }}</strong>
+                                            </div>
+                                            <div class="cloud115-stat-card">
+                                                <span>待处理</span>
+                                                <strong>{{ getCloud115TransferPending() }}</strong>
+                                            </div>
+                                            <div class="cloud115-stat-card cloud115-stat-success">
+                                                <span>成功</span>
+                                                <strong>{{ getCloud115TransferCount('success') }}</strong>
+                                            </div>
+                                            <div class="cloud115-stat-card cloud115-stat-skip">
+                                                <span>跳过</span>
+                                                <strong>{{ getCloud115TransferCount('skipped') }}</strong>
+                                            </div>
+                                            <div class="cloud115-stat-card cloud115-stat-failed">
+                                                <span>失败</span>
+                                                <strong>{{ getCloud115TransferCount('failed') }}</strong>
+                                            </div>
+                                        </div>
+                                        <div class="cloud115-progress-head">
+                                            <span>{{ getCloud115TransferStatusLabel() }}</span>
+                                            <strong>{{ getCloud115TransferProgress() }}%</strong>
+                                        </div>
+                                        <div class="upload115-progress-bar cloud115-progress-bar">
+                                            <div class="upload115-progress-fill" :style="{ width: `${getCloud115TransferProgress()}%` }"></div>
+                                        </div>
+                                        <div class="cloud115-progress-meta">
+                                            <span>{{ cloud115Transfer.result?.message || '等待任务开始' }}</span>
+                                            <span v-if="cloud115Transfer.result?.current">当前: {{ cloud115Transfer.result.current }}</span>
+                                            <span v-else-if="cloud115Transfer.result?.concurrency">并发: {{ cloud115Transfer.result.concurrency }}</span>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="cloud115SourceBrowser.visible" class="cleanup-browser">
+                                        <div class="cleanup-browser-header">
+                                            <button class="btn btn-ghost btn-sm" @click="cloud115SourceUp" :disabled="cloud115SourceBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ cloud115SourceBrowser.currentPath }}</span>
+                                            <button class="btn btn-ghost btn-sm" @click="cloud115SourceBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="cloud115SourceBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="cloud115SourceBrowser.dirs.length === 0 && cloud115SourceBrowser.files.length === 0" class="empty-state-card cleanup-empty">暂无内容</div>
+                                            <div v-else>
+                                                <div v-for="dir in cloud115SourceBrowser.dirs" :key="`dir:${dir.cid}`" class="cleanup-browser-row cloud115-browser-row" @click="selectCloud115SourceDir(dir)">
+                                                    <input class="cloud115-checkbox" type="checkbox" :checked="isCloud115ItemSelected(dir)" @click.stop @change.stop="toggleCloud115SourceItem(dir)">
+                                                    <i class="fa-solid fa-folder"></i>
+                                                    <span>{{ dir.name }}</span>
+                                                    <i class="fa-solid fa-chevron-right"></i>
+                                                </div>
+                                                <div v-for="file in cloud115SourceBrowser.files" :key="`file:${file.file_id || file.id}`" class="cleanup-browser-row cloud115-browser-row cloud115-browser-file-row" @click="toggleCloud115SourceItem(file)">
+                                                    <input class="cloud115-checkbox" type="checkbox" :checked="isCloud115ItemSelected(file)" @click.stop @change.stop="toggleCloud115SourceItem(file)">
+                                                    <i class="fa-solid fa-file-video"></i>
+                                                    <span>{{ file.name }}<small>{{ format115UploadSize(file.size) }}</small></span>
+                                                    <i class="fa-solid" :class="isCloud115ItemSelected(file) ? 'fa-circle-check' : 'fa-plus'"></i>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="cloud115TargetBrowser.visible" class="cleanup-browser">
+                                        <div class="cleanup-browser-header">
+                                            <button class="btn btn-ghost btn-sm" @click="cloud115TargetUp" :disabled="cloud115TargetBrowser.history.length === 0"><i class="fa-solid fa-arrow-up"></i> 上级</button>
+                                            <span>{{ cloud115TargetBrowser.currentPath }}</span>
+                                            <button class="btn btn-primary btn-sm" @click="selectCurrentCloud115TargetFolder" :disabled="cloud115TargetBrowser.currentCid === '0'">选择当前目录</button>
+                                            <button class="btn btn-ghost btn-sm" @click="cloud115TargetBrowser.visible = false"><i class="fa-solid fa-times"></i> 关闭</button>
+                                        </div>
+                                        <div class="cleanup-browser-list">
+                                            <div v-if="cloud115TargetBrowser.loading" class="empty-state-card cleanup-empty">加载中...</div>
+                                            <div v-else-if="cloud115TargetBrowser.dirs.length === 0" class="empty-state-card cleanup-empty">暂无子目录</div>
+                                            <div v-else v-for="dir in cloud115TargetBrowser.dirs" :key="dir.cid" class="cleanup-browser-row" @click="selectCloud115TargetDir(dir)">
+                                                <i class="fa-solid fa-folder"></i>
+                                                <span>{{ dir.name }}</span>
+                                                <i class="fa-solid fa-chevron-right"></i>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div v-if="cloud115Transfer.result && (cloud115Transfer.result.results || []).length" class="upload115-section">
+                                        <div class="upload115-section-title">最近一次结果：{{ cloud115Transfer.result.summary }}</div>
+                                        <div v-for="item in (cloud115Transfer.result.results || []).slice(0, 8)" :key="`${item.status}:${item.path}:${item.message}`" class="upload115-record-row" :class="{ 'upload115-record-row-failed': item.status === 'failed', 'cloud115-record-row-skipped': item.status === 'skipped' }">
+                                            <div>
+                                                <strong>{{ item.path || item.name }}</strong>
+                                                <span>{{ item.message }}<template v-if="item.size"> · {{ format115UploadSize(item.size) }}</template></span>
+                                            </div>
+                                        </div>
+                                        <div v-if="cloud115Transfer.result.truncated" class="text-muted-xs">结果较多，已显示前 200 条。</div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
