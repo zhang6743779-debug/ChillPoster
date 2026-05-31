@@ -1191,12 +1191,62 @@ AUXILIARY_CN_STEM_FULLMATCH_RE = re.compile(
     r"国语|原声)+$"
 )
 
+_AUXILIARY_MEDIA_DIR_LABELS = {
+    "特典", "特典映像", "特典影像", "映像特典",
+    "花絮", "幕后", "幕后花絮",
+    "分镜", "分镜头", "电影分镜",
+    "预告", "预告片", "访谈", "采访",
+    "制作特辑", "制作花絮",
+    "extra", "extras", "bonus", "bonuses", "bonusfeatures", "bonusvideo", "bonusvideos",
+    "featurette", "featurettes", "behindthescenes", "makingof",
+    "storyboard", "storyboards", "trailer", "trailers", "teaser", "teasers",
+    "interview", "interviews", "sample", "samples",
+}
+_AUXILIARY_MEDIA_FILE_KEYWORD_RE = re.compile(
+    r"(特典|花絮|幕后|分镜|分镜头|电影分镜|预告|预告片|访谈|采访|制作特辑|制作花絮|"
+    r"extra|extras|bonus|bonuses|featurette|featurettes|behindthescenes|makingof|"
+    r"storyboard|storyboards|trailer|trailers|teaser|teasers|interview|interviews|sample|samples)",
+    re.IGNORECASE,
+)
+
 
 NOISY_SHORT_WORDS = {'disc', 'cd', 'dvd', 'part', 'episode', 'ep', 'vol'}
 SEASON_DIR_PATTERN = re.compile(r'^(season\s*\d+|s\d+|第.{0,3}季|\d{1,2})$', re.IGNORECASE)
 CN_TRAILING_EPISODE_STEM_RE = re.compile(r'^(.{2,80}?)(\d{1,4})$')
 EPISODE_RANGE_DIR_RE = re.compile(r'^\s*(\d{1,4})\s*[-_~～—–至到]\s*(\d{1,4})\s*$')
 TV_CONTEXT_TEXT_RE = re.compile(r'(连续剧|連續劇|电视剧|電視劇|剧集|劇集|短剧|短劇|剧版|劇版|迷你剧|迷你劇)')
+
+
+def _normalize_auxiliary_label(text: str) -> str:
+    cleaned = _strip_tmdb_id_from_text(str(text or ""))
+    cleaned, _ = _strip_trailing_year_from_title(cleaned)
+    return _normalize_title_for_match(cleaned)
+
+
+def _is_auxiliary_media_dir_name(dir_name: str) -> bool:
+    return _normalize_auxiliary_label(dir_name) in _AUXILIARY_MEDIA_DIR_LABELS
+
+
+def _find_auxiliary_media_dir(file_path: str) -> str:
+    if not file_path:
+        return ""
+    try:
+        for parent in list(Path(file_path).parents)[:3]:
+            dir_name = parent.name
+            if dir_name and dir_name not in {"/", "."} and _is_auxiliary_media_dir_name(dir_name):
+                return dir_name
+    except Exception:
+        return ""
+    return ""
+
+
+def _is_auxiliary_media_file_title(title: str) -> bool:
+    normalized = _normalize_auxiliary_label(title)
+    if not normalized:
+        return False
+    if normalized in _AUXILIARY_MEDIA_DIR_LABELS:
+        return True
+    return bool(_AUXILIARY_MEDIA_FILE_KEYWORD_RE.search(normalized) and len(normalized) <= 24)
 
 
 def _should_use_parent_title_for_file_stem(stem: str, parent_dir_name: str, file_tmdbid: Optional[int], file_doubanid: Optional[str]) -> bool:
@@ -1709,6 +1759,22 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
 
     stem = Path(normalized_filename).stem if normalized_filename else ""
     parent_dir_name = os.path.basename(os.path.dirname(file_path)) if file_path else ""
+    file_level_tmdb_direct = file_meta.tmdbid or _extract_tmdb_id_from_text(filename)
+    auxiliary_dir_name = _find_auxiliary_media_dir(file_path)
+    _, _, file_title_for_aux_check = _select_titles_from_meta(file_meta)
+    if auxiliary_dir_name and not file_level_tmdb_direct:
+        file_title_is_auxiliary = (
+            _is_auxiliary_media_file_title(stem)
+            or _is_auxiliary_media_file_title(file_title_for_aux_check)
+        )
+        file_title_is_unclear = not _is_clear_file_title(file_title_for_aux_check)
+        if file_title_is_auxiliary or file_title_is_unclear:
+            if not quiet:
+                logger.info(
+                    f"[MediaIdentify] 辅助内容文件跳过识别: {filename} | 辅助目录:{auxiliary_dir_name}"
+                )
+            return None
+
     if _should_use_parent_title_for_file_stem(stem, parent_dir_name, file_meta.tmdbid, file_meta.doubanid):
         path_meta = _clone_meta_with_cleared_title(path_meta)
         if parent_dir_name:
@@ -1942,6 +2008,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     if file_path and parent_dir_name and parent_dir_name not in {"/", "."}:
         parent_meta = MetaInfo(_preprocess_dir_name(parent_dir_name))
         parent_title = parent_meta.cn_name or ""
+    parent_title_for_search = "" if _is_auxiliary_media_dir_name(parent_dir_name) else parent_title
     if prefer_file_title_on_dir_conflict:
         titles_to_try = _build_titles_to_try(title, cn_name, en_name, file_meta.en_name)
         fallback_dir_name = ""
@@ -1949,7 +2016,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             fallback_dir_name = parent_dir_name
         elif conflict_dir_tmdb_source == "grandparent" and file_path:
             fallback_dir_name = os.path.basename(os.path.dirname(os.path.dirname(file_path)))
-        if fallback_dir_name:
+        if fallback_dir_name and not _is_auxiliary_media_dir_name(fallback_dir_name):
             cleaned_fallback_dir = _strip_tmdb_id_from_text(fallback_dir_name)
             fallback_meta = MetaInfo(_preprocess_dir_name(cleaned_fallback_dir))
             fallback_cn, fallback_en, fallback_title = _select_titles_from_meta(fallback_meta)
@@ -1959,7 +2026,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             folder_fallback_year = fallback_meta.year
             folder_fallback_titles = _build_titles_to_try(cleaned_fallback_dir, fallback_title, fallback_cn, fallback_en)
     else:
-        titles_to_try = _build_titles_to_try(parent_title, title, cn_name, en_name, file_meta.en_name)
+        titles_to_try = _build_titles_to_try(parent_title_for_search, title, cn_name, en_name, file_meta.en_name)
 
     return {
         "filename": filename,
@@ -2087,6 +2154,24 @@ def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type:
                 if _tv_season_year_matches(media_type, season, year, tmdb_id, api_key):
                     res_title = result.get('title') if item_type == 'movie' else result.get('name')
                     logger.debug(f"{log_prefix} 标题季年份匹配: '{filename}' -> {res_title} S{season} ({year}) (ID: {tmdb_id})")
+                    return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
+
+            if (
+                media_type == "tv"
+                and not year_results
+                and len(exact_matches) == 1
+                and re.search(r'[一-鿿]', search_title)
+            ):
+                result = exact_matches[0]
+                tmdb_id = result.get('id')
+                res_title = result.get('name') or result.get('original_name') or ''
+                date_field = result.get('first_air_date')
+                res_year = str(date_field)[:4] if date_field else None
+                if _is_valid_tv_match(media_type, season, tmdb_id, api_key):
+                    logger.debug(
+                        f"{log_prefix} 剧集中文标题唯一匹配，忽略年份不符: "
+                        f"'{filename}' -> {res_title} ({res_year or '未知年份'} != {year}) (ID: {tmdb_id})"
+                    )
                     return {"tmdb_id": tmdb_id, "media_type": media_type, "title": res_title}
 
         for result in exact_matches:
@@ -2351,7 +2436,7 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 def _tmdb_search_cache_key(parsed: dict) -> str:
     payload = {
-        "v": 5,
+        "v": 6,
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],
