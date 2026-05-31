@@ -38,7 +38,6 @@ STATIC_NETWORK_TARGETS = [
     ("mgtv_api", "芒果 TV API", "https://pianku.api.mgtv.com", "发现源", "fa-solid fa-play", True),
     ("tencent_video_api", "腾讯视频 API", "https://pbaccess.video.qq.com", "发现源", "fa-solid fa-play", True),
     ("tencent_video_web", "腾讯视频网页", "https://v.qq.com", "发现源", "fa-solid fa-video", True),
-    ("hdhive", "HDHive", "https://hdhive.com", "影巢", "fa-solid fa-database", True),
     ("telegram_bot", "Telegram Bot API", "https://api.telegram.org", "通知", "fa-brands fa-telegram", True),
     ("telegram_account", "Telegram 账号授权", "https://my.telegram.org", "通知", "fa-brands fa-telegram", True),
     ("wechat_work", "企业微信 API", "https://qyapi.weixin.qq.com", "通知", "fa-brands fa-weixin", False),

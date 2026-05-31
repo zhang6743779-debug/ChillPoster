@@ -7,13 +7,27 @@ from urllib3.util.retry import Retry
 import json
 import time
 import concurrent.futures
-from utils import contains_chinese, normalize_name_for_matching
+import unicodedata
 from typing import Optional, List, Dict, Any, Callable
 import logging
 import config_manager
 import constants
 import threading
 logger = logging.getLogger(__name__)
+
+
+def contains_chinese(text):
+    if not text:
+        return False
+    return any('\u4e00' <= char <= '\u9fff' for char in str(text))
+
+
+def normalize_name_for_matching(name):
+    if not name:
+        return ""
+    nfkd_form = unicodedata.normalize('NFKD', str(name))
+    ascii_name = "".join(char for char in nfkd_form if not unicodedata.combining(char))
+    return ''.join(filter(str.isalnum, ascii_name.lower()))
 
 # ★★★ 自定义的重试类，用于输出更友好的日志 ★★★
 class LoggedRetry(Retry):

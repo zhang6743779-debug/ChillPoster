@@ -59,7 +59,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             target_cid: '',
             target_name: '',
             target_path: '',
-            concurrency: 1,
+            concurrency: 4,
             selected_items: []
         });
         const cloud115SourceBrowser = reactive({
@@ -262,7 +262,14 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             }
         };
 
-        const isCloud115TransferTerminal = (job) => ['success', 'partial', 'error', 'ok'].includes(String(job?.status || ''));
+        const isCloud115TransferTerminal = (job) => ['success', 'partial', 'error', 'ok', 'cancelled'].includes(String(job?.status || ''));
+
+        const getCloud115TransferToastType = (job) => {
+            const status = String(job?.status || '');
+            if (status === 'error') return 'error';
+            if (status === 'cancelled') return 'warning';
+            return 'success';
+        };
 
         const rememberCloud115TransferJob = (job) => {
             if (!job) return;
@@ -291,7 +298,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                     stopCloud115TransferPolling();
                     rememberCloud115TransferJob(job);
                     if (!silent) {
-                        showToast(job.summary || job.message || '网盘资源秒传完成', job.status === 'error' ? 'error' : 'success');
+                        showToast(job.summary || job.message || '网盘资源秒传完成', getCloud115TransferToastType(job));
                     }
                 }
                 return job;
@@ -307,7 +314,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             cloud115PollingTimer = setInterval(async () => {
                 const job = await fetchCloud115TransferJob(jobId, true);
                 if (job && isCloud115TransferTerminal(job)) {
-                    showToast(job.summary || job.message || '网盘资源秒传完成', job.status === 'error' ? 'error' : 'success');
+                    showToast(job.summary || job.message || '网盘资源秒传完成', getCloud115TransferToastType(job));
                 }
             }, 1500);
         };
@@ -664,7 +671,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             if (!cloud115Form.target_cookie.trim()) return showToast('请填写目标账号 CK', 'error');
             if (!cloud115Form.selected_items.length) return showToast('请选择需要秒传的文件或文件夹', 'error');
             if (!cloud115Form.target_cid || cloud115Form.target_cid === '0') return showToast('请选择目标网盘目录', 'error');
-            const concurrency = Math.max(1, Math.min(10, parseInt(cloud115Form.concurrency || 1, 10) || 1));
+            const concurrency = Math.max(1, Math.min(4, parseInt(cloud115Form.concurrency || 4, 10) || 4));
             cloud115Form.concurrency = concurrency;
             const ok = await showConfirm(
                 '开始网盘资源秒传',
@@ -707,12 +714,35 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 } else {
                     cloud115Transfer.loading = false;
                     rememberCloud115TransferJob(result);
-                    showToast(result.summary || '网盘资源秒传完成', result.status === 'error' ? 'error' : 'success');
+                    showToast(result.summary || '网盘资源秒传完成', getCloud115TransferToastType(result));
                 }
             } catch (e) {
                 showToast('网盘资源秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
                 cloud115Transfer.loading = false;
                 stopCloud115TransferPolling();
+            }
+        };
+
+        const cancelCloud115RapidTransfer = async () => {
+            const jobId = cloud115Transfer.result?.job_id;
+            if (!jobId) return showToast('当前没有可取消的秒传任务', 'warning');
+            const ok = await showConfirm('取消网盘资源秒传', '确定取消当前秒传任务吗？已完成的文件不会回滚。', 'warning');
+            if (!ok) return;
+            try {
+                const res = await axios.post(`/api/drive115_upload/cloud/jobs/${jobId}/cancel`);
+                const job = res.data?.job || null;
+                if (job) cloud115Transfer.result = job;
+                if (job && isCloud115TransferTerminal(job)) {
+                    cloud115Transfer.loading = false;
+                    stopCloud115TransferPolling();
+                    rememberCloud115TransferJob(job);
+                } else {
+                    cloud115Transfer.loading = true;
+                    startCloud115TransferPolling(jobId);
+                }
+                showToast('已请求取消网盘资源秒传', 'warning');
+            } catch (e) {
+                showToast('取消秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
             }
         };
 
@@ -726,13 +756,29 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
 
         const getCloud115TransferProgress = () => Math.max(0, Math.min(100, Number(cloud115Transfer.result?.progress || 0)));
 
+        const getCloud115TransferResults = () => {
+            return [...(cloud115Transfer.result?.results || [])].reverse();
+        };
+
+        const getCloud115TransferResultMeta = () => {
+            const count = (cloud115Transfer.result?.results || []).length;
+            if (!count) return '';
+            const suffix = cloud115Transfer.result?.truncated ? '，结果较多，当前保留前 200 条' : '';
+            return `已显示 ${count} 条结果（最新优先，失败会保留）${suffix}`;
+        };
+
         const getCloud115TransferStatusLabel = () => {
             const status = String(cloud115Transfer.result?.status || '');
             const stage = String(cloud115Transfer.result?.stage || '');
             if (status === 'success' || status === 'ok') return '已完成';
             if (status === 'partial') return '部分完成';
             if (status === 'error') return '失败';
+            if (status === 'cancelled' || stage === 'cancelled') return '已取消';
+            if (status === 'cancelling' || stage === 'cancelling') return '取消中';
+            if (stage === 'indexing') return '索引中';
             if (stage === 'scanning') return '扫描中';
+            if (stage === 'retrying') return '重试中';
+            if (stage === 'cooldown') return '封控冷却';
             if (stage === 'transferring') return '秒传中';
             if (status === 'queued') return '排队中';
             return cloud115Transfer.loading ? '处理中' : '未开始';
@@ -823,9 +869,12 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         cloud115TargetUp,
         selectCurrentCloud115TargetFolder,
         runCloud115RapidTransfer,
+        cancelCloud115RapidTransfer,
         getCloud115TransferCount,
         getCloud115TransferPending,
         getCloud115TransferProgress,
+        getCloud115TransferResults,
+        getCloud115TransferResultMeta,
         getCloud115TransferStatusLabel,
         get115UploadTaskState,
         format115UploadSize,

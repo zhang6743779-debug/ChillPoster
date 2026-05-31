@@ -18,7 +18,7 @@ ChillPoster 是一个以 Emby 为中心、深度适配 115 网盘使用场景的
 - 115 账号、302 网关与网盘资源
 - 资源转存、媒体整理、STRM 同步
 - RSS 真实库、独立真实库、缺集统计
-- MoviePilot、HDHive、Webhook、微信与 Telegram 联动
+- MoviePilot、Forward 爱影、Webhook、微信与 Telegram 联动
 - Docker 运维、系统健康、升级与计划任务
 
 ## 适合谁

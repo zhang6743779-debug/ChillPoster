@@ -56,7 +56,7 @@ class CloudRapidPayload(BaseModel):
     target_cookie: str
     target_cid: str
     target_path: str = ""
-    concurrency: int = 1
+    concurrency: int = 4
     items: list[dict[str, Any]]
 
 
@@ -184,6 +184,14 @@ def rapid_transfer_cloud_115(payload: CloudRapidPayload):
 def get_cloud_rapid_job(job_id: str):
     try:
         return {"status": "ok", "job": drive115_upload_service.get_cloud_rapid_job(job_id)}
+    except Exception as e:
+        _raise_for_error(e)
+
+
+@router.post("/cloud/jobs/{job_id}/cancel")
+def cancel_cloud_rapid_job(job_id: str):
+    try:
+        return {"status": "ok", "job": drive115_upload_service.cancel_cloud_rapid_job(job_id)}
     except Exception as e:
         _raise_for_error(e)
 

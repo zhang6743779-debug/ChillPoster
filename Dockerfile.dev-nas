@@ -53,7 +53,7 @@ if missing:
         *missing,
     ])
 PY
-COPY main.py client.py config_manager.py constants.py utils.py ./
+COPY main.py client.py config_manager.py constants.py ./
 COPY app ./app
 COPY core ./core
 COPY layouts ./layouts

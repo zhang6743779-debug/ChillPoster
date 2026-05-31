@@ -1,12 +1,16 @@
 export const dockItems = [
     { id: 'media_subscribe', icon: 'fa-compass', label: '发现推荐', group: '网盘一条龙' },
     { id: 'missing_episode_stats', icon: 'fa-list-check', label: '缺集统计', group: '网盘一条龙' },
+    { id: 'organize_history', icon: 'fa-clock-rotate-left', label: '整理记录', group: '网盘一条龙' },
 ];
+
+export const embyTasksDockItem = { id: 'emby_tasks', icon: 'fa-bolt-lightning', label: 'Emby任务中心', group: '工具箱' };
+export const dockerDockItem = { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' };
+export const utilityDockItems = [embyTasksDockItem, dockerDockItem];
 
 export const storageItems = [
     { id: 'resource_transfer', icon: 'fa-cloud-arrow-down', label: '资源转存', group: '网盘一条龙' },
     { id: 'media_organize', icon: 'fa-box-archive', label: '一条龙菜单', group: '网盘一条龙' },
-    { id: 'organize_history', icon: 'fa-clock-rotate-left', label: '整理记录', group: '网盘一条龙' },
     { id: 'rename_template', icon: 'fa-pen-fancy', label: '重命名模板', group: '网盘一条龙' },
     { id: 'media_organize_rules', icon: 'fa-sitemap', label: '二级分类', group: '网盘一条龙' },
 ];
@@ -23,15 +27,12 @@ export const coverItems = [
 
 export const toolboxItems = [
     { id: 'drive115_ck_tool', icon: 'fa-qrcode', label: '扫码获取115CK', group: '工具箱', action: 'open115CkTool' },
-    { id: 'emby_tasks', icon: 'fa-bolt-lightning', label: 'Emby任务中心', group: '工具箱' },
     { id: 'real_library', icon: 'fa-hard-drive', label: '独立真实库', group: '工具箱' },
     { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
-    { id: 'docker_manager', icon: 'fa-cubes', label: 'Docker管理', group: '工具箱' },
     { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
     { id: 'drive115_upload', icon: 'fa-cloud-arrow-up', label: '115秒传/上传', group: '工具箱' },
     { id: 'organize_monitor_dirs', icon: 'fa-folder-plus', label: '整理监控目录', group: '工具箱' },
-    { id: 'forward_hdhive', icon: 'fa-tower-broadcast', label: 'Forward模块', group: '工具箱' },
-    { id: 'config_yingchao', icon: 'fa-film', label: '影巢配置', group: '工具箱' },
+    { id: 'forward_aiying', icon: 'fa-tower-broadcast', label: 'Forward模块', group: '工具箱' },
     { id: 'webhook', icon: 'fa-bolt-lightning', label: 'Webhook', group: '工具箱' },
 ];
 
@@ -53,6 +54,7 @@ export const allSearchItems = [
     ...storageItems,
     ...coverItems,
     ...toolboxItems.filter(item => !item.action),
+    ...utilityDockItems,
     ...settingsItems,
 ];
 
@@ -72,7 +74,7 @@ export const allValidTabs = new Set([
     'drive115_cleanup',
     'drive115_upload',
     'organize_monitor_dirs',
-    'forward_hdhive',
+    'forward_aiying',
     'webhook',
     'media_subscribe',
     'missing_episode_stats',
@@ -85,7 +87,6 @@ export const allValidTabs = new Set([
     'config_115',
     'telegram_monitor',
     'config_notification',
-    'config_yingchao',
     'config_moviepilot',
     'config_proxy',
     'config_tmdb',

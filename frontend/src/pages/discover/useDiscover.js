@@ -2667,7 +2667,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const buildForwardResourcePayload = (item = {}) => {
-            const source = String(item.sourceKey || item.source || 'hdhive').trim().toLowerCase();
+            const source = String(item.sourceKey || item.source || 'aiying').trim().toLowerCase();
             const payload = {
                 source,
                 slug: item.slug || '',
@@ -2683,12 +2683,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const openForwardResource = async (item = {}) => {
             const transferId = String(item.id || item.url || item.title || Date.now());
             const payload = buildForwardResourcePayload(item);
-            if (payload.source === 'aiying' && !payload.resource_id) {
+            if (!payload.resource_id) {
                 showToast?.('该爱影资源缺少转存 ID，请重新搜索', 'warning');
-                return;
-            }
-            if (payload.source !== 'aiying' && !payload.slug) {
-                showToast?.('该影巢资源缺少转存标识，请重新搜索', 'warning');
                 return;
             }
             resourceSearchModal.transferringId = transferId;
@@ -2713,12 +2709,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
             const previewId = String(item.id || item.url || item.title || Date.now());
             const payload = buildForwardResourcePayload(item);
-            if (payload.source === 'aiying' && !payload.resource_id) {
+            if (!payload.resource_id) {
                 showToast?.('该爱影资源缺少预览 ID，请重新搜索', 'warning');
-                return;
-            }
-            if (payload.source !== 'aiying' && !payload.slug) {
-                showToast?.('该影巢资源缺少预览标识，请重新搜索', 'warning');
                 return;
             }
             resourceSearchModal.previewingId = previewId;
@@ -2757,7 +2749,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         } = {}) => {
             await loadResourceSearchSources(true);
             if (!resourceSearchSources.value.length) {
-                showToast?.('请先在 Forward 模块配置影巢或爱影资源源', 'warning');
+                showToast?.('请先在 Forward 模块配置爱影资源源', 'warning');
                 return;
             }
             if (!selectedResourceSearchSources.value.length) {

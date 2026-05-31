@@ -2844,35 +2844,35 @@ input:focus, select:focus, textarea:focus {
 .meta-row { font-size: 12px; color: #999; }
 .meta-row strong { color: white; font-weight: 500; }
 .meta-row-accent { color: var(--accent); }
-.forward-hdhive-page .module-card .meta-row {
+.forward-aiying-page .module-card .meta-row {
     color: rgba(71, 85, 105, 0.9);
 }
-.forward-hdhive-page .module-card .meta-row strong {
+.forward-aiying-page .module-card .meta-row strong {
     color: rgba(15, 23, 42, 0.78);
     font-weight: 600;
 }
-.forward-hdhive-page .module-card .mc-title,
-.forward-hdhive-page .module-card .status-pill {
+.forward-aiying-page .module-card .mc-title,
+.forward-aiying-page .module-card .status-pill {
     color: rgba(15, 23, 42, 0.92);
 }
-.forward-hdhive-page .stats-grid-mini {
+.forward-aiying-page .stats-grid-mini {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
 }
-.forward-hdhive-page .stat-mini-card {
+.forward-aiying-page .stat-mini-card {
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 10px 12px;
     background: rgba(255, 255, 255, 0.035);
     min-width: 0;
 }
-.forward-hdhive-page .stat-mini-label {
+.forward-aiying-page .stat-mini-label {
     font-size: 11px;
     color: var(--color-text-muted);
     margin-bottom: 5px;
 }
-.forward-hdhive-page .stat-mini-value {
+.forward-aiying-page .stat-mini-value {
     font-size: 16px;
     font-weight: 700;
     color: var(--color-text-main);
@@ -2880,7 +2880,7 @@ input:focus, select:focus, textarea:focus {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.forward-hdhive-page .stat-mini-value-small {
+.forward-aiying-page .stat-mini-value-small {
     font-size: 12px;
     font-weight: 600;
 }
@@ -2906,17 +2906,17 @@ input:focus, select:focus, textarea:focus {
     gap: 8px;
     flex-wrap: wrap;
 }
-.forward-hdhive-save-actions {
+.forward-aiying-save-actions {
     display: flex;
     justify-content: flex-end;
     margin-top: 16px;
 }
 @media (max-width: 900px) {
-    .forward-hdhive-page .stats-grid-mini {
+    .forward-aiying-page .stats-grid-mini {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
-html[data-theme="light"] .forward-hdhive-page .stat-mini-card {
+html[data-theme="light"] .forward-aiying-page .stat-mini-card {
     border-color: rgba(148, 163, 184, 0.28);
     background: rgba(255, 255, 255, 0.48);
 }
@@ -3276,6 +3276,8 @@ button.upgrade-badge.muted:hover { color: var(--color-text-main); border-color: 
 .cloud115-progress-bar { width: 100%; height: 8px; }
 .cloud115-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--color-text-subtle); font-size: 11px; }
 .cloud115-progress-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud115-result-list { max-height: 560px; overflow-y: auto; padding-right: 3px; display: flex; flex-direction: column; gap: 8px; }
+.cloud115-result-list .upload115-record-row { align-items: flex-start; }
 .cloud115-record-row-skipped { border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.06); }
 .section-top-divider { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; }
 .inline-label-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
@@ -9104,10 +9106,6 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     background: rgba(255,255,255,0.035);
     padding: 14px;
 }
-.resource-search-item.source-hdhive {
-    background: linear-gradient(90deg, rgba(14, 165, 233, 0.12), rgba(255,255,255,0.035) 48%);
-    border-color: rgba(56, 189, 248, 0.22);
-}
 .resource-search-item.source-aiying {
     background: linear-gradient(90deg, rgba(139, 92, 246, 0.14), rgba(255,255,255,0.035) 48%);
     border-color: rgba(167, 139, 250, 0.24);
@@ -9146,10 +9144,6 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
 .resource-search-item-tags .resource-search-source-tag {
     background: rgba(139,92,246,0.18);
     color: #c4b5fd;
-}
-.resource-search-item.source-hdhive .resource-search-source-tag {
-    background: rgba(14, 165, 233, 0.18);
-    color: #7dd3fc;
 }
 .resource-search-item.source-aiying .resource-search-source-tag {
     background: rgba(139, 92, 246, 0.22);
@@ -13447,19 +13441,9 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
         background: rgba(15, 23, 42, 0.04);
     }
 
-    html[data-theme="light"] .resource-search-item.source-hdhive {
-        background: linear-gradient(90deg, rgba(14, 165, 233, 0.12), rgba(15, 23, 42, 0.035) 52%);
-        border-color: rgba(14, 165, 233, 0.22);
-    }
-
     html[data-theme="light"] .resource-search-item.source-aiying {
         background: linear-gradient(90deg, rgba(139, 92, 246, 0.13), rgba(15, 23, 42, 0.035) 52%);
         border-color: rgba(139, 92, 246, 0.22);
-    }
-
-    html[data-theme="light"] .resource-search-item.source-hdhive .resource-search-source-tag {
-        background: rgba(14, 165, 233, 0.16);
-        color: #0369a1;
     }
 
     html[data-theme="light"] .resource-search-item.source-aiying .resource-search-source-tag {
@@ -16449,13 +16433,13 @@ html[data-theme="light"] .network-connectivity-skeleton {
         justify-content: center;
     }
 
-    .forward-hdhive-save-actions {
+    .forward-aiying-save-actions {
         margin-top: 14px;
         padding: 0 2px;
         justify-content: flex-end;
     }
 
-    .forward-hdhive-save-actions .btn {
+    .forward-aiying-save-actions .btn {
         min-width: 128px;
         flex: 0 0 auto;
     }
@@ -20413,9 +20397,7 @@ html[data-theme="light"] .docker-log-view {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68) !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page > .content-shell > .card,
-html[data-theme="light"] .hdhive-config-page > .content-shell > .card,
-html[data-theme="light"] .hdhive-config-page .module-card {
+html[data-theme="light"] .forward-aiying-page > .content-shell > .card {
     border-color: rgba(71, 85, 105, 0.20) !important;
     background:
         linear-gradient(145deg, rgba(238, 244, 250, 0.34), rgba(183, 199, 216, 0.50)),
@@ -20423,22 +20405,19 @@ html[data-theme="light"] .hdhive-config-page .module-card {
     box-shadow: 0 14px 30px rgba(51, 65, 85, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.34) !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page > .content-shell > .card:hover,
-html[data-theme="light"] .hdhive-config-page .module-card:hover {
+html[data-theme="light"] .forward-aiying-page > .content-shell > .card:hover {
     border-color: rgba(71, 85, 105, 0.26) !important;
     background:
         linear-gradient(145deg, rgba(241, 247, 252, 0.38), rgba(178, 195, 213, 0.54)),
         var(--ui-card-bg-hover) !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page .card-header,
-html[data-theme="light"] .hdhive-config-page .card-header,
-html[data-theme="light"] .hdhive-config-page .mc-header {
+html[data-theme="light"] .forward-aiying-page .card-header {
     border-color: rgba(71, 85, 105, 0.14) !important;
     background: rgba(198, 212, 226, 0.54) !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page .stat-mini-card {
+html[data-theme="light"] .forward-aiying-page .stat-mini-card {
     border-color: rgba(71, 85, 105, 0.16) !important;
     background:
         linear-gradient(145deg, rgba(239, 245, 250, 0.46), rgba(198, 211, 224, 0.48)),
@@ -20446,11 +20425,11 @@ html[data-theme="light"] .forward-hdhive-page .stat-mini-card {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38) !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page .stat-mini-label {
+html[data-theme="light"] .forward-aiying-page .stat-mini-label {
     color: #526174 !important;
 }
 
-html[data-theme="light"] .forward-hdhive-page .stat-mini-value {
+html[data-theme="light"] .forward-aiying-page .stat-mini-value {
     color: #111827 !important;
 }
 
@@ -20607,13 +20586,6 @@ html[data-theme="light"] .missing-episode-resource-list .resource-search-item {
         var(--ui-input-bg) !important;
     border-color: rgba(71, 85, 105, 0.18) !important;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.44) !important;
-}
-
-html[data-theme="light"] .missing-episode-resource-list .resource-search-item.source-hdhive {
-    background:
-        linear-gradient(90deg, rgba(125, 211, 252, 0.22), rgba(211, 223, 236, 0.52) 58%),
-        var(--ui-input-bg) !important;
-    border-color: rgba(14, 165, 233, 0.28) !important;
 }
 
 html[data-theme="light"] .missing-episode-resource-list .resource-search-item.source-aiying {

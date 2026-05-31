@@ -193,12 +193,6 @@ LOG_CATEGORY_KEYWORDS = {
         "调度",
         "scheduler",
     ),
-    "HDHIVE": (
-        "[HDHive]",
-        "HDHive",
-        "影巢",
-        "赌狗签到",
-    ),
     "DOCKER_UPGRADE": (
         "[DockerManager]",
         "[Upgrade]",

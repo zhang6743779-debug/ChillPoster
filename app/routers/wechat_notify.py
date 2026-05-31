@@ -52,7 +52,7 @@ NOTIFICATION_TYPES = {
     },
     "checkin": {
         "name": "签到通知",
-        "description": "影巢签到完成时发送通知",
+        "description": "签到完成时发送通知",
         "icon": "✅"
     },
     "task_complete": {

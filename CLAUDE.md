@@ -15,8 +15,8 @@ Primary entry points:
 
 ## Architecture map
 
-- `app/routers/` contains FastAPI route modules. `main.py` includes these routers for auth, server configuration, tasks, RSS, 302/gateway config, HDHive, notifications, discovery, MoviePilot integration, resource transfer, STRM, and media organization.
-- `app/services/` contains stateful service logic used by routers: 115 drive access, task scheduling, RSS, HDHive, notifications, TMDB poster lookup, transfer, STRM, and media organization helpers.
+- `app/routers/` contains FastAPI route modules. `main.py` includes these routers for auth, server configuration, tasks, RSS, 302/gateway config, notifications, discovery, MoviePilot integration, resource transfer, STRM, Forward, and media organization.
+- `app/services/` contains stateful service logic used by routers: 115 drive access, task scheduling, RSS, notifications, TMDB poster lookup, transfer, STRM, Forward, and media organization helpers.
 - `core/` contains shared lower-level utilities and clients, including config loading, logging, Emby/TMDB/Douban helpers, media metadata parsing, organizer logic, and 115 life-event monitoring.
 - `config/` stores local runtime configuration and logs. Most JSON files are intentionally ignored by Git; `config/media_organize_category_rules.json` is the tracked default rule file.
 - `fonts/`, `layouts/`, and `templates/` are user-facing assets used by poster/template generation. `defaults/` contains default copies for Docker startup restore behavior.

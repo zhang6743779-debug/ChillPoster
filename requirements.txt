@@ -14,9 +14,6 @@ Telethon
 PySocks               # Telegram MTProto 代理支持
 python-socks[asyncio] # Telethon 异步代理支持
 pycryptodome          # 微信消息加解密
-playwright            # 浏览器自动化 (影巢签到)
-orjson                # HDHive Playwright 客户端 RSC 解析
-slippers-proxy        # SOCKS5 认证代理转接 (按需)
 
 # === 115 网盘核心 (扫出来的) ===
 p115client

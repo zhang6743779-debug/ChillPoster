@@ -113,11 +113,6 @@ export function useConsoleLogs({ showToast }) {
             keywords: ['[Scheduler]', '[Tasks]', '[Task]', '定时任务', '任务', 'cron', 'Cron', '已装载任务', '执行任务', '自动封面', '调度', 'scheduler'],
         },
         {
-            value: 'HDHIVE',
-            label: 'HDHive',
-            keywords: ['[HDHive]', 'HDHive', '影巢', '赌狗签到'],
-        },
-        {
             value: 'DOCKER_UPGRADE',
             label: 'Docker升级',
             keywords: ['[DockerManager]', '[Upgrade]', '[UpgradeHelper]', 'Docker', 'docker', '容器', '镜像', '升级', '更新容器', '回滚'],

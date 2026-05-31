@@ -42,7 +42,7 @@ NOTIFICATION_TYPES = {
     },
     "checkin": {
         "name": "签到通知",
-        "description": "影巢签到完成时发送通知",
+        "description": "签到完成时发送通知",
         "icon": "✅"
     },
     "task_complete": {
@@ -812,7 +812,7 @@ class WechatNotifyService:
             points_text = "-"
 
         # 构建卡片标题和描述
-        title = f"{status_emoji} 影巢签到"
+        title = f"{status_emoji} 签到通知"
         description = f"""账号：{account_name}
 状态：{status_text}
 获得：{points_text}

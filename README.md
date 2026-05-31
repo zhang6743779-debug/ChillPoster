@@ -44,7 +44,7 @@ ChillPoster 支持 RSS 真实库、独立真实库与定时任务。适合把订
 
 ### 通知与外部联动
 
-支持微信、Telegram、Webhook、MoviePilot 配置与影巢相关能力。后台任务、签到、整理结果、聚合剧集入库等事件可以推送到常用通知渠道。
+支持微信、Telegram、Webhook、MoviePilot 与 Forward 爱影资源联动。后台任务、签到、整理结果、聚合剧集入库等事件可以推送到常用通知渠道。
 
 ### 运维与升级
 
@@ -122,7 +122,7 @@ python main.py
 - Backend: Python, FastAPI, Uvicorn, APScheduler
 - Frontend: Vue, Vite
 - Runtime: Docker, NAS, Linux/macOS local development
-- Integrations: Emby, 115, TMDB, MoviePilot, HDHive, WeChat, Telegram, Webhook
+- Integrations: Emby, 115, TMDB, MoviePilot, Aiying, WeChat, Telegram, Webhook
 
 ## 版本与发布
 

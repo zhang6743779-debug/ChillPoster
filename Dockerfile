@@ -262,7 +262,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /protected/requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=300 -r requirements.txt
-RUN playwright install --with-deps chromium
 
 COPY --from=builder /protected/ .
 COPY --from=frontend /protected-static/ static/

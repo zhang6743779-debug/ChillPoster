@@ -1046,7 +1046,7 @@ class TelegramNotifyService:
             status_text = "签到失败"
             points_text = "-"
 
-        title = f"{status_emoji} 影巢签到"
+        title = f"{status_emoji} 签到通知"
         description = f"""账号：{account_name}
 状态：{status_text}
 获得：{points_text}

@@ -46,7 +46,6 @@ from app.routers import resources
 from app.routers import rss
 from app.routers import config_302
 from app.routers import gateway
-from app.routers import hdhive
 from app.routers import wechat_notify
 from app.routers import discover
 from app.routers import moviepilot
@@ -58,7 +57,7 @@ from app.routers import docker_manager
 from app.routers import drive115_cleanup
 from app.routers import drive115_upload
 from app.routers import system_health
-from app.routers import forward_hdhive
+from app.routers import forward_aiying
 from app.routers import real_library
 from app.routers import organize_history
 from app.routers import emby_tasks
@@ -75,7 +74,6 @@ from core.logger import logger, register_log_line_publisher
 # === 【核心修复点】路径修正：增加 app. 前缀 ===
 from app.services.task_service import task_service_instance
 from app.services.rss_service import rss_service_instance
-from app.services.hdhive_service import hdhive_service
 from app.services.telegram_service import telegram_notify_service
 from app.services.drive115_upload_service import drive115_upload_service
 from app.services.real_library_service import real_library_service_instance
@@ -248,7 +246,6 @@ async def lifespan_ui(app: FastAPI):
     task_service_instance.load_active_jobs()
     rss_service_instance.load_active_jobs()
     real_library_service_instance.load_active_jobs()
-    hdhive_service.setup_scheduler(task_service_instance.scheduler)
     docker_manager.schedule_auto_update_job(task_service_instance.scheduler)
     docker_manager.schedule_scheduled_restart_jobs(task_service_instance.scheduler)
     drive115_upload_service.start()
@@ -397,7 +394,6 @@ app.include_router(webhook.router)
 app.include_router(resources.router)
 app.include_router(rss.router)
 app.include_router(config_302.router)
-app.include_router(hdhive.router)
 app.include_router(wechat_notify.router)
 app.include_router(discover.router)
 app.include_router(moviepilot.router)
@@ -409,7 +405,7 @@ app.include_router(docker_manager.router)
 app.include_router(drive115_cleanup.router)
 app.include_router(drive115_upload.router)
 app.include_router(system_health.router)
-app.include_router(forward_hdhive.router)
+app.include_router(forward_aiying.router)
 app.include_router(real_library.router)
 app.include_router(organize_history.router)
 app.include_router(emby_tasks.router)

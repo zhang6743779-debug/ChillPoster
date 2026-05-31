@@ -30,7 +30,7 @@ config/app.log.3
 
 1. UI 操作时间
 2. 后台任务 run id
-3. 对应模块关键词，例如 `MediaOrganize`、`Gateway`、`RSS`、`STRM`、`HDHive`
+3. 对应模块关键词，例如 `MediaOrganize`、`Gateway`、`RSS`、`STRM`、`Forward爱影`
 
 ## 任务状态
 

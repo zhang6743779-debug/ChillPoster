@@ -76,7 +76,7 @@
                     <div class="nav-item" :class="{active: tab === 'webhook'}" @click="tab = 'webhook'">
                         <i class="fa-solid fa-bolt-lightning"></i> Webhook
                     </div>
-                    <div class="nav-item" :class="{active: tab === 'forward_hdhive'}" @click="tab = 'forward_hdhive'">
+                    <div class="nav-item" :class="{active: tab === 'forward_aiying'}" @click="tab = 'forward_aiying'">
                         <i class="fa-solid fa-tower-broadcast"></i> Forward模块
                     </div>
 
@@ -111,9 +111,6 @@
                     </div>
                     <div class="nav-item" :class="{active: tab === 'config_notification'}" @click="tab = 'config_notification'">
                         <i class="fa-solid fa-bell"></i> 通知配置
-                    </div>
-                    <div class="nav-item" :class="{active: tab === 'config_yingchao'}" @click="tab = 'config_yingchao'">
-                        <i class="fa-solid fa-film"></i> 影巢配置
                     </div>
                     <div class="nav-item" :class="{active: tab === 'config_moviepilot'}" @click="tab = 'config_moviepilot'">
                         <i class="fa-solid fa-plane"></i> MoviePilot 配置
@@ -1565,6 +1562,10 @@
                                     <div class="mc-title"><i class="fa-solid fa-cloud-bolt"></i> 网盘资源秒传</div>
                                     <div class="module-card-actions-split">
                                         <button class="btn btn-ghost btn-sm" @click="clearCloud115SelectedItems" :disabled="cloud115Transfer.loading || cloud115Form.selected_items.length === 0">清空选择</button>
+                                        <button v-if="cloud115Transfer.loading && cloud115Transfer.result?.job_id" class="btn btn-danger btn-sm" @click="cancelCloud115RapidTransfer">
+                                            <i class="fa-solid fa-stop"></i>
+                                            取消秒传
+                                        </button>
                                         <button class="btn btn-primary btn-sm" @click="runCloud115RapidTransfer" :disabled="cloud115Transfer.loading">
                                             <i class="fa-solid" :class="cloud115Transfer.loading ? 'fa-spinner fa-spin' : 'fa-bolt'"></i>
                                             {{ cloud115Transfer.loading ? '秒传中...' : '开始秒传' }}
@@ -1584,7 +1585,7 @@
                                     </div>
                                     <div class="cloud115-option-row">
                                         <label>并发数</label>
-                                        <input type="number" min="1" max="10" step="1" v-model.number="cloud115Form.concurrency" :disabled="cloud115Transfer.loading">
+                                        <input type="number" min="1" max="4" step="1" v-model.number="cloud115Form.concurrency" :disabled="cloud115Transfer.loading">
                                     </div>
 
                                     <div class="cloud115-grid">
@@ -1713,13 +1714,15 @@
 
                                     <div v-if="cloud115Transfer.result && (cloud115Transfer.result.results || []).length" class="upload115-section">
                                         <div class="upload115-section-title">最近一次结果：{{ cloud115Transfer.result.summary }}</div>
-                                        <div v-for="item in (cloud115Transfer.result.results || []).slice(0, 8)" :key="`${item.status}:${item.path}:${item.message}`" class="upload115-record-row" :class="{ 'upload115-record-row-failed': item.status === 'failed', 'cloud115-record-row-skipped': item.status === 'skipped' }">
-                                            <div>
-                                                <strong>{{ item.path || item.name }}</strong>
-                                                <span>{{ item.message }}<template v-if="item.size"> · {{ format115UploadSize(item.size) }}</template></span>
+                                        <div class="cloud115-result-list">
+                                            <div v-for="(item, idx) in getCloud115TransferResults()" :key="`${idx}:${item.status}:${item.path}:${item.message}`" class="upload115-record-row" :class="{ 'upload115-record-row-failed': item.status === 'failed', 'cloud115-record-row-skipped': item.status === 'skipped' }">
+                                                <div>
+                                                    <strong>{{ item.path || item.name }}</strong>
+                                                    <span>{{ item.message }}<template v-if="item.size"> · {{ format115UploadSize(item.size) }}</template></span>
+                                                </div>
                                             </div>
                                         </div>
-                                        <div v-if="cloud115Transfer.result.truncated" class="text-muted-xs">结果较多，已显示前 200 条。</div>
+                                        <div class="text-muted-xs">{{ getCloud115TransferResultMeta() }}</div>
                                     </div>
                                 </div>
                             </div>
@@ -1930,7 +1933,7 @@
                                                 </button>
                                             </template>
                                             <div v-else class="mp-resource-source-empty">
-                                                请先在 Forward 模块配置影巢或爱影
+                                                请先在 Forward 模块配置爱影
                                             </div>
                                         </div>
                                     </div>
@@ -4775,7 +4778,7 @@
                             </div><!-- end notify 2col grid -->
                         </div>
                     </div>
-                    <div v-else-if="tab === 'forward_hdhive'" key="forward_hdhive" class="scroll-view forward-hdhive-page">
+                    <div v-else-if="tab === 'forward_aiying'" key="forward_aiying" class="scroll-view forward-aiying-page">
                         <div class="content-shell shell-lg">
                             <div class="server-toolbar mb-20">
                                 <h2><i class="fa-solid fa-tower-broadcast icon-brand-blue"></i> Forward模块</h2>
@@ -4785,7 +4788,7 @@
                                 <i class="fa-solid fa-circle-info"></i>
                                 <div class="info-content">
                                     <div class="info-alert-box-title">模块工作流</div>
-                                    Forward 打开影视详情时调用此模块查询影巢/爱影资源；用户真正点击播放时才解锁或转存资源，并通过 ChillPoster 获取 115 直链播放。
+                                    Forward 打开影视详情时调用此模块查询爱影资源；用户真正点击播放时才转存资源，并通过 ChillPoster 获取 115 直链播放。
                                 </div>
                             </div>
 
@@ -4794,7 +4797,7 @@
                                     <div class="card-title-l"><i class="fa-solid fa-gears"></i> 模块全局设置</div>
                                     <div class="module-card-actions-split">
                                         <label class="ios-switch" title="启用 Forward 模块">
-                                            <input type="checkbox" v-model="forwardHdhiveConfig.enabled">
+                                            <input type="checkbox" v-model="forwardAiyingConfig.enabled">
                                             <span class="ios-slider"></span>
                                         </label>
                                     </div>
@@ -4802,11 +4805,11 @@
                                 <div class="card-body">
                                     <label>模块地址</label>
                                     <div class="form-row-tight form-row-inline-icons">
-                                        <input class="form-row-grow" type="text" v-model="forwardHdhiveConfig.widget_url" readonly>
-                                        <button class="icon-btn icon-btn-amber" @click="refreshForwardHdhiveToken" :disabled="forwardHdhiveSaving" title="刷新 Token">
+                                        <input class="form-row-grow" type="text" v-model="forwardAiyingConfig.widget_url" readonly>
+                                        <button class="icon-btn icon-btn-amber" @click="refreshForwardAiyingToken" :disabled="forwardAiyingSaving" title="刷新 Token">
                                             <i class="fa-solid fa-rotate"></i>
                                         </button>
-                                        <button class="icon-btn icon-btn-blue" @click="copyForwardHdhiveWidgetUrl" title="复制">
+                                        <button class="icon-btn icon-btn-blue" @click="copyForwardAiyingWidgetUrl" title="复制">
                                             <i class="fa-solid fa-copy"></i>
                                         </button>
                                     </div>
@@ -4815,7 +4818,7 @@
                                     <div class="mt-15">
                                         <div>
                                             <label>公网访问地址</label>
-                                            <input type="text" v-model="forwardHdhiveConfig.public_base_url" placeholder="例如 https://poster.example.com">
+                                            <input type="text" v-model="forwardAiyingConfig.public_base_url" placeholder="例如 https://poster.example.com">
                                             <div class="input-tip">填写后模块地址会自动更新；留空时按当前访问地址生成。</div>
                                         </div>
                                     </div>
@@ -4823,7 +4826,7 @@
                                     <div class="form-grid-2-tight mt-15">
                                         <div>
                                             <label>是否入库</label>
-                                            <select v-model="forwardHdhiveConfig.library_enabled">
+                                            <select v-model="forwardAiyingConfig.library_enabled">
                                                 <option :value="true">开启：转存到转存目录</option>
                                                 <option :value="false">关闭：转存到秒传目录</option>
                                             </select>
@@ -4831,7 +4834,7 @@
                                         </div>
                                         <div>
                                             <label>转存模式</label>
-                                            <select v-model="forwardHdhiveConfig.transfer_mode">
+                                            <select v-model="forwardAiyingConfig.transfer_mode">
                                                 <option value="series">转存整部剧/整个资源</option>
                                                 <option value="episode">只转存当前单集</option>
                                             </select>
@@ -4843,37 +4846,9 @@
 
                             <div class="card mb-20">
                                 <div class="card-header">
-                                    <div class="card-title-l"><i class="fa-solid fa-sliders"></i> 影巢资源</div>
-                                    <label class="ios-switch" title="启用影巢资源源">
-                                        <input type="checkbox" v-model="forwardHdhiveConfig.hdhive_enabled">
-                                        <span class="ios-slider"></span>
-                                    </label>
-                                </div>
-                                <div class="card-body">
-                                    <div class="form-grid-2-tight">
-                                        <div>
-                                            <label>影巢账号</label>
-                                            <select v-model="forwardHdhiveConfig.account_id">
-                                                <option value="">自动选择已授权账号</option>
-                                                <option v-for="account in forwardHdhiveConfig.accounts" :key="account.id" :value="account.id" :disabled="!account.has_openapi_authorization">
-                                                    {{ account.name }} {{ account.has_openapi_authorization ? '' : '(未授权 OpenAPI)' }}
-                                                </option>
-                                            </select>
-                                        </div>
-                                        <div>
-                                            <label>最高解锁积分</label>
-                                            <input type="number" min="0" step="1" v-model.number="forwardHdhiveConfig.max_unlock_points">
-                                            <div class="input-tip">资源查询和点播都会二次校验，超过此积分的资源不会返回，也不会被解锁。</div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="card mb-20">
-                                <div class="card-header">
                                     <div class="card-title-l"><i class="fa-solid fa-clapperboard"></i> 爱影资源</div>
                                     <label class="ios-switch" title="启用爱影资源源">
-                                        <input type="checkbox" v-model="forwardHdhiveConfig.aiying_enabled">
+                                        <input type="checkbox" v-model="forwardAiyingConfig.aiying_enabled">
                                         <span class="ios-slider"></span>
                                     </label>
                                 </div>
@@ -4881,43 +4856,43 @@
                                     <div class="form-grid-2-tight">
                                         <div>
                                             <label>TG ID</label>
-                                            <input type="text" v-model="forwardHdhiveConfig.aiying_tg_id" :placeholder="forwardHdhiveConfig.telegram_user_id ? '已检测到后台 Telegram ID，可自动填充' : '请输入 TG ID'">
+                                            <input type="text" v-model="forwardAiyingConfig.aiying_tg_id" :placeholder="forwardAiyingConfig.telegram_user_id ? '已检测到后台 Telegram ID，可自动填充' : '请输入 TG ID'">
                                             <div class="input-tip">后台 Telegram 已登录时会自动填充；也可以手动覆盖。</div>
                                         </div>
                                         <div>
                                             <label>爱影 Token</label>
-                                            <input type="password" v-model="forwardHdhiveConfig.aiying_chill_token" placeholder="AY_CHILL...">
+                                            <input type="password" v-model="forwardAiyingConfig.aiying_chill_token" placeholder="AY_CHILL...">
                                             <div class="input-tip">爱影 Token 在 TG 机器人输入 /chilltoken 获取；接口限频 6/min、500/day，ChillPoster 会按查询缓存减少重复调用。</div>
                                         </div>
                                     </div>
                                     <div class="form-grid-2-tight mt-15">
                                         <div>
                                             <label>请求频率</label>
-                                            <input type="number" :value="forwardHdhiveConfig.aiying_rate_limit_per_minute || 6" disabled>
+                                            <input type="number" :value="forwardAiyingConfig.aiying_rate_limit_per_minute || 6" disabled>
                                             <div class="input-tip">单位：次/分钟。当前按爱影接口限制固定展示，暂不支持修改。</div>
                                         </div>
                                         <div>
                                             <label>单日请求次数上限</label>
-                                            <input type="number" :value="forwardHdhiveConfig.aiying_daily_limit || 500" disabled>
+                                            <input type="number" :value="forwardAiyingConfig.aiying_daily_limit || 500" disabled>
                                             <div class="input-tip">单位：次/天。当前按爱影接口限制固定展示，暂不支持修改。</div>
                                         </div>
                                     </div>
                                     <div class="stats-grid-mini mt-15">
                                         <div class="stat-mini-card">
                                             <div class="stat-mini-label">当日调用</div>
-                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_today_used || 0 }}</div>
+                                            <div class="stat-mini-value">{{ forwardAiyingConfig.aiying_today_used || 0 }}</div>
                                         </div>
                                         <div class="stat-mini-card">
                                             <div class="stat-mini-label">剩余调用</div>
-                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_last_times ?? '-' }}</div>
+                                            <div class="stat-mini-value">{{ forwardAiyingConfig.aiying_last_times ?? '-' }}</div>
                                         </div>
                                         <div class="stat-mini-card">
                                             <div class="stat-mini-label">总调用数</div>
-                                            <div class="stat-mini-value">{{ forwardHdhiveConfig.aiying_success_count || 0 }}</div>
+                                            <div class="stat-mini-value">{{ forwardAiyingConfig.aiying_success_count || 0 }}</div>
                                         </div>
                                         <div class="stat-mini-card">
                                             <div class="stat-mini-label">更新时间</div>
-                                            <div class="stat-mini-value stat-mini-value-small">{{ forwardHdhiveConfig.aiying_last_checked_at || '-' }}</div>
+                                            <div class="stat-mini-value stat-mini-value-small">{{ forwardAiyingConfig.aiying_last_checked_at || '-' }}</div>
                                         </div>
                                     </div>
                                 </div>
@@ -4926,51 +4901,33 @@
                             <div class="card">
                                 <div class="card-header">
                                     <div class="card-title-l"><i class="fa-solid fa-vial"></i> 资源查询测试</div>
-                                    <button class="btn btn-secondary btn-sm" @click="testForwardHdhiveResources" :disabled="forwardHdhiveTesting">
-                                        <i class="fa-solid" :class="forwardHdhiveTesting ? 'fa-spinner fa-spin' : 'fa-search'"></i> 测试查询
+                                    <button class="btn btn-secondary btn-sm" @click="testForwardAiyingResources" :disabled="forwardAiyingTesting">
+                                        <i class="fa-solid" :class="forwardAiyingTesting ? 'fa-spinner fa-spin' : 'fa-search'"></i> 测试查询
                                     </button>
                                 </div>
                                 <div class="card-body">
                                     <div class="form-grid-2-tight">
                                         <div>
                                             <label>类型</label>
-                                            <select v-model="forwardHdhiveTestForm.type">
+                                            <select v-model="forwardAiyingTestForm.type">
                                                 <option value="movie">电影</option>
                                                 <option value="tv">电视剧</option>
                                             </select>
                                         </div>
                                         <div>
                                             <label>TMDB ID</label>
-                                            <input type="text" v-model="forwardHdhiveTestForm.tmdb_id" placeholder="例如 550">
+                                            <input type="text" v-model="forwardAiyingTestForm.tmdb_id" placeholder="例如 550">
                                         </div>
                                     </div>
                                     <div class="meta-row mt-15">
                                         <strong>结果:</strong>
-                                        影巢 {{ forwardHdhiveTestResult.filtered }}/{{ forwardHdhiveTestResult.total }} 条，爱影 {{ forwardHdhiveTestResult.aiying_filtered }}/{{ forwardHdhiveTestResult.aiying_total }} 条
+                                        爱影 {{ forwardAiyingTestResult.aiying_filtered }}/{{ forwardAiyingTestResult.aiying_total }} 条
                                     </div>
-                                    <div v-if="forwardHdhiveTestResult.errors && Object.keys(forwardHdhiveTestResult.errors).length" class="input-tip mt-10">
-                                        <span v-if="forwardHdhiveTestResult.errors.hdhive">影巢：{{ forwardHdhiveTestResult.errors.hdhive }}</span>
-                                        <span v-if="forwardHdhiveTestResult.errors.aiying" class="ml-10">爱影：{{ forwardHdhiveTestResult.errors.aiying }}</span>
+                                    <div v-if="forwardAiyingTestResult.errors && Object.keys(forwardAiyingTestResult.errors).length" class="input-tip mt-10">
+                                        <span v-if="forwardAiyingTestResult.errors.aiying">爱影：{{ forwardAiyingTestResult.errors.aiying }}</span>
                                     </div>
-                                    <div v-if="forwardHdhiveTestResult.items.length" class="server-grid-layout server-grid-layout-single mt-15">
-                                        <div v-for="item in forwardHdhiveTestResult.items" :key="item.slug" class="module-card">
-                                            <div class="mc-header">
-                                                <div class="mc-title">
-                                                    <i class="fa-solid fa-film"></i>
-                                                    {{ item.title || item.slug }}
-                                                </div>
-                                                <span class="status-pill">{{ item.unlock_points || 0 }} 积分</span>
-                                            </div>
-                                            <div class="mc-body mc-body-compact">
-                                                <div class="meta-row"><strong>大小:</strong> {{ item.share_size || '-' }}</div>
-                                                <div class="meta-row"><strong>分辨率:</strong> {{ (item.video_resolution || []).join(' / ') || '-' }}</div>
-                                                <div class="meta-row"><strong>来源:</strong> {{ (item.source || []).join(' / ') || '-' }}</div>
-                                                <div class="meta-row"><strong>字幕:</strong> {{ (item.subtitle_language || []).concat(item.subtitle_type || []).join(' / ') || '-' }}</div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div v-if="forwardHdhiveTestResult.aiying_items.length" class="server-grid-layout server-grid-layout-single mt-15">
-                                        <div v-for="item in forwardHdhiveTestResult.aiying_items" :key="item.link || item.name" class="module-card">
+                                    <div v-if="forwardAiyingTestResult.aiying_items.length" class="server-grid-layout server-grid-layout-single mt-15">
+                                        <div v-for="item in forwardAiyingTestResult.aiying_items" :key="item.link || item.name" class="module-card">
                                             <div class="mc-header">
                                                 <div class="mc-title">
                                                     <i class="fa-solid fa-clapperboard"></i>
@@ -4986,248 +4943,16 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div v-if="!forwardHdhiveTestResult.items.length && !forwardHdhiveTestResult.aiying_items.length" class="empty-state-card mt-15">
+                                    <div v-if="!forwardAiyingTestResult.aiying_items.length" class="empty-state-card mt-15">
                                         <i class="fa-solid fa-magnifying-glass placeholder-icon"></i>
                                         <div>暂无测试结果</div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="forward-hdhive-save-actions">
-                                <button class="btn btn-primary" @click="saveForwardHdhiveConfig" :disabled="forwardHdhiveSaving">
-                                    <i class="fa-solid" :class="forwardHdhiveSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
+                            <div class="forward-aiying-save-actions">
+                                <button class="btn btn-primary" @click="saveForwardAiyingConfig" :disabled="forwardAiyingSaving">
+                                    <i class="fa-solid" :class="forwardAiyingSaving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
                                 </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div v-else-if="tab === 'config_yingchao'" key="config_yingchao" class="scroll-view hdhive-config-page">
-                        <div class="content-shell shell-lg">
-                            <div class="server-toolbar mb-20">
-                                <h2><i class="fa-solid fa-film icon-brand-bell"></i> 影巢配置</h2>
-                                <button class="btn btn-primary btn-sm" @click="addHdhiveAccount"><i class="fa-solid fa-plus"></i> 添加账号</button>
-                            </div>
-
-                            <div class="card">
-                                <div class="card-header">
-                                    <div class="card-title-l"><i class="fa-solid fa-users"></i> 影巢账号管理</div>
-                                    <button class="btn btn-ghost btn-sm" @click="checkinAllHdhive" :disabled="hdhiveChecking">
-                                        <i class="fa-solid fa-check-double"></i> 全部签到
-                                    </button>
-                                </div>
-
-                                <div v-if="hdhiveConfig.accounts.length === 0" class="empty-state-card">
-                                    <i class="fa-solid fa-user-plus placeholder-icon"></i>
-                                    <div>暂无账号，点击上方"添加账号"开始配置</div>
-                                </div>
-
-                                <div v-else class="server-grid-layout server-grid-layout-single">
-                                    <div v-for="(account, idx) in hdhiveConfig.accounts" :key="account.id" class="module-card">
-                                        <div class="mc-header expandable-header" @click="account.expanded = !account.expanded">
-                                            <div class="mc-title">
-                                                <i class="fa-solid expand-icon" :class="account.expanded ? 'fa-chevron-down' : 'fa-chevron-right'"></i>
-                                                <i class="fa-solid fa-user"></i> {{ account.name || '未命名账号' }}
-                                                <span v-if="account.status === 'ok'" class="status-inline ok">
-                                                    <i class="fa-solid fa-circle-check"></i> 正常
-                                                </span>
-                                                <span v-else-if="account.status === 'error'" class="status-inline error">
-                                                    <i class="fa-solid fa-circle-xmark"></i> 异常
-                                                </span>
-                                            </div>
-                                            <div class="module-card-actions-split" @click.stop>
-                                                <label class="ios-switch" :title="account.checkin_type !== 'none' ? '已开启自动签到' : '自动签到已关闭'">
-                                                    <input type="checkbox" :checked="account.checkin_type !== 'none'" @change="toggleHdhiveCheckin(account.id, $event.target.checked)">
-                                                    <span class="ios-slider"></span>
-                                                </label>
-                                                <div class="module-card-divider"></div>
-                                                <button class="icon-btn icon-btn-blue" @click="testHdhiveAccount(account.id)" :disabled="account.testing" title="测试连接">
-                                                    <i class="fa-solid" :class="account.testing ? 'fa-spinner fa-spin' : 'fa-plug'"></i>
-                                                </button>
-                                                <button class="icon-btn icon-btn-green" @click="checkinHdhive(account.id)" :disabled="account.checking" title="立即签到">
-                                                    <i class="fa-solid" :class="account.checking ? 'fa-spinner fa-spin' : 'fa-check'"></i>
-                                                </button>
-                                                <button class="icon-btn danger" @click="removeHdhiveAccount(account.id)" title="删除">
-                                                    <i class="fa-solid fa-trash"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                        <div class="mc-body">
-                                            <div v-show="account.expanded">
-                                                <div class="form-grid-2-tight">
-                                                    <div>
-                                                        <label>账号名称</label>
-                                                        <input type="text" v-model="account.name" placeholder="用户名/邮箱">
-                                                    </div>
-                                                    <div>
-                                                        <label>密码</label>
-                                                        <div class="form-row-tight">
-                                                            <input :type="account.showPassword ? 'text' : 'password'" v-model="account.password" placeholder="可选，仅用于站内签到兜底" class="form-row-grow">
-                                                            <button class="icon-btn" @click="account.showPassword = !account.showPassword" :class="account.showPassword ? 'btn-accent-ghost' : 'icon-action-hidden'">
-                                                                <i class="fa-solid" :class="account.showPassword ? 'fa-eye-slash' : 'fa-eye'"></i>
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div class="section-top-divider">
-                                                    <div class="inline-label-row">
-                                                        <label>OpenAPI 应用授权</label>
-                                                        <div class="pill-group">
-                                                            <button class="pill-btn pill-btn-accent-green" :class="{ active: !!account.openapi_access_token }" @click="authorizeHdhiveOpenApi(account.id)" :disabled="account.authorizingOpenApi">
-                                                                <i class="fa-solid" :class="account.authorizingOpenApi ? 'fa-spinner fa-spin' : 'fa-arrow-up-right-from-square'"></i>
-                                                                {{ account.openapi_access_token ? '重新授权' : '授权账号' }}
-                                                            </button>
-                                                            <button class="pill-btn" @click="refreshHdhiveOpenApiToken(account.id)" :disabled="account.refreshingOpenApi || !account.openapi_refresh_token">
-                                                                <i class="fa-solid" :class="account.refreshingOpenApi ? 'fa-spinner fa-spin' : 'fa-rotate'"></i> 刷新授权
-                                                            </button>
-                                                            <button class="pill-btn" @click="refreshHdhiveUsage(account.id)" :disabled="account.refreshingUsage">
-                                                                <i class="fa-solid" :class="account.refreshingUsage ? 'fa-spinner fa-spin' : 'fa-chart-pie'"></i> 获取用量
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                    <div class="mt-15">
-                                                        <label>回调地址 <span class="text-muted-2xs">(需与影巢应用配置一致，留空会自动生成)</span></label>
-                                                        <input type="text" v-model="account.openapi_redirect_uri" placeholder="https://你的域名/api/hdhive/openapi/callback">
-                                                    </div>
-                                                    <div v-if="account.openapi_authorized_at || account.openapi_scope" class="text-muted-xs mt-10">
-                                                        授权时间: <strong>{{ account.openapi_authorized_at || '-' }}</strong>
-                                                        <span class="ml-10">Scope: <strong>{{ account.openapi_scope || '-' }}</strong></span>
-                                                    </div>
-                                                </div>
-
-                                                <div class="section-top-divider">
-                                                    <div v-show="account.checkin_type !== 'none'" class="inline-label-row">
-                                                        <label>签到类型</label>
-                                                        <div class="pill-group">
-                                                            <button class="pill-btn pill-btn-accent-green" :class="{ active: account.checkin_type === 'normal' }" @click="account.checkin_type = 'normal'">
-                                                                <i class="fa-solid fa-check"></i> 普通签到
-                                                            </button>
-                                                            <button class="pill-btn pill-btn-accent-purple" :class="{ active: account.checkin_type === 'gambler' }" @click="account.checkin_type = 'gambler'">
-                                                                <i class="fa-solid fa-dice"></i> 赌狗签到
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                    <div v-show="account.checkin_type !== 'none'" class="form-grid-2-tight items-end">
-                                                        <div>
-                                                            <label class="text-muted-xs">签到时间 (Cron)</label>
-                                                            <input type="text" v-model="account.checkin_cron" placeholder="1 0 * * *">
-                                                        </div>
-                                                        <div class="text-muted-xs"></div>
-                                                    </div>
-                                                </div>
-
-                                                <div class="form-actions-right">
-                                                    <button class="btn btn-primary btn-sm" @click="saveHdhiveAccount(account.id)" :disabled="account.saving">
-                                                        <i class="fa-solid" :class="account.saving ? 'fa-spinner fa-spin' : 'fa-save'"></i> 保存配置
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            <div v-if="account.user_info" class="account-info-card">
-                                                <div class="account-info-head">
-                                                    <div class="account-profile">
-                                                        <div v-if="account.user_info.avatar_url" class="account-avatar">
-                                                            <img :src="account.user_info.avatar_url">
-                                                        </div>
-                                                        <div v-else class="account-avatar-fallback">
-                                                            {{ (account.user_info.nickname || account.user_info.username || '?')[0].toUpperCase() }}
-                                                        </div>
-                                                        <div>
-                                                            <div class="account-name">{{ account.user_info.nickname || '未设置昵称' }}</div>
-                                                            <div class="account-meta">
-                                                                ID: {{ account.user_info.id || '-' }}
-                                                                <span v-if="account.user_info.created_at" class="ml-10">
-                                                                    注册于 {{ account.user_info.created_at.substring(0, 10) }}
-                                                                </span>
-                                                            </div>
-                                                            <div v-if="account.user_info.last_active_at" class="account-submeta">
-                                                                最后活跃: {{ account.user_info.last_active_at.substring(0, 16).replace('T', ' ') }}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <div class="account-badge-list">
-                                                        <span v-if="account.user_info.telegram_user" class="account-badge account-badge-telegram">
-                                                            <i class="fa-brands fa-telegram"></i> TG
-                                                        </span>
-                                                        <span v-if="account.user_info.is_activate" class="account-badge account-badge-activated">已激活</span>
-                                                        <span v-if="account.user_info.is_vip" class="account-badge account-badge-vip">
-                                                            VIP
-                                                            <span v-if="account.user_info.vip_expiration_date" class="account-badge-subtle">({{ account.user_info.vip_expiration_date.substring(0, 10) }})</span>
-                                                        </span>
-                                                        <span v-if="account.user_info.is_admin" class="account-badge account-badge-admin">管理员</span>
-                                                        <button class="icon-btn icon-btn-blue" @click="refreshHdhiveUserInfo(account.id)" :disabled="account.refreshingInfo" title="刷新用户信息">
-                                                            <i class="fa-solid" :class="account.refreshingInfo ? 'fa-spinner fa-spin' : 'fa-refresh'"></i>
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                                <div class="account-last-checkin">
-                                                    上次签到: <strong>{{ account.last_checkin || '从未签到' }}</strong>
-                                                </div>
-                                                <div class="stats-grid-5">
-                                                    <div class="stat-tile">
-                                                        <div class="stat-value-lg stat-value-accent">{{ account.user_info.points || 0 }}</div>
-                                                        <div class="stat-label-xs">总积分</div>
-                                                    </div>
-                                                    <div class="stat-tile">
-                                                        <div class="stat-value-lg stat-value-green">{{ account.user_info.signin_days_total || 0 }}</div>
-                                                        <div class="stat-label-xs">总签到</div>
-                                                    </div>
-                                                    <div class="stat-tile">
-                                                        <div class="stat-value-lg stat-value-white">{{ account.checkin_count || 0 }}</div>
-                                                        <div class="stat-label-xs">累计签到</div>
-                                                    </div>
-                                                    <div class="stat-tile">
-                                                        <div class="stat-value-lg stat-value-amber">{{ account.checkin_points || 0 }}</div>
-                                                        <div class="stat-label-xs">累计签到积分</div>
-                                                    </div>
-                                                    <div class="stat-tile">
-                                                        <div class="stat-value-lg stat-value-white">{{ account.user_info.share_num || 0 }}</div>
-                                                        <div class="stat-label-xs">分享</div>
-                                                    </div>
-                                                </div>
-
-                                                <div v-if="account.usage" class="usage-section">
-                                                    <div class="usage-head">
-                                                        <span class="usage-head-label"><i class="fa-solid fa-chart-bar"></i> API 用量</span>
-                                                        <span v-if="account.user_info.notification_method" class="text-muted-2xs">
-                                                            通知: {{ account.user_info.notification_method }}
-                                                        </span>
-                                                    </div>
-                                                    <div class="stats-grid-3">
-                                                        <div class="stat-tile">
-                                                            <div class="stat-value-md stat-value-blue">{{ account.usage.quota || 0 }}</div>
-                                                            <div class="stat-label-2xs">配额</div>
-                                                        </div>
-                                                        <div class="stat-tile">
-                                                            <div class="stat-value-md stat-value-amber">{{ account.usage.used || 0 }}</div>
-                                                            <div class="stat-label-2xs">已用</div>
-                                                        </div>
-                                                        <div class="stat-tile">
-                                                            <div class="stat-value-md stat-value-green">{{ account.usage.today_used || 0 }}</div>
-                                                            <div class="stat-label-2xs">今日</div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div v-else class="empty-state-action">
-                                                <button class="btn btn-ghost btn-sm" @click="refreshHdhiveUserInfo(account.id)" :disabled="account.refreshingInfo">
-                                                    <i class="fa-solid" :class="account.refreshingInfo ? 'fa-spinner fa-spin' : 'fa-sync'"></i>
-                                                    {{ account.refreshingInfo ? '获取中...' : '获取账号信息' }}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="info-stack mt-20">
-                                <div class="info-alert-box">
-                                    <i class="fa-solid fa-circle-info"></i>
-                                    <div class="info-content">
-                                        <div class="info-alert-box-title">使用说明</div>
-                                        1. <b>OpenAPI 应用</b>：点击授权账号即可完成影巢授权，授权会请求 meta/query/unlock/write。<br>
-                                        2. <b>搜索与播放</b>：影巢资源查询和 Forward 解锁播放都需要完成 OpenAPI 授权。<br>
-                                        3. <b>API 签到</b>：授权包含 write 后，普通签到和赌狗签到都会优先使用 OpenAPI。
-                                    </div>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -5306,7 +5031,7 @@
                                     <div class="form-group">
                                         <label>HTTP 代理 (Proxy URL)</label>
                                         <input type="text" v-model="globalConfig.proxy_url" placeholder="http://127.0.0.1:7890 (留空则直连)">
-                                        <div class="input-tip">用于 TMDb API、影巢等外部服务的网络代理</div>
+                                        <div class="input-tip">用于 TMDb API 等外部服务的网络代理</div>
                                     </div>
                                 </div>
                             </div>
@@ -6271,11 +5996,11 @@
                             <span>搜索资源中...</span>
                         </div>
                         <div v-else-if="resourceSearchModal.items.length" class="resource-search-list missing-episode-resource-list">
-                            <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item" :class="item.sourceKey === 'aiying' ? 'source-aiying' : 'source-hdhive'">
+                            <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item source-aiying">
                                 <div class="resource-search-item-main">
                                     <div class="resource-search-item-title">{{ item.title || item.name || '未命名资源' }}</div>
                                     <div class="resource-search-item-tags">
-                                        <span class="resource-search-source-tag">{{ item.sourceName || (item.sourceKey === 'aiying' ? '爱影' : '影巢') }}</span>
+                                        <span class="resource-search-source-tag">{{ item.sourceName || '爱影' }}</span>
                                         <span v-for="tag in (item.tags || []).slice(0, 6)" :key="tag">{{ tag }}</span>
                                     </div>
                                     <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>
@@ -6638,11 +6363,11 @@
                     <span>正在搜索资源...</span>
                 </div>
                 <div v-else-if="resourceSearchModal.items.length" class="resource-search-list">
-                    <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item" :class="item.sourceKey === 'aiying' ? 'source-aiying' : 'source-hdhive'">
+                    <div v-for="item in resourceSearchModal.items" :key="item.id || item.url || item.title" class="resource-search-item source-aiying">
                         <div class="resource-search-item-main">
                             <div class="resource-search-item-title">{{ item.title || item.name || '未命名资源' }}</div>
                             <div class="resource-search-item-tags">
-                                <span class="resource-search-source-tag">{{ item.sourceName || (item.sourceKey === 'aiying' ? '爱影' : '影巢') }}</span>
+                                <span class="resource-search-source-tag">{{ item.sourceName || '爱影' }}</span>
                                 <span v-for="tag in String(item.genreTitle || '').split('|').filter(Boolean).slice(0, 8)" :key="tag">{{ tag }}</span>
                             </div>
                             <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>
@@ -6724,6 +6449,15 @@
                 <span class="dock-tooltip">工具箱</span>
                 <i class="fa-solid fa-toolbox dock-icon"></i>
                 <span class="dock-indicator" :class="{ 'panel-open': showToolboxDrawer }"></span>
+            </div>
+
+            <!-- 常用工具直达 -->
+            <div class="dock-item" v-for="item in utilityDockItems" :key="item.id"
+                 :class="{ active: focusedPanel === item.id, 'panel-open': openPanels.includes(item.id) }"
+                 @click="togglePanel(item.id)">
+                <span class="dock-tooltip">{{ item.label }}</span>
+                <i class="fa-solid dock-icon" :class="item.icon"></i>
+                <span class="dock-indicator"></span>
             </div>
 
             <!-- 设置齿轮 -->
@@ -7030,7 +6764,7 @@
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_upload'}" @click="selectMobileTab('drive115_upload')"><i class="fa-solid fa-cloud-arrow-up"></i><span>秒传</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'organize_monitor_dirs'}" @click="selectMobileTab('organize_monitor_dirs')"><i class="fa-solid fa-folder-plus"></i><span>监控</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'drive115_cleanup'}" @click="selectMobileTab('drive115_cleanup')"><i class="fa-solid fa-broom"></i><span>定删</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'forward_hdhive'}" @click="selectMobileTab('forward_hdhive')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>
+                            <button class="mobile-more-item" :class="{active: tab === 'forward_aiying'}" @click="selectMobileTab('forward_aiying')"><i class="fa-solid fa-tower-broadcast"></i><span>Forward模块</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'media_organize_rules'}" @click="selectMobileTab('media_organize_rules')"><i class="fa-solid fa-sitemap"></i><span>分类</span></button>
                         </div>
                     </div>
@@ -7042,7 +6776,6 @@
                             <button class="mobile-more-item" :class="{active: tab === 'config_115'}" @click="selectMobileTab('config_115')"><i class="fa-solid fa-cloud"></i><span>115</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'telegram_monitor'}" @click="selectMobileTab('telegram_monitor')"><i class="fa-solid fa-satellite-dish"></i><span>TG监听</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_notification'}" @click="selectMobileTab('config_notification')"><i class="fa-solid fa-bell"></i><span>通知</span></button>
-                            <button class="mobile-more-item" :class="{active: tab === 'config_yingchao'}" @click="selectMobileTab('config_yingchao')"><i class="fa-solid fa-film"></i><span>影巢</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_moviepilot'}" @click="selectMobileTab('config_moviepilot')"><i class="fa-solid fa-plane"></i><span>MP</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_proxy'}" @click="selectMobileTab('config_proxy')"><i class="fa-solid fa-globe"></i><span>代理</span></button>
                             <button class="mobile-more-item" :class="{active: tab === 'config_tmdb'}" @click="selectMobileTab('config_tmdb')"><i class="fa-solid fa-database"></i><span>TMDB</span></button>

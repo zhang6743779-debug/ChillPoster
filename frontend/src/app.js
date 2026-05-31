@@ -8,7 +8,7 @@ import { useTaskProgress } from './composables/useTaskProgress';
 import { useShellNavigation } from './composables/useShellNavigation';
 import { useSystemHealth } from './composables/useSystemHealth';
 import { useNetworkConnectivity } from './composables/useNetworkConnectivity';
-import { allSearchItems, allValidTabs, coverItems, dockItems, getPanelIcon, getPanelLabel, settingsItems, storageItems, toolboxItems } from './modules/navigationConfig';
+import { allSearchItems, allValidTabs, coverItems, dockItems, getPanelIcon, getPanelLabel, settingsItems, storageItems, toolboxItems, utilityDockItems } from './modules/navigationConfig';
 import { useDockerManager } from './pages/docker/useDockerManager';
 import { useWebhookConfig } from './pages/webhook/useWebhookConfig';
 import { useRssTasks } from './pages/rss/useRssTasks';
@@ -16,8 +16,7 @@ import { useRealLibrary } from './pages/realLibrary/useRealLibrary';
 import { useEmbyTasks } from './pages/embyTasks/useEmbyTasks';
 import { useResourceTransfer } from './pages/transfer/useResourceTransfer';
 import { useMoviePilotConfig } from './pages/moviepilot/useMoviePilotConfig';
-import { useHdhiveConfig } from './pages/hdhive/useHdhiveConfig';
-import { useForwardHdhive } from './pages/forward/useForwardHdhive';
+import { useForwardAiying } from './pages/forward/useForwardAiying';
 import { useNotificationSettings } from './pages/notifications/useNotificationSettings';
 import { useConfig302 } from './pages/config302/useConfig302';
 import { useStrmConfig } from './pages/strm/useStrmConfig';
@@ -367,17 +366,17 @@ createApp({
         } = useMoviePilotConfig({ showToast });
 
         const {
-            forwardHdhiveConfig,
-            forwardHdhiveSaving,
-            forwardHdhiveTesting,
-            forwardHdhiveTestForm,
-            forwardHdhiveTestResult,
-            fetchForwardHdhiveConfig,
-            saveForwardHdhiveConfig,
-            copyForwardHdhiveWidgetUrl,
-            refreshForwardHdhiveToken,
-            testForwardHdhiveResources,
-        } = useForwardHdhive({ showToast });
+            forwardAiyingConfig,
+            forwardAiyingSaving,
+            forwardAiyingTesting,
+            forwardAiyingTestForm,
+            forwardAiyingTestResult,
+            fetchForwardAiyingConfig,
+            saveForwardAiyingConfig,
+            copyForwardAiyingWidgetUrl,
+            refreshForwardAiyingToken,
+            testForwardAiyingResources,
+        } = useForwardAiying({ showToast });
 
         const {
             tasksState,
@@ -480,22 +479,6 @@ createApp({
         // 3. 任务与核心逻辑
         // ==========================================
         
-        const startHdhiveEventStream = () => {
-            const es = new EventSource('/api/hdhive/events');
-            es.onmessage = (e) => {
-                try {
-                    const data = JSON.parse(e.data);
-                    if (data.type === 'checkin_success') {
-                        fetchHdhiveConfig();
-                    }
-                } catch (_) {}
-            };
-            es.onerror = () => {
-                es.close();
-                setTimeout(startHdhiveEventStream, 5000);
-            };
-        };
-
         const manualServerIdx = ref(0);
         const currentLibId = ref('');
         const previewImage = ref('');
@@ -825,26 +808,6 @@ createApp({
             showToast('已导入', 'success');
         };
 
-
-        const {
-            hdhiveConfig,
-            hdhiveChecking,
-            fetchHdhiveConfig,
-            saveHdhiveAccount,
-            toggleHdhiveCheckin,
-            addHdhiveAccount,
-            removeHdhiveAccount,
-            testHdhiveAccount,
-            loginHdhive,
-            checkinHdhive,
-            gamblerCheckinHdhive,
-            checkinAllHdhive,
-            refreshHdhiveUserInfo,
-            refreshHdhiveUsage,
-            authorizeHdhiveOpenApi,
-            refreshHdhiveOpenApiToken,
-        } = useHdhiveConfig({ showToast, showConfirm });
-
         const {
             previewServerIdx,
             libraryCards,
@@ -970,9 +933,12 @@ createApp({
             cloud115TargetUp,
             selectCurrentCloud115TargetFolder,
             runCloud115RapidTransfer,
+            cancelCloud115RapidTransfer,
             getCloud115TransferCount,
             getCloud115TransferPending,
             getCloud115TransferProgress,
+            getCloud115TransferResults,
+            getCloud115TransferResultMeta,
             getCloud115TransferStatusLabel,
             get115UploadTaskState,
             format115UploadSize,
@@ -1033,8 +999,7 @@ createApp({
             if (val === 'real_library') fetchRealLibraryData();
             if (val === 'webhook') fetchWebhookConfig();
             if (val === 'library_preview') fetchLibraryCovers();
-            if (val === 'config_yingchao') fetchHdhiveConfig();
-            if (val === 'forward_hdhive') { fetchForwardHdhiveConfig(); fetchHdhiveConfig(); }
+            if (val === 'forward_aiying') fetchForwardAiyingConfig();
             if (val === 'config_notification') { fetchWechatNotifyConfig(); fetchTelegramNotifyConfig(); }
             if (val === 'telegram_monitor') fetchTelegramNotifyConfig();
             if (val === 'config_302') fetch302Config();
@@ -1137,10 +1102,10 @@ createApp({
                 'drive115_cleanup': '115 定时清空',
                 'drive115_upload': '115 秒传/上传',
                 'organize_monitor_dirs': '整理监控目录',
-                'forward_hdhive': 'Forward模块',
+                'forward_aiying': 'Forward模块',
                 'config_115': '115 配置', 'config_wechat': '微信配置',
                 'telegram_monitor': 'Telegram 监听',
-                'config_telegram': '电报配置', 'config_yingchao': '影巢配置',
+                'config_telegram': '电报配置',
                 'config_moviepilot': 'MoviePilot 配置', 'config_proxy': '代理配置',
                 'config_tmdb': 'TMDB 配置'
             };
@@ -1234,7 +1199,6 @@ createApp({
                 startDockerSilentRefresh();
             }
             await restoreRunningOrganizeTask();
-            fetchHdhiveConfig();
             if (tab.value === 'config_notification') {
                 fetchWechatNotifyConfig();
                 fetchTelegramNotifyConfig();
@@ -1242,7 +1206,6 @@ createApp({
             if (tab.value === 'telegram_monitor') {
                 fetchTelegramNotifyConfig();
             }
-            startHdhiveEventStream();
             loadDiscoverSources().then(() => {
                 if (tab.value === 'media_subscribe' && !mainGridItems.value.length) loadMainGrid(true);
             });
@@ -2010,8 +1973,8 @@ createApp({
             open115UploadLocalBrowser, select115UploadLocalDir, upload115LocalUp, selectCurrent115UploadLocalFolder,
             openCloud115SourceBrowser, selectCloud115SourceDir, cloud115SourceUp, toggleCloud115SourceItem, isCloud115ItemSelected,
             removeCloud115SelectedItem, clearCloud115SelectedItems, openCloud115TargetBrowser, selectCloud115TargetDir,
-            cloud115TargetUp, selectCurrentCloud115TargetFolder, runCloud115RapidTransfer,
-            getCloud115TransferCount, getCloud115TransferPending, getCloud115TransferProgress, getCloud115TransferStatusLabel,
+            cloud115TargetUp, selectCurrentCloud115TargetFolder, runCloud115RapidTransfer, cancelCloud115RapidTransfer,
+            getCloud115TransferCount, getCloud115TransferPending, getCloud115TransferProgress, getCloud115TransferResults, getCloud115TransferResultMeta, getCloud115TransferStatusLabel,
             get115UploadTaskState, format115UploadSize, get115UploadStageLabel, get115UploadMethodLabel,
             embyTasksState, runningEmbyTasks, hasEmbyTaskGroups,
             fetchEmbyTasks, refreshEmbyTasks, runEmbyTask, stopEmbyTask,
@@ -2053,23 +2016,13 @@ createApp({
             // [修复] 全局变量及方法
             globalConfig, sensitiveVisibility, saveGlobalSettings, toggleDebugMode,
 
-            // [新增] 影巢配置
-            hdhiveConfig, hdhiveChecking, fetchHdhiveConfig,
-            addHdhiveAccount, removeHdhiveAccount, testHdhiveAccount,
-            loginHdhive, checkinHdhive, gamblerCheckinHdhive, checkinAllHdhive, saveHdhiveAccount,
-            toggleHdhiveCheckin,
-            refreshHdhiveUserInfo,
-            refreshHdhiveUsage,
-            authorizeHdhiveOpenApi,
-            refreshHdhiveOpenApiToken,
-
             // [新增] Forward 模块
-            forwardHdhiveConfig, forwardHdhiveSaving, forwardHdhiveTesting,
-            forwardHdhiveTestForm, forwardHdhiveTestResult,
-            fetchForwardHdhiveConfig, saveForwardHdhiveConfig,
-            copyForwardHdhiveWidgetUrl,
-            refreshForwardHdhiveToken,
-            testForwardHdhiveResources,
+            forwardAiyingConfig, forwardAiyingSaving, forwardAiyingTesting,
+            forwardAiyingTestForm, forwardAiyingTestResult,
+            fetchForwardAiyingConfig, saveForwardAiyingConfig,
+            copyForwardAiyingWidgetUrl,
+            refreshForwardAiyingToken,
+            testForwardAiyingResources,
 
             // [新增] 微信通知配置
             wechatNotifyConfig, wechatNotifyTesting, wechatNotifySending, wechatNotifySaving, wechatTemplateTesting,
@@ -2102,7 +2055,7 @@ createApp({
             isMobile, openPanels, focusedPanel, showSettingsDrawer, showCoverDrawer, showStorageDrawer, showToolboxDrawer, settingsDrawerStyle, coverDrawerStyle, storageDrawerStyle, toolboxDrawerStyle, showSpotlight,
             spotlightQuery, spotlightFocusIndex, dockHoverIndex, spotlightInputRef,
             theme, toggleTheme,
-            dockItems, storageItems, coverItems, toolboxItems, settingsItems, allSearchItems,
+            dockItems, storageItems, coverItems, toolboxItems, utilityDockItems, settingsItems, allSearchItems,
             getPanelIcon, getPanelLabel, togglePanel, closePanel, focusPanel, goHome,
             toggleSettingsDrawer, toggleCoverDrawer, toggleStorageDrawer, toggleToolboxDrawer, openFromSettings,
             showSpotlightPanel, spotlightResults, jumpToItem,
