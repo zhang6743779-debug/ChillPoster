@@ -33,6 +33,23 @@ _ROMAN_MAP = {
     "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5",
     "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
 }
+_UNICODE_ROMAN_MAP = {
+    "Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5",
+    "Ⅵ": "6", "Ⅶ": "7", "Ⅷ": "8", "Ⅸ": "9", "Ⅹ": "10",
+    "ⅰ": "1", "ⅱ": "2", "ⅲ": "3", "ⅳ": "4", "ⅴ": "5",
+    "ⅵ": "6", "ⅶ": "7", "ⅷ": "8", "ⅸ": "9", "ⅹ": "10",
+}
+_ARABIC_TO_CN_NUMERAL = {
+    1: "一", 2: "二", 3: "三", 4: "四", 5: "五",
+    6: "六", 7: "七", 8: "八", 9: "九", 10: "十",
+}
+_CN_NUMERAL_TO_ARABIC = {cn: num for num, cn in _ARABIC_TO_CN_NUMERAL.items()}
+_CN_NUMERAL_TO_ARABIC["两"] = 2
+_ARABIC_TO_ROMAN = {int(value): key.upper() for key, value in _ROMAN_MAP.items()}
+_ARABIC_TO_UNICODE_ROMAN = {
+    1: "Ⅰ", 2: "Ⅱ", 3: "Ⅲ", 4: "Ⅳ", 5: "Ⅴ",
+    6: "Ⅵ", 7: "Ⅶ", 8: "Ⅷ", 9: "Ⅸ", 10: "Ⅹ",
+}
 
 _DIRECT_TMDB_ID_CACHE_TTL_SECONDS = 30
 _CORRECTED_TMDB_ID_CACHE_TTL_SECONDS = 6 * 60 * 60
@@ -921,6 +938,122 @@ def _normalize_title_for_match(name: str) -> str:
     return re.sub(r'[\s:：·\-*\'!,?.。、\-—―\+\|\\_/&#～~\(\)（）【】「」]', '', simplified).lower()
 
 
+def _parse_chinese_sequel_number(marker: str) -> Optional[int]:
+    value = str(marker or "").strip()
+    if not value:
+        return None
+    if value in _CN_NUMERAL_TO_ARABIC:
+        return _CN_NUMERAL_TO_ARABIC.get(value)
+    try:
+        import cn2an
+        number = int(cn2an.cn2an(value, mode="smart"))
+        return number if 0 < number <= 30 else None
+    except Exception:
+        return None
+
+
+def _parse_movie_sequel_marker(marker: str) -> Optional[int]:
+    value = str(marker or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        number = int(value)
+        return number if 0 < number <= 30 else None
+    roman_number = _ROMAN_MAP.get(value.lower()) or _UNICODE_ROMAN_MAP.get(value)
+    if roman_number:
+        return int(roman_number)
+    return _parse_chinese_sequel_number(value)
+
+
+def _extract_movie_sequel_info(title: str) -> Optional[dict]:
+    raw = re.sub(r'\s+', ' ', str(title or "")).strip().strip(".-_")
+    if not raw:
+        return None
+
+    marker_pattern = (
+        r"(?P<marker>"
+        r"\d{1,2}|[IVXivx]{1,4}|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅰⅱⅲⅳⅴⅵⅶⅷⅸⅹ]|"
+        r"[一二三四五六七八九十两]{1,3}"
+        r")"
+    )
+    match = re.match(rf"^(?P<base>.+?)[\s._-]*{marker_pattern}$", raw)
+    if not match:
+        return None
+
+    base = str(match.group("base") or "").strip().rstrip(".-_：: ")
+    marker = str(match.group("marker") or "").strip()
+    if not base or not re.search(r"[一-鿿]", base):
+        return None
+    base_norm = _normalize_title_for_match(base)
+    if len(base_norm) < 2:
+        return None
+
+    number = _parse_movie_sequel_marker(marker)
+    if not number:
+        return None
+
+    canonical_title = f"{base}{number}"
+    return {
+        "base_title": base,
+        "number": number,
+        "marker": marker,
+        "canonical_title": canonical_title,
+    }
+
+
+def _movie_sequel_title_variants(base_title: str, sequel_number: int) -> list[str]:
+    base = str(base_title or "").strip()
+    if not base or not sequel_number:
+        return []
+
+    variants: list[str] = []
+
+    def _add(value: str):
+        value = re.sub(r'\s+', ' ', str(value or "")).strip()
+        if value and value not in variants:
+            variants.append(value)
+
+    if sequel_number == 1:
+        _add(base)
+
+    _add(f"{base}{sequel_number}")
+    _add(f"{base} {sequel_number}")
+
+    cn_number = _ARABIC_TO_CN_NUMERAL.get(int(sequel_number))
+    if cn_number:
+        _add(f"{base}{cn_number}")
+        _add(f"{base} {cn_number}")
+
+    roman_number = _ARABIC_TO_ROMAN.get(int(sequel_number))
+    if roman_number:
+        _add(f"{base} {roman_number}")
+        _add(f"{base}{roman_number}")
+
+    unicode_roman = _ARABIC_TO_UNICODE_ROMAN.get(int(sequel_number))
+    if unicode_roman:
+        _add(f"{base} {unicode_roman}")
+        _add(f"{base}{unicode_roman}")
+
+    return variants
+
+
+def _movie_sequel_match_keys(title: str) -> set[str]:
+    keys = set()
+    normalized = _normalize_title_for_match(title)
+    if normalized:
+        keys.add(normalized)
+
+    info = _extract_movie_sequel_info(title)
+    if not info:
+        return keys
+
+    base_norm = _normalize_title_for_match(info.get("base_title") or "")
+    number = info.get("number")
+    if base_norm and number:
+        keys.add(f"{base_norm}{int(number)}")
+    return keys
+
+
 def _generate_title_variants(en_title: str, cn_title: str = "") -> list:
     """生成标题变体用于搜索"""
     import zhconv
@@ -1792,6 +1925,7 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     episode = path_meta.begin_episode
     force_movie = False
     title_source = "file_or_path"
+    movie_sequel_info = _extract_movie_sequel_info(stem)
 
     decimal_sequel_match = re.match(r'^([一-鿿]{2,}\d+(?:\.\d+)+)(?=(?:\s*[（(](?:19|20)\d{2}[）)])|[.\s_-](?:19|20)\d{2}\b)', filename)
     if decimal_sequel_match and season is None:
@@ -1820,6 +1954,28 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
     has_total_episode_count_marker = _has_total_episode_count_marker(filename, file_path)
     explicit_season, explicit_episode = _parse_explicit_season_episode_marker(filename, file_path)
     trailing_episode_context_match = False
+
+    if movie_sequel_info and not has_explicit_episode_marker and season is None:
+        sequel_base = movie_sequel_info["base_title"]
+        sequel_title = movie_sequel_info["canonical_title"]
+        sequel_number = movie_sequel_info["number"]
+        current_title_norm = _normalize_title_for_match(cn_name or title)
+        current_sequel_keys = _movie_sequel_match_keys(cn_name or title)
+        sequel_base_norm = _normalize_title_for_match(sequel_base)
+        sequel_title_norm = _normalize_title_for_match(sequel_title)
+        sequel_key = f"{sequel_base_norm}{int(sequel_number)}" if sequel_base_norm else ""
+        if (
+            not current_title_norm
+            or current_title_norm in {sequel_base_norm, sequel_title_norm}
+            or (sequel_key and sequel_key in current_sequel_keys)
+            or episode == sequel_number
+        ):
+            cn_name = sequel_title
+            en_name = ""
+            season = None
+            episode = None
+            force_movie = True
+            title_source = "movie_sequel_marker"
 
     if has_explicit_episode_marker:
         if explicit_season is not None:
@@ -1934,6 +2090,26 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         return None
 
     media_type = _normalize_media_type(path_meta.type, season, episode, force_movie, media_type_hint)
+    movie_sequel_number = (
+        int(movie_sequel_info["number"])
+        if media_type == "movie" and movie_sequel_info
+        else None
+    )
+    movie_sequel_base_title = (
+        str(movie_sequel_info["base_title"] or "")
+        if media_type == "movie" and movie_sequel_info
+        else ""
+    )
+    strict_no_year_movie_sequel = bool(
+        media_type == "movie"
+        and movie_sequel_number
+        and not year
+    )
+    movie_sequel_titles_to_try = (
+        _movie_sequel_title_variants(movie_sequel_base_title, movie_sequel_number)
+        if movie_sequel_number
+        else []
+    )
     prefer_file_title_on_dir_conflict, conflict_dir_tmdb_source = _dir_title_tmdb_conflicts_with_file_title(
         file_meta,
         title,
@@ -2009,8 +2185,21 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         parent_meta = MetaInfo(_preprocess_dir_name(parent_dir_name))
         parent_title = parent_meta.cn_name or ""
     parent_title_for_search = "" if _is_auxiliary_media_dir_name(parent_dir_name) else parent_title
+    if strict_no_year_movie_sequel:
+        parent_title_for_search = ""
+    file_en_name_for_search = (
+        ""
+        if movie_sequel_number and _parse_movie_sequel_marker(file_meta.en_name or "")
+        else file_meta.en_name
+    )
     if prefer_file_title_on_dir_conflict:
-        titles_to_try = _build_titles_to_try(title, cn_name, en_name, file_meta.en_name)
+        titles_to_try = _build_titles_to_try(
+            *movie_sequel_titles_to_try,
+            title,
+            cn_name,
+            en_name,
+            file_en_name_for_search,
+        )
         fallback_dir_name = ""
         if conflict_dir_tmdb_source == "parent":
             fallback_dir_name = parent_dir_name
@@ -2026,7 +2215,14 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
             folder_fallback_year = fallback_meta.year
             folder_fallback_titles = _build_titles_to_try(cleaned_fallback_dir, fallback_title, fallback_cn, fallback_en)
     else:
-        titles_to_try = _build_titles_to_try(parent_title_for_search, title, cn_name, en_name, file_meta.en_name)
+        titles_to_try = _build_titles_to_try(
+            *movie_sequel_titles_to_try,
+            parent_title_for_search,
+            title,
+            cn_name,
+            en_name,
+            file_en_name_for_search,
+        )
 
     return {
         "filename": filename,
@@ -2046,6 +2242,9 @@ def _parse_filename(filename: str, media_type_hint: str = None, file_path: str =
         "folder_fallback_cn_name": folder_fallback_cn_name,
         "folder_fallback_en_name": folder_fallback_en_name,
         "folder_fallback_year": folder_fallback_year,
+        "movie_sequel_number": movie_sequel_number,
+        "movie_sequel_base_title": movie_sequel_base_title,
+        "strict_no_year_movie_sequel": strict_no_year_movie_sequel,
         "tmdb_id_direct": tmdb_id_direct,
         "tmdb_id_source": tmdb_id_source,
         "title_source": title_source,
@@ -2071,11 +2270,93 @@ def _tv_season_year_matches(media_type: str, season: Optional[int], year: Option
     return _get_tv_season_year(tmdb_id, season, api_key) == str(year)
 
 
+def _search_strict_no_year_movie_sequel(
+    titles_to_try: list[str],
+    filename: str,
+    api_key: str,
+    log_prefix: str = "[MediaIdentify]",
+) -> Optional[dict]:
+    from core import tmdb
 
-def _search_tmdb_candidates(titles_to_try: list[str], filename: str, media_type: str, year: Optional[int], season: Optional[int], api_key: str, log_prefix: str = "[MediaIdentify]") -> Optional[dict]:
+    expected_keys: set[str] = set()
+    for title in titles_to_try:
+        expected_keys.update(_movie_sequel_match_keys(title))
+    expected_keys = {key for key in expected_keys if key}
+    if not expected_keys:
+        return None
+
+    candidates: dict[int, dict] = {}
+    original_title_candidates: dict[int, dict] = {}
+    for search_title in titles_to_try:
+        if not search_title:
+            continue
+
+        results = tmdb.search_media(search_title, api_key, "movie", year=None) or []
+        for result in results:
+            tmdb_id = result.get("id")
+            if not tmdb_id:
+                continue
+
+            result_keys: set[str] = set()
+            for result_title in (result.get("title"), result.get("original_title")):
+                result_keys.update(_movie_sequel_match_keys(result_title or ""))
+            if not expected_keys.intersection(result_keys):
+                continue
+
+            try:
+                candidate_id = int(tmdb_id)
+            except (TypeError, ValueError):
+                continue
+            candidates.setdefault(candidate_id, result)
+
+            original_title_keys = _movie_sequel_match_keys(result.get("original_title") or "")
+            if expected_keys.intersection(original_title_keys):
+                original_title_candidates.setdefault(candidate_id, result)
+
+    final_candidates = original_title_candidates or candidates
+
+    if len(final_candidates) == 1:
+        result = next(iter(final_candidates.values()))
+        tmdb_id = result.get("id")
+        res_title = result.get("title") or result.get("original_title") or ""
+        logger.debug(f"{log_prefix} 无年份电影续集唯一匹配: '{filename}' -> {res_title} (ID: {tmdb_id})")
+        return {"tmdb_id": tmdb_id, "media_type": "movie", "title": res_title}
+
+    if final_candidates:
+        candidate_names = [
+            f"{item.get('title') or item.get('original_title') or ''}({item.get('id')})"
+            for item in final_candidates.values()
+        ]
+        logger.info(
+            f"{log_prefix} 无年份电影续集候选不唯一，判为未识别: '{filename}' | 候选:{' | '.join(candidate_names)}"
+        )
+    else:
+        logger.info(f"{log_prefix} 无年份电影续集未唯一命中，判为未识别: '{filename}'")
+    return None
+
+
+
+def _search_tmdb_candidates(
+    titles_to_try: list[str],
+    filename: str,
+    media_type: str,
+    year: Optional[int],
+    season: Optional[int],
+    api_key: str,
+    log_prefix: str = "[MediaIdentify]",
+    strict_no_year_movie_sequel: bool = False,
+) -> Optional[dict]:
     from core import tmdb
 
     item_type = "movie" if media_type == "movie" else "tv"
+
+    if strict_no_year_movie_sequel and media_type == "movie" and not year:
+        return _search_strict_no_year_movie_sequel(
+            titles_to_try,
+            filename,
+            api_key,
+            log_prefix=log_prefix,
+        )
 
     for search_title in titles_to_try:
         if not search_title:
@@ -2436,7 +2717,7 @@ def _search_tmdb_via_douban_fallback(parsed: dict, api_key: str) -> Optional[dic
 
 def _tmdb_search_cache_key(parsed: dict) -> str:
     payload = {
-        "v": 6,
+        "v": 8,
         "media_type": parsed.get("media_type", ""),
         "title_key": parsed.get("title_key") or (),
         "titles_to_try": parsed.get("titles_to_try") or [],
@@ -2444,6 +2725,9 @@ def _tmdb_search_cache_key(parsed: dict) -> str:
         "folder_fallback_titles": parsed.get("folder_fallback_titles") or [],
         "year": parsed.get("year"),
         "season": parsed.get("season"),
+        "movie_sequel_number": parsed.get("movie_sequel_number"),
+        "movie_sequel_base_title": parsed.get("movie_sequel_base_title", ""),
+        "strict_no_year_movie_sequel": bool(parsed.get("strict_no_year_movie_sequel")),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -2525,6 +2809,7 @@ def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -
     year = parsed["year"]
     season = parsed["season"]
     tmdb_id_direct = parsed["tmdb_id_direct"]
+    strict_no_year_movie_sequel = bool(parsed.get("strict_no_year_movie_sequel"))
 
     if tmdb_id_direct:
         return {
@@ -2556,11 +2841,27 @@ def _search_tmdb_for_title_sync(parsed: dict, api_key: str, failed_cache: set) -
     matched = None
     if candidate_years:
         for candidate_year in candidate_years:
-            matched = _search_tmdb_candidates(titles_to_try, filename, media_type, candidate_year, season, api_key)
+            matched = _search_tmdb_candidates(
+                titles_to_try,
+                filename,
+                media_type,
+                candidate_year,
+                season,
+                api_key,
+                strict_no_year_movie_sequel=strict_no_year_movie_sequel,
+            )
             if matched:
                 break
     else:
-        matched = _search_tmdb_candidates(titles_to_try, filename, media_type, year, season, api_key)
+        matched = _search_tmdb_candidates(
+            titles_to_try,
+            filename,
+            media_type,
+            year,
+            season,
+            api_key,
+            strict_no_year_movie_sequel=strict_no_year_movie_sequel,
+        )
     if not matched and parsed.get("title_source") == "filename_conflict_priority":
         folder_fallback_titles = parsed.get("folder_fallback_titles") or []
         if folder_fallback_titles:
