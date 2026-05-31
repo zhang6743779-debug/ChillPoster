@@ -2351,6 +2351,13 @@ async def _run_organize_async(run_id: str, req):
                         probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
                         if probe_fields:
                             variables = _merge_probe_fields_into_variables(variables, probe_fields)
+                    elif use_smart_ffprobe_mode and media_type == "movie":
+                        pickcode = str((file_item or {}).get("pickcode", "") or "").strip()
+                        direct_url = ffprobe_group_urls.get(pickcode, "") if pickcode else ""
+                        probe_fields = await _probe_media_fields_via_ffprobe(file_item, drive_index, direct_url=direct_url)
+                        if probe_fields:
+                            variables = _merge_probe_fields_into_variables(variables, probe_fields)
+                            logger.debug(f"[MediaOrganize] FFPROBE电影逐个探测: {file_name}")
                     elif use_smart_ffprobe_mode:
                         ffprobe_batch_key = _build_ffprobe_batch_key(tmdb_id, parsed, file_item, ext)
                         current_size = int(file_item.get("size", 0) or 0)
@@ -5717,12 +5724,18 @@ async def _process_target_event_entries(
             "skipped": 0,
             "matched_items": 0,
         }
+        subtitle_cleanup_result = strm_service.cleanup_subtitle_orphans_for_remote_snapshot(
+            scan_path,
+            entries,
+            reason=f"115目标目录新增稳定快照: {event_type_cn} {scan_path} (event={event_name})",
+        )
 
         logger.info(
             f"[115Life] 目标目录新增事件处理完成: 事件={event_name}/{event_type_cn} 范围={scan_path} "
             f"扫描={len(entries)} 缓存={len(cache_items)} 目录创建={dir_count} 目录失败={dir_failed} "
             f"待同步={len(incremental_items)} strm={int(sync_result.get('generated', 0) or 0)} "
             f"附属下载={int(sync_result.get('downloaded', 0) or 0)} "
+            f"孤儿字幕清理={int(subtitle_cleanup_result.get('deleted', 0) or 0)} "
             f"失败={int(sync_result.get('failed', 0) or 0) + int(sync_result.get('download_failed', 0) or 0)} "
             f"跳过={int(sync_result.get('skipped', 0) or 0) + unchanged_files}"
         )

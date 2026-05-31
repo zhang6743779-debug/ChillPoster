@@ -1860,7 +1860,30 @@ class StrmService:
         data_exts: set,
     ) -> set:
         """遍历远端目录，构建应存在的本地 strm 路径集合"""
+        remote_strm_paths, _ = self._build_remote_expected_paths(
+            client,
+            remote_path,
+            local_path,
+            video_exts,
+            audio_exts,
+            image_exts,
+            data_exts,
+        )
+        return remote_strm_paths
+
+    def _build_remote_expected_paths(
+        self,
+        client: P115Client,
+        remote_path: str,
+        local_path: str,
+        video_exts: set,
+        audio_exts: set,
+        image_exts: set,
+        data_exts: set,
+    ) -> tuple[set, set]:
+        """遍历远端目录，构建应存在的本地 strm 与字幕路径集合。"""
         remote_strm_paths: set = set()
+        remote_subtitle_paths: set = set()
         rp = remote_path.rstrip("/")
         iter_kwargs = {
             "cid": client.fs_dir_getid_app(remote_path)["id"],
@@ -1876,13 +1899,16 @@ class StrmService:
             if not filename or not item_path:
                 continue
             file_class = classify_file(filename, video_exts, audio_exts, image_exts, data_exts)
-            if file_class not in ("video", "audio"):
+            if file_class not in ("video", "audio", "subtitle"):
                 continue
             relative = item_path[len(rp):].lstrip("/") if item_path.startswith(rp) else ""
             rel_dir = os.path.dirname(relative) if relative else ""
             target_dir = os.path.join(local_path, rel_dir) if rel_dir else local_path
-            remote_strm_paths.add(os.path.normpath(os.path.join(target_dir, get_strm_filename(filename))))
-        return remote_strm_paths
+            if file_class in ("video", "audio"):
+                remote_strm_paths.add(os.path.normpath(os.path.join(target_dir, get_strm_filename(filename))))
+            elif file_class == "subtitle":
+                remote_subtitle_paths.add(os.path.normpath(os.path.join(target_dir, filename)))
+        return remote_strm_paths, remote_subtitle_paths
 
     @staticmethod
     def _remove_same_stem_metadata(local_dir: str, strm_filename: str) -> int:
@@ -1940,8 +1966,38 @@ class StrmService:
         return renamed
 
     @staticmethod
-    def _cleanup_local_orphans(local_path: str, remote_strm_paths: set, keep_dirs: Optional[set[str]] = None) -> int:
-        """清理本地孤儿 strm、同名元数据和无 strm 目录"""
+    def _cleanup_local_subtitle_orphans(local_path: str, remote_subtitle_paths: set) -> int:
+        """清理本地存在但远端快照中不存在的字幕文件。"""
+        if remote_subtitle_paths is None:
+            return 0
+        if not os.path.exists(local_path):
+            return 0
+
+        deleted = 0
+        expected_paths = {os.path.normpath(p) for p in (remote_subtitle_paths or set()) if str(p or "").strip()}
+        for root, dirs, files in os.walk(local_path):
+            for f in files:
+                if os.path.splitext(f)[1].lower() not in SUBTITLE_EXTS:
+                    continue
+                full = os.path.normpath(os.path.join(root, f))
+                if full in expected_paths:
+                    continue
+                try:
+                    os.remove(full)
+                    deleted += 1
+                    logger.debug(f"[STRM] 删除孤儿字幕: {full}")
+                except Exception as e:
+                    logger.error(f"[STRM] 删除字幕失败 {full}: {e}")
+        return deleted
+
+    @staticmethod
+    def _cleanup_local_orphans(
+        local_path: str,
+        remote_strm_paths: set,
+        keep_dirs: Optional[set[str]] = None,
+        remote_subtitle_paths: Optional[set[str]] = None,
+    ) -> int:
+        """清理本地孤儿 strm、孤儿字幕、同名元数据和无 strm 目录。"""
         deleted = 0
         keep_dirs = {os.path.normpath(p) for p in (keep_dirs or set()) if str(p or "").strip()}
 
@@ -1961,6 +2017,9 @@ class StrmService:
                     continue
 
                 deleted += StrmService._remove_same_stem_metadata(root, f)
+
+        if remote_subtitle_paths is not None:
+            deleted += StrmService._cleanup_local_subtitle_orphans(local_path, remote_subtitle_paths)
 
         for root, dirs, files in os.walk(local_path, topdown=False):
             if root == local_path:
@@ -2001,7 +2060,7 @@ class StrmService:
 
         try:
             client = self._get_client(drive_index)
-            remote_strm_paths = self._build_remote_strm_paths(
+            remote_strm_paths, remote_subtitle_paths = self._build_remote_expected_paths(
                 client,
                 remote_path,
                 local_path,
@@ -2010,9 +2069,18 @@ class StrmService:
                 image_exts,
                 data_exts,
             )
-            deleted = self._cleanup_local_orphans(local_path, remote_strm_paths)
-            logger.info(f"[STRM] 孤儿清理完成: {task_name} | 远端媒体:{len(remote_strm_paths)} 删除:{deleted} 原因:{reason or 'manual'}")
-            return {"status": "ok", "task": task_name, "deleted": deleted, "remote_media": len(remote_strm_paths)}
+            deleted = self._cleanup_local_orphans(local_path, remote_strm_paths, remote_subtitle_paths=remote_subtitle_paths)
+            logger.info(
+                f"[STRM] 孤儿清理完成: {task_name} | 远端媒体:{len(remote_strm_paths)} "
+                f"远端字幕:{len(remote_subtitle_paths)} 删除:{deleted} 原因:{reason or 'manual'}"
+            )
+            return {
+                "status": "ok",
+                "task": task_name,
+                "deleted": deleted,
+                "remote_media": len(remote_strm_paths),
+                "remote_subtitles": len(remote_subtitle_paths),
+            }
         except Exception as e:
             logger.error(f"[STRM] 孤儿清理失败: {task_name}: {e}")
             return {"status": "error", "task": task_name, "deleted": 0, "message": str(e)}
@@ -2078,7 +2146,7 @@ class StrmService:
 
             try:
                 client = self._get_client(drive_index)
-                remote_strm_paths = self._build_remote_strm_paths(
+                remote_strm_paths, remote_subtitle_paths = self._build_remote_expected_paths(
                     client,
                     rp,
                     local_subpath,
@@ -2087,16 +2155,29 @@ class StrmService:
                     image_exts,
                     data_exts,
                 )
-                deleted = self._cleanup_local_orphans(local_subpath, remote_strm_paths) if os.path.exists(local_subpath) else 0
+                deleted = (
+                    self._cleanup_local_orphans(
+                        local_subpath,
+                        remote_strm_paths,
+                        remote_subtitle_paths=remote_subtitle_paths,
+                    )
+                    if os.path.exists(local_subpath)
+                    else 0
+                )
                 results.append({
                     "status": "ok",
                     "task": task_name,
                     "deleted": deleted,
                     "remote_media": len(remote_strm_paths),
+                    "remote_subtitles": len(remote_subtitle_paths),
                     "local_subpath": local_subpath,
                 })
                 total_deleted += deleted
-                logger.info(f"[STRM] 子路径孤儿清理完成: {task_name} | 远端:{rp} 本地:{local_subpath} 远端媒体:{len(remote_strm_paths)} 删除:{deleted} 原因:{reason or 'manual'}")
+                logger.info(
+                    f"[STRM] 子路径孤儿清理完成: {task_name} | 远端:{rp} 本地:{local_subpath} "
+                    f"远端媒体:{len(remote_strm_paths)} 远端字幕:{len(remote_subtitle_paths)} "
+                    f"删除:{deleted} 原因:{reason or 'manual'}"
+                )
             except Exception as e:
                 has_error = True
                 logger.error(f"[STRM] 子路径孤儿清理失败: {task_name}: {e}")
@@ -2502,6 +2583,79 @@ class StrmService:
         except Exception as e:
             logger.error(f"[STRM] 远端附属同步失败: {task_name} | 远端:{rp}: {e}")
             return {"status": "error", "matched": 1, "downloaded": 0, "task": task_name, "local_path": local_path, "message": str(e)}
+
+    def cleanup_subtitle_orphans_for_remote_snapshot(
+        self,
+        remote_scan_path: str,
+        remote_entries: list,
+        reason: str = "",
+    ) -> dict:
+        """按一次完整远端目录快照，清理对应本地目录下的孤儿字幕。"""
+        rp = str(remote_scan_path or "").rstrip("/")
+        if not rp:
+            return {"status": "skip", "matched": 0, "deleted": 0, "message": "缺少 remote_scan_path"}
+        if not isinstance(remote_entries, list) or not remote_entries:
+            return {"status": "skip", "matched": 0, "deleted": 0, "message": "缺少远端快照"}
+
+        entry_paths = [str((entry or {}).get("path", "") or "").rstrip("/") for entry in remote_entries if isinstance(entry, dict)]
+        has_scan_dir_entry = any(
+            bool((entry or {}).get("is_dir")) and str((entry or {}).get("path", "") or "").rstrip("/") == rp
+            for entry in remote_entries
+            if isinstance(entry, dict)
+        )
+        has_child_entries = any(path.startswith(rp + "/") for path in entry_paths if path)
+        if not has_scan_dir_entry and not has_child_entries:
+            return {"status": "skip", "matched": 0, "deleted": 0, "message": "非目录快照，跳过字幕清理"}
+
+        config = self.load_config()
+        tasks = config.get("sync_tasks", [])
+        matched = self._match_task_for_path(rp, tasks)
+        if not matched:
+            return {"status": "skip", "matched": 0, "deleted": 0, "message": "未匹配到 STRM 任务"}
+
+        _, task = matched
+        task_name = task.get("name", "未知任务")
+        task_remote = str(task.get("remote_path", "") or "").rstrip("/")
+        local_root = str(task.get("local_path", "") or "")
+        if not task_remote or not local_root:
+            return {"status": "skip", "matched": 1, "deleted": 0, "task": task_name, "message": "缺少 remote/local 路径"}
+
+        suffix = rp[len(task_remote):].lstrip("/") if rp.startswith(task_remote) else ""
+        local_subpath = os.path.normpath(os.path.join(local_root, suffix.replace("/", os.sep))) if suffix else local_root
+
+        video_exts = _parse_exts(task.get("video_exts_str", DEFAULT_VIDEO_EXTS))
+        audio_exts = _parse_exts(task.get("audio_exts_str", DEFAULT_AUDIO_EXTS))
+        image_exts = _parse_exts(DEFAULT_IMAGE_EXTS)
+        data_exts = _parse_exts(task.get("data_exts_str", DEFAULT_DATA_EXTS))
+
+        remote_subtitle_paths: set = set()
+        for entry in remote_entries:
+            if not isinstance(entry, dict) or entry.get("is_dir"):
+                continue
+            item_path = str(entry.get("path", "") or "").rstrip("/")
+            if not item_path or not (item_path == rp or item_path.startswith(rp + "/")):
+                continue
+            filename = str(entry.get("name", "") or "") or os.path.basename(item_path)
+            if classify_file(filename, video_exts, audio_exts, image_exts, data_exts) != "subtitle":
+                continue
+            relative = item_path[len(task_remote):].lstrip("/") if item_path.startswith(task_remote) else ""
+            rel_dir = os.path.dirname(relative) if relative else ""
+            target_dir = os.path.join(local_root, rel_dir) if rel_dir else local_root
+            remote_subtitle_paths.add(os.path.normpath(os.path.join(target_dir, filename)))
+
+        deleted = self._cleanup_local_subtitle_orphans(local_subpath, remote_subtitle_paths)
+        logger.info(
+            f"[STRM] 快照字幕孤儿清理完成: {task_name} | 远端:{rp} 本地:{local_subpath} "
+            f"远端字幕:{len(remote_subtitle_paths)} 删除:{deleted} 原因:{reason or 'event'}"
+        )
+        return {
+            "status": "ok",
+            "matched": 1,
+            "task": task_name,
+            "deleted": deleted,
+            "remote_subtitles": len(remote_subtitle_paths),
+            "local_subpath": local_subpath,
+        }
 
     def _build_incremental_stats(self) -> dict:
         return {
@@ -2996,7 +3150,7 @@ class StrmService:
             current_run_items: Dict[str, dict] = {}
             collected_items: List[dict] = []
             remote_strm_paths: set = set()
-            remote_aux_paths: set = set()
+            remote_subtitle_paths: set = set()
             remote_keep_dirs: set = set()
             dir_id_by_path: Dict[str, int] = {str(remote_path or "").rstrip("/"): int(cid)}
             cancelled = False
@@ -3054,8 +3208,8 @@ class StrmService:
                     target_dir = os.path.join(local_path, rel_dir) if rel_dir else local_path
                     if fc in ("video", "audio"):
                         remote_strm_paths.add(os.path.normpath(os.path.join(target_dir, get_strm_filename(filename))))
-                    elif fc in ("image", "data"):
-                        remote_aux_paths.add(os.path.normpath(os.path.join(target_dir, filename)))
+                    elif fc == "subtitle":
+                        remote_subtitle_paths.add(os.path.normpath(os.path.join(target_dir, filename)))
 
                 _update_progress(
                     run_id,
@@ -3377,7 +3531,12 @@ class StrmService:
                 _notify_task("stopped", "同步阶段取消", stats.copy(), elapsed)
                 return
 
-            stats["deleted"] += self._cleanup_local_orphans(local_path, remote_strm_paths, keep_dirs=remote_keep_dirs)
+            stats["deleted"] += self._cleanup_local_orphans(
+                local_path,
+                remote_strm_paths,
+                keep_dirs=remote_keep_dirs,
+                remote_subtitle_paths=remote_subtitle_paths,
+            )
             finish_cache_start = perf_counter()
             logger.info(f"[STRM] 收尾缓存更新开始: {task_name} | 条目:{len(current_run_items)} | 跳过常驻索引重建")
             save_task_snapshot(
