@@ -18289,6 +18289,30 @@ html[data-theme="light"] .network-connectivity-skeleton {
     }
 }
 
+@media (max-width: 768px) {
+    .console-log-mask {
+        z-index: 10060;
+        padding: calc(20px + env(safe-area-inset-top)) 18px calc(96px + env(safe-area-inset-bottom));
+        box-sizing: border-box;
+    }
+
+    .console-log-modal {
+        width: min(92vw, 430px) !important;
+        max-width: calc(100vw - 36px) !important;
+        height: 72vh !important;
+        height: min(72dvh, 620px) !important;
+        max-height: calc(100vh - 132px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+        max-height: calc(100dvh - 132px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+        margin: 0 auto !important;
+        border-radius: 14px !important;
+    }
+
+    #app.console-log-open .mobile-tabbar-v2 {
+        z-index: 900 !important;
+        pointer-events: none;
+    }
+}
+
 /* Desktop dashboard responsive hardening */
 @media (min-width: 769px) and (max-width: 1280px) {
     #app[data-v-app] .content-area:not(.panel-mode) .dashboard-layout,

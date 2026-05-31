@@ -21,7 +21,7 @@
 </head>
 
 <body>
-    <div id="app" v-cloak :class="{ 'dock-layout': !isMobile, 'detail-open': detailModal.visible }">
+    <div id="app" v-cloak :class="{ 'dock-layout': !isMobile, 'detail-open': detailModal.visible, 'console-log-open': consoleLogState.visible }">
 
         <!-- ======== 移动端侧边栏 (仅移动端渲染) ======== -->
         <template v-if="isMobile">
@@ -5858,7 +5858,7 @@
             </div>
         </div>
 
-        <div v-if="consoleLogState.visible" class="modal-mask modal-mask-elevated">
+        <div v-if="consoleLogState.visible" class="modal-mask modal-mask-elevated console-log-mask">
             <div class="modal-container console-log-modal">
                 <div class="modal-header console-log-header">
                     <div class="console-log-top-row">

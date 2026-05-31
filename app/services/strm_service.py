@@ -12,12 +12,13 @@ from time import perf_counter
 from typing import Callable, Dict, List, Optional, Tuple
 
 from p115client import P115Client
-from p115client.tool.iterdir import iter_files_with_path, traverse_tree_with_path
+from p115client.tool.iterdir import iter_files_with_path
 from p115client.tool.download import download_file, get_pic_url
 from p115client.tool.attr import get_attr
 from p115rsacipher import encrypt, decrypt
 from core.logger import logger
 from core.media_library_cache import build_task_key, save_task_snapshot
+from app.services.p115_tree_iter import iter_tree_with_path_by_lists
 from app.services.media_organize_scrape import (
     list_missing_tmdb_metadata_for_strm,
     scrape_tmdb_metadata_for_strm_local_file,
@@ -3010,7 +3011,7 @@ class StrmService:
             }
 
             for batch in batched(
-                traverse_tree_with_path(client, **tree_iter_kwargs),
+                iter_tree_with_path_by_lists(client, **tree_iter_kwargs),
                 BATCH_SIZE,
             ):
                 if ACTIVE_TASKS.get(run_id, {}).get("cancel_requested"):

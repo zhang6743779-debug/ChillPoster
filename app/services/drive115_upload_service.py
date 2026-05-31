@@ -745,9 +745,9 @@ class Drive115UploadService:
         }
 
     def _list_cloud_115_tree_entries(self, client, cid: str) -> list[dict[str, Any]]:
-        from p115client.tool.iterdir import traverse_tree_with_path
+        from app.services.p115_tree_iter import iter_tree_with_path_by_lists
 
-        entries = list(traverse_tree_with_path(
+        entries = list(iter_tree_with_path_by_lists(
             client,
             cid=int(str(cid or "0").strip() or 0),
             with_ancestors=True,

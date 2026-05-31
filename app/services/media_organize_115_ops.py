@@ -1603,8 +1603,8 @@ def _check_and_move(client, file_id, target_cid: str, filename: str, reused: boo
 # ==========================================
 
 def _list_115_tree_entries(client, cid: str) -> list[dict]:
-    """用 traverse_tree_with_path 递归列出源目录树。"""
-    from p115client.tool.iterdir import traverse_tree_with_path
+    """递归列出源目录树，避开 115 /files/file 批量补全接口。"""
+    from app.services.p115_tree_iter import iter_tree_with_path_by_lists
 
     global _LAST_TREE_SCAN_FINISHED_AT
     with _TREE_SCAN_LOCK:
@@ -1615,7 +1615,7 @@ def _list_115_tree_entries(client, cid: str) -> list[dict]:
         _prime_115_pickcode_stable_point(client, str(cid))
         items = run_115_read_request_sync(
             "目录树遍历",
-            lambda: list(traverse_tree_with_path(
+            lambda: list(iter_tree_with_path_by_lists(
                 client,
                 cid=int(cid),
                 with_ancestors=True,
@@ -1673,7 +1673,7 @@ def _iter_115_media_entries(client, cid: str) -> Iterator[dict]:
 
 
 def _list_115_video_files(client, cid: str) -> tuple:
-    """用 traverse_tree_with_path 递归列出 115 目录下所有视频文件和字幕文件"""
+    """递归列出 115 目录下所有视频文件和字幕文件"""
     try:
         files = []
         subtitles_by_parent = {}  # parent_id -> [{name, id, parent_id, path}]
