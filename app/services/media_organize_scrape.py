@@ -452,8 +452,7 @@ def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict, ca
         if cancel_event and cancel_event.is_set():
             return 0
 
-        items: list[dict] = []
-        remote_file_paths: list[str] = []
+        item_groups: list[tuple[list[dict], str]] = []
         replace_remote_paths: list[str] = []
         for payload in payloads or []:
             if cancel_event and cancel_event.is_set():
@@ -479,12 +478,25 @@ def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict, ca
                 for p in (payload.get("replace_remote_paths") or [])
                 if str(p or "").rstrip("/")
             ])
+            item_groups.append((batch_items, str(remote_file_path or "").rstrip("/")))
+
+        if not item_groups and not replace_remote_paths:
+            return 0
+
+        replaced_remote_path_set = set(dict.fromkeys(replace_remote_paths))
+        items: list[dict] = []
+        remote_file_paths: list[str] = []
+        filtered_replaced_count = 0
+        for batch_items, remote_file_path in item_groups:
+            if remote_file_path and remote_file_path in replaced_remote_path_set:
+                filtered_replaced_count += 1
+                continue
             items.extend(batch_items)
             if remote_file_path:
                 remote_file_paths.append(remote_file_path)
 
-        if not items:
-            return 0
+        if filtered_replaced_count:
+            logger.info(f"[MediaOrganize] 已过滤本批次被洗版替换的旧STRM载荷: {filtered_replaced_count} 个")
 
         for remote_path in dict.fromkeys(replace_remote_paths):
             if cancel_event and cancel_event.is_set():
@@ -494,6 +506,9 @@ def _generate_strm_batch_on_organize(payloads: list[dict], config_data: dict, ca
                 reason="媒体整理洗版替换旧版本",
             )
             logger.info(f"[MediaOrganize] 洗版替换已清理旧STRM: {cleanup_result}")
+
+        if not items:
+            return 0
 
         inc_result = strm_service.process_incremental_items(items, cancel_event=cancel_event)
         generated_count = int(inc_result.get("generated", 0) or 0)
