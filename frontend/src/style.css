@@ -9390,6 +9390,10 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     background: rgba(59,130,246,0.18);
     color: #bfdbfe;
 }
+.resource-search-item-tags .resource-search-hr-tag {
+    background: rgba(239,68,68,0.18);
+    color: #fecaca;
+}
 .resource-search-item-desc {
     margin-top: 8px;
     color: var(--color-text-subtle);
@@ -13814,6 +13818,11 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     html[data-theme="light"] .resource-search-item-tags .resource-search-promo-tag.other {
         background: rgba(37,99,235,0.12);
         color: #1d4ed8;
+    }
+
+    html[data-theme="light"] .resource-search-item-tags .resource-search-hr-tag {
+        background: rgba(239,68,68,0.13);
+        color: #b91c1c;
     }
 
     html[data-theme="light"] .resource-search-open-btn {

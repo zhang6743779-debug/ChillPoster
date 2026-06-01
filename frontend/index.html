@@ -6094,6 +6094,7 @@
                                     <div class="resource-search-item-tags">
                                         <span class="resource-search-source-tag">{{ item.sourceName || resourceSearchActiveGroup?.name || '资源' }}</span>
                                         <span v-if="item.promotionLabel" class="resource-search-promo-tag" :class="item.promotionClass">{{ item.promotionLabel }}</span>
+                                        <span v-if="item.hitAndRun" class="resource-search-hr-tag">H&amp;R</span>
                                         <span v-for="tag in resourceSearchItemTags(item)" :key="tag">{{ tag }}</span>
                                     </div>
                                     <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>
@@ -6562,6 +6563,7 @@
                             <div class="resource-search-item-tags">
                                 <span class="resource-search-source-tag">{{ item.sourceName || resourceSearchActiveGroup?.name || '资源' }}</span>
                                 <span v-if="item.promotionLabel" class="resource-search-promo-tag" :class="item.promotionClass">{{ item.promotionLabel }}</span>
+                                <span v-if="item.hitAndRun" class="resource-search-hr-tag">H&amp;R</span>
                                 <span v-for="tag in resourceSearchItemTags(item)" :key="tag">{{ tag }}</span>
                             </div>
                             <div v-if="item.description" class="resource-search-item-desc">{{ item.description }}</div>

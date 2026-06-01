@@ -751,6 +751,7 @@ class MoviePilotResourceService:
             site_name = str(torrent.get("site_name") or torrent.get("site") or "MoviePilot").strip()
             tags = self._tags(torrent, size_label=size_label, site_name=site_name)
             promotion = self._promotion_info(torrent)
+            hit_and_run = self._truthy(torrent.get("hit_and_run"))
             desc_parts = []
             if site_name:
                 desc_parts.append(site_name)
@@ -794,6 +795,7 @@ class MoviePilotResourceService:
                 "downloadFactor": promotion.get("download_factor"),
                 "uploadFactor": promotion.get("upload_factor"),
                 "freeDate": promotion.get("free_date", ""),
+                "hitAndRun": hit_and_run,
                 "previewDisabled": False,
                 "transferDisabled": True,
                 "actionLabel": "仅展示",
@@ -1606,7 +1608,7 @@ class MoviePilotResourceService:
             return value
         if isinstance(value, (int, float)):
             return value != 0
-        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on", "是"}
 
     def _parse_torrent_preview_items(
         self,
