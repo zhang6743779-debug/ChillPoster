@@ -565,8 +565,24 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
 
         const resourceSearchItemKey = (item = {}) => item.id || item.url || item.resourceId || item.title || `${item.sourceKey || item.source || 'source'}-${item.name || 'resource'}`;
         const resourceSearchItemTags = (item = {}) => {
-            if (Array.isArray(item.tags)) return item.tags.filter(Boolean).slice(0, 8);
-            return String(item.genreTitle || '').split('|').map(tag => tag.trim()).filter(Boolean).slice(0, 8);
+            const rawTags = Array.isArray(item.tags)
+                ? item.tags
+                : String(item.genreTitle || '').split('|');
+            const tags = [];
+            const source = String(item.sourceKey || item.source || '').trim().toLowerCase();
+            const sourceAliases = {
+                moviepilot: new Set(['mp', 'moviepilot']),
+                aiying: new Set(['ay', 'aiying', '爱影']),
+            };
+            const redundantSourceTags = sourceAliases[source] || new Set();
+            const appendTag = (value) => {
+                const label = String(value || '').trim();
+                if (redundantSourceTags.has(label.toLowerCase())) return;
+                if (label && !tags.includes(label)) tags.push(label);
+            };
+            rawTags.forEach(appendTag);
+            appendTag(item.sizeLabel);
+            return tags;
         };
         const resourceSearchItemClass = (item = {}) => {
             const source = String(item.sourceKey || item.source || 'aiying').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');

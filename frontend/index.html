@@ -6000,89 +6000,91 @@
                             <span>搜索资源中...</span>
                         </div>
                         <div v-else-if="resourceSearchGroups.length" class="resource-search-list missing-episode-resource-list">
-                            <div class="resource-search-source-tabs">
-                                <span class="resource-search-source-tabs-label">资源</span>
-                                <button
-                                    v-for="group in resourceSearchGroups"
-                                    :key="group.key"
-                                    type="button"
-                                    class="resource-search-source-tab"
-                                    :class="{ active: resourceSearchActiveGroup?.key === group.key, error: group.progress?.error }"
-                                    @click="setResourceSearchActiveSource(group.key)"
-                                >
-                                    <span>{{ group.name }}</span>
-                                    <em>{{ group.items.length }}</em>
-                                    <i v-if="group.progress?.loading" class="fa-solid fa-spinner fa-spin"></i>
-                                </button>
-                            </div>
-                            <div v-if="resourceSearchActiveGroup?.progress?.text" class="resource-search-active-status" :class="{ error: resourceSearchActiveGroup?.progress?.error }">
-                                {{ resourceSearchActiveGroup.name }}　{{ resourceSearchFilteredItems.length }} / {{ resourceSearchActiveGroup.items.length }} 个结果　{{ resourceSearchActiveGroup.progress.text }}
-                            </div>
-                            <div class="resource-search-filter-row">
-                                <select v-model="resourceSearchModal.filters.site">
-                                    <option value="">全部站点</option>
-                                    <option v-for="site in resourceSearchFilterOptions.sites" :key="site" :value="site">{{ site }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.seasonEpisode">
-                                    <option value="">全部季集</option>
-                                    <option v-for="item in resourceSearchFilterOptions.seasonEpisodes" :key="item.value" :value="item.value">{{ item.label }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.resolution">
-                                    <option value="">全部分辨率</option>
-                                    <option v-for="item in resourceSearchFilterOptions.resolutions" :key="item" :value="item">{{ item }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.quality">
-                                    <option value="">全部介质</option>
-                                    <option v-for="item in resourceSearchFilterOptions.qualities" :key="item" :value="item">{{ item }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.codec">
-                                    <option value="">全部编码</option>
-                                    <option v-for="item in resourceSearchFilterOptions.codecs" :key="item" :value="item">{{ item }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.hdr">
-                                    <option value="">全部 HDR</option>
-                                    <option v-for="item in resourceSearchFilterOptions.hdrs" :key="item" :value="item">{{ item }}</option>
-                                </select>
-                                <select v-model="resourceSearchModal.filters.promotion">
-                                    <option value="">全部促销</option>
-                                    <option value="promo">有促销</option>
-                                    <option value="free">免费</option>
-                                    <option value="discount">下载折扣</option>
-                                    <option value="upload">上传加成</option>
-                                    <option value="normal">无促销</option>
-                                </select>
-                                <div class="resource-search-sort">
-                                    <button type="button" class="resource-search-sort-trigger" @click="toggleResourceSearchSortMenu">
-                                        <i class="fa-solid fa-arrow-down-wide-short"></i>
-                                        <span>{{ resourceSearchSortButtonText }}</span>
-                                        <i class="fa-solid fa-chevron-down"></i>
+                            <div class="resource-search-toolbar">
+                                <div class="resource-search-source-tabs">
+                                    <span class="resource-search-source-tabs-label">资源</span>
+                                    <button
+                                        v-for="group in resourceSearchGroups"
+                                        :key="group.key"
+                                        type="button"
+                                        class="resource-search-source-tab"
+                                        :class="{ active: resourceSearchActiveGroup?.key === group.key, error: group.progress?.error }"
+                                        @click="setResourceSearchActiveSource(group.key)"
+                                    >
+                                        <span>{{ group.name }}</span>
+                                        <em>{{ group.items.length }}</em>
+                                        <i v-if="group.progress?.loading" class="fa-solid fa-spinner fa-spin"></i>
                                     </button>
-                                    <div v-if="resourceSearchSortMenuOpen" class="resource-search-sort-menu">
-                                        <div class="resource-search-sort-directions">
+                                </div>
+                                <div v-if="resourceSearchActiveGroup?.progress?.text" class="resource-search-active-status" :class="{ error: resourceSearchActiveGroup?.progress?.error }">
+                                    {{ resourceSearchActiveGroup.name }}　{{ resourceSearchFilteredItems.length }} / {{ resourceSearchActiveGroup.items.length }} 个结果　{{ resourceSearchActiveGroup.progress.text }}
+                                </div>
+                                <div class="resource-search-filter-row">
+                                    <select v-model="resourceSearchModal.filters.site">
+                                        <option value="">全部站点</option>
+                                        <option v-for="site in resourceSearchFilterOptions.sites" :key="site" :value="site">{{ site }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.seasonEpisode">
+                                        <option value="">全部季集</option>
+                                        <option v-for="item in resourceSearchFilterOptions.seasonEpisodes" :key="item.value" :value="item.value">{{ item.label }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.resolution">
+                                        <option value="">全部分辨率</option>
+                                        <option v-for="item in resourceSearchFilterOptions.resolutions" :key="item" :value="item">{{ item }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.quality">
+                                        <option value="">全部介质</option>
+                                        <option v-for="item in resourceSearchFilterOptions.qualities" :key="item" :value="item">{{ item }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.codec">
+                                        <option value="">全部编码</option>
+                                        <option v-for="item in resourceSearchFilterOptions.codecs" :key="item" :value="item">{{ item }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.hdr">
+                                        <option value="">全部 HDR</option>
+                                        <option v-for="item in resourceSearchFilterOptions.hdrs" :key="item" :value="item">{{ item }}</option>
+                                    </select>
+                                    <select v-model="resourceSearchModal.filters.promotion">
+                                        <option value="">全部促销</option>
+                                        <option value="promo">有促销</option>
+                                        <option value="free">免费</option>
+                                        <option value="discount">下载折扣</option>
+                                        <option value="upload">上传加成</option>
+                                        <option value="normal">无促销</option>
+                                    </select>
+                                    <div class="resource-search-sort">
+                                        <button type="button" class="resource-search-sort-trigger" @click="toggleResourceSearchSortMenu">
+                                            <i class="fa-solid fa-arrow-down-wide-short"></i>
+                                            <span>{{ resourceSearchSortButtonText }}</span>
+                                            <i class="fa-solid fa-chevron-down"></i>
+                                        </button>
+                                        <div v-if="resourceSearchSortMenuOpen" class="resource-search-sort-menu">
+                                            <div class="resource-search-sort-directions">
+                                                <button
+                                                    v-for="item in resourceSearchFilterOptions.sortDirections"
+                                                    :key="item.value"
+                                                    type="button"
+                                                    :class="{ active: resourceSearchModal.filters.sortDirection === item.value }"
+                                                    @click="setResourceSearchSortDirection(item.value)"
+                                                >
+                                                    <i class="fa-solid" :class="item.icon"></i>
+                                                    <span>{{ item.label }}</span>
+                                                </button>
+                                            </div>
                                             <button
-                                                v-for="item in resourceSearchFilterOptions.sortDirections"
+                                                v-for="item in resourceSearchFilterOptions.sortFields"
                                                 :key="item.value"
                                                 type="button"
-                                                :class="{ active: resourceSearchModal.filters.sortDirection === item.value }"
-                                                @click="setResourceSearchSortDirection(item.value)"
-                                            >
-                                                <i class="fa-solid" :class="item.icon"></i>
-                                                <span>{{ item.label }}</span>
-                                            </button>
+                                                class="resource-search-sort-option"
+                                                :class="{ active: resourceSearchModal.filters.sortField === item.value }"
+                                                @click="setResourceSearchSortField(item.value)"
+                                            >{{ item.label }}</button>
                                         </div>
-                                        <button
-                                            v-for="item in resourceSearchFilterOptions.sortFields"
-                                            :key="item.value"
-                                            type="button"
-                                            class="resource-search-sort-option"
-                                            :class="{ active: resourceSearchModal.filters.sortField === item.value }"
-                                            @click="setResourceSearchSortField(item.value)"
-                                        >{{ item.label }}</button>
                                     </div>
+                                    <button v-if="resourceSearchHasFilters" type="button" class="resource-search-filter-clear" @click="clearResourceSearchFilters">
+                                        <i class="fa-solid fa-xmark"></i>
+                                    </button>
                                 </div>
-                                <button v-if="resourceSearchHasFilters" type="button" class="resource-search-filter-clear" @click="clearResourceSearchFilters">
-                                    <i class="fa-solid fa-xmark"></i>
-                                </button>
                             </div>
                             <div v-if="!resourceSearchFilteredItems.length" class="resource-search-group-state">
                                 <i class="fa-solid" :class="resourceSearchActiveGroup?.progress?.loading ? 'fa-spinner fa-spin' : (resourceSearchActiveGroup?.progress?.error ? 'fa-circle-exclamation' : 'fa-magnifying-glass')"></i>
@@ -6469,89 +6471,91 @@
                     <span>正在搜索资源...</span>
                 </div>
                 <div v-else-if="resourceSearchGroups.length" class="resource-search-list">
-                    <div class="resource-search-source-tabs">
-                        <span class="resource-search-source-tabs-label">资源</span>
-                        <button
-                            v-for="group in resourceSearchGroups"
-                            :key="group.key"
-                            type="button"
-                            class="resource-search-source-tab"
-                            :class="{ active: resourceSearchActiveGroup?.key === group.key, error: group.progress?.error }"
-                            @click="setResourceSearchActiveSource(group.key)"
-                        >
-                            <span>{{ group.name }}</span>
-                            <em>{{ group.items.length }}</em>
-                            <i v-if="group.progress?.loading" class="fa-solid fa-spinner fa-spin"></i>
-                        </button>
-                    </div>
-                    <div v-if="resourceSearchActiveGroup?.progress?.text" class="resource-search-active-status" :class="{ error: resourceSearchActiveGroup?.progress?.error }">
-                        {{ resourceSearchActiveGroup.name }}　{{ resourceSearchFilteredItems.length }} / {{ resourceSearchActiveGroup.items.length }} 个结果　{{ resourceSearchActiveGroup.progress.text }}
-                    </div>
-                    <div class="resource-search-filter-row">
-                        <select v-model="resourceSearchModal.filters.site">
-                            <option value="">全部站点</option>
-                            <option v-for="site in resourceSearchFilterOptions.sites" :key="site" :value="site">{{ site }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.seasonEpisode">
-                            <option value="">全部季集</option>
-                            <option v-for="item in resourceSearchFilterOptions.seasonEpisodes" :key="item.value" :value="item.value">{{ item.label }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.resolution">
-                            <option value="">全部分辨率</option>
-                            <option v-for="item in resourceSearchFilterOptions.resolutions" :key="item" :value="item">{{ item }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.quality">
-                            <option value="">全部介质</option>
-                            <option v-for="item in resourceSearchFilterOptions.qualities" :key="item" :value="item">{{ item }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.codec">
-                            <option value="">全部编码</option>
-                            <option v-for="item in resourceSearchFilterOptions.codecs" :key="item" :value="item">{{ item }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.hdr">
-                            <option value="">全部 HDR</option>
-                            <option v-for="item in resourceSearchFilterOptions.hdrs" :key="item" :value="item">{{ item }}</option>
-                        </select>
-                        <select v-model="resourceSearchModal.filters.promotion">
-                            <option value="">全部促销</option>
-                            <option value="promo">有促销</option>
-                            <option value="free">免费</option>
-                            <option value="discount">下载折扣</option>
-                            <option value="upload">上传加成</option>
-                            <option value="normal">无促销</option>
-                        </select>
-                        <div class="resource-search-sort">
-                            <button type="button" class="resource-search-sort-trigger" @click="toggleResourceSearchSortMenu">
-                                <i class="fa-solid fa-arrow-down-wide-short"></i>
-                                <span>{{ resourceSearchSortButtonText }}</span>
-                                <i class="fa-solid fa-chevron-down"></i>
+                    <div class="resource-search-toolbar">
+                        <div class="resource-search-source-tabs">
+                            <span class="resource-search-source-tabs-label">资源</span>
+                            <button
+                                v-for="group in resourceSearchGroups"
+                                :key="group.key"
+                                type="button"
+                                class="resource-search-source-tab"
+                                :class="{ active: resourceSearchActiveGroup?.key === group.key, error: group.progress?.error }"
+                                @click="setResourceSearchActiveSource(group.key)"
+                            >
+                                <span>{{ group.name }}</span>
+                                <em>{{ group.items.length }}</em>
+                                <i v-if="group.progress?.loading" class="fa-solid fa-spinner fa-spin"></i>
                             </button>
-                            <div v-if="resourceSearchSortMenuOpen" class="resource-search-sort-menu">
-                                <div class="resource-search-sort-directions">
+                        </div>
+                        <div v-if="resourceSearchActiveGroup?.progress?.text" class="resource-search-active-status" :class="{ error: resourceSearchActiveGroup?.progress?.error }">
+                            {{ resourceSearchActiveGroup.name }}　{{ resourceSearchFilteredItems.length }} / {{ resourceSearchActiveGroup.items.length }} 个结果　{{ resourceSearchActiveGroup.progress.text }}
+                        </div>
+                        <div class="resource-search-filter-row">
+                            <select v-model="resourceSearchModal.filters.site">
+                                <option value="">全部站点</option>
+                                <option v-for="site in resourceSearchFilterOptions.sites" :key="site" :value="site">{{ site }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.seasonEpisode">
+                                <option value="">全部季集</option>
+                                <option v-for="item in resourceSearchFilterOptions.seasonEpisodes" :key="item.value" :value="item.value">{{ item.label }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.resolution">
+                                <option value="">全部分辨率</option>
+                                <option v-for="item in resourceSearchFilterOptions.resolutions" :key="item" :value="item">{{ item }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.quality">
+                                <option value="">全部介质</option>
+                                <option v-for="item in resourceSearchFilterOptions.qualities" :key="item" :value="item">{{ item }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.codec">
+                                <option value="">全部编码</option>
+                                <option v-for="item in resourceSearchFilterOptions.codecs" :key="item" :value="item">{{ item }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.hdr">
+                                <option value="">全部 HDR</option>
+                                <option v-for="item in resourceSearchFilterOptions.hdrs" :key="item" :value="item">{{ item }}</option>
+                            </select>
+                            <select v-model="resourceSearchModal.filters.promotion">
+                                <option value="">全部促销</option>
+                                <option value="promo">有促销</option>
+                                <option value="free">免费</option>
+                                <option value="discount">下载折扣</option>
+                                <option value="upload">上传加成</option>
+                                <option value="normal">无促销</option>
+                            </select>
+                            <div class="resource-search-sort">
+                                <button type="button" class="resource-search-sort-trigger" @click="toggleResourceSearchSortMenu">
+                                    <i class="fa-solid fa-arrow-down-wide-short"></i>
+                                    <span>{{ resourceSearchSortButtonText }}</span>
+                                    <i class="fa-solid fa-chevron-down"></i>
+                                </button>
+                                <div v-if="resourceSearchSortMenuOpen" class="resource-search-sort-menu">
+                                    <div class="resource-search-sort-directions">
+                                        <button
+                                            v-for="item in resourceSearchFilterOptions.sortDirections"
+                                            :key="item.value"
+                                            type="button"
+                                            :class="{ active: resourceSearchModal.filters.sortDirection === item.value }"
+                                            @click="setResourceSearchSortDirection(item.value)"
+                                        >
+                                            <i class="fa-solid" :class="item.icon"></i>
+                                            <span>{{ item.label }}</span>
+                                        </button>
+                                    </div>
                                     <button
-                                        v-for="item in resourceSearchFilterOptions.sortDirections"
+                                        v-for="item in resourceSearchFilterOptions.sortFields"
                                         :key="item.value"
                                         type="button"
-                                        :class="{ active: resourceSearchModal.filters.sortDirection === item.value }"
-                                        @click="setResourceSearchSortDirection(item.value)"
-                                    >
-                                        <i class="fa-solid" :class="item.icon"></i>
-                                        <span>{{ item.label }}</span>
-                                    </button>
+                                        class="resource-search-sort-option"
+                                        :class="{ active: resourceSearchModal.filters.sortField === item.value }"
+                                        @click="setResourceSearchSortField(item.value)"
+                                    >{{ item.label }}</button>
                                 </div>
-                                <button
-                                    v-for="item in resourceSearchFilterOptions.sortFields"
-                                    :key="item.value"
-                                    type="button"
-                                    class="resource-search-sort-option"
-                                    :class="{ active: resourceSearchModal.filters.sortField === item.value }"
-                                    @click="setResourceSearchSortField(item.value)"
-                                >{{ item.label }}</button>
                             </div>
+                            <button v-if="resourceSearchHasFilters" type="button" class="resource-search-filter-clear" @click="clearResourceSearchFilters">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>
                         </div>
-                        <button v-if="resourceSearchHasFilters" type="button" class="resource-search-filter-clear" @click="clearResourceSearchFilters">
-                            <i class="fa-solid fa-xmark"></i>
-                        </button>
                     </div>
                     <div v-if="!resourceSearchFilteredItems.length" class="resource-search-group-state">
                         <i class="fa-solid" :class="resourceSearchActiveGroup?.progress?.loading ? 'fa-spinner fa-spin' : (resourceSearchActiveGroup?.progress?.error ? 'fa-circle-exclamation' : 'fa-magnifying-glass')"></i>

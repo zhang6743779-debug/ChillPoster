@@ -9096,6 +9096,21 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
     flex-direction: column;
     gap: 12px;
 }
+.resource-search-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    background: rgba(18,18,22,0.98);
+    box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+}
+.resource-search-toolbar .resource-search-filter-row {
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
 .resource-search-group {
     display: flex;
     flex-direction: column;
@@ -11218,6 +11233,9 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
 .missing-episode-resource-list {
     max-height: min(600px, 52vh);
     padding: 0;
+}
+.missing-episode-resource-list .resource-search-toolbar {
+    background: linear-gradient(180deg, rgba(24, 26, 34, 0.98), rgba(24, 26, 34, 0.94));
 }
 .missing-episode-resource-state {
     min-height: 110px;
@@ -13754,6 +13772,12 @@ html[data-theme="light"] .detail-resource-search-btn:hover {
 
     html[data-theme="light"] .resource-search-source-tabs {
         border-color: rgba(15, 23, 42, 0.08);
+    }
+
+    html[data-theme="light"] .resource-search-toolbar {
+        background: rgba(255, 255, 255, 0.96);
+        border-color: rgba(15, 23, 42, 0.08);
+        box-shadow: 0 12px 24px rgba(71, 85, 105, 0.10);
     }
 
     html[data-theme="light"] .resource-search-source-tab {
@@ -20947,6 +20971,12 @@ html[data-theme="light"] .missing-episode-resource-results {
 
 html[data-theme="light"] .missing-episode-resource-results-head > span {
     color: #7c3aed !important;
+}
+
+html[data-theme="light"] .missing-episode-resource-list .resource-search-toolbar {
+    background:
+        linear-gradient(180deg, rgba(225, 234, 246, 0.98), rgba(216, 226, 239, 0.94)),
+        var(--ui-card-bg-soft) !important;
 }
 
 html[data-theme="light"] .missing-episode-resource-list .resource-search-item {
