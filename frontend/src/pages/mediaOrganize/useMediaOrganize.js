@@ -199,12 +199,14 @@ export function useMediaOrganize({ tab, needs115Setup, notify115SetupRequired, s
         });
         const subClassifyVars = [
             { key: 'year_decade', label: '年代' },
+            { key: 'year', label: '年份' },
             { key: 'rating_tier', label: '评分段' },
             { key: 'origin_country', label: '国家' },
             { key: 'genre_label', label: '类型' },
         ];
         const subClassifyVarExamples = {
             year_decade: '2010s',
+            year: '2016',
             rating_tier: '8-9分',
             origin_country: '日本',
             genre_label: '动画',

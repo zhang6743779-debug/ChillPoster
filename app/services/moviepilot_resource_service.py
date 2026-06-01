@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urljoin, urlparse
@@ -25,6 +26,7 @@ class MoviePilotResourceService:
         self._token_expires = 0.0
         self._login_lock = asyncio.Lock()
         self._torrent_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._target_filter_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def _load_config(self) -> dict[str, Any]:
         if not CONFIG_PATH.exists():
@@ -128,6 +130,289 @@ class MoviePilotResourceService:
             return f"{keyword} {year_text}"
         return keyword
 
+    async def _build_target_filter(
+        self,
+        *,
+        media_type: str,
+        tmdb_id: str,
+        title: str | None = None,
+        year: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_tmdb_id = str(self._safe_int(tmdb_id) or str(tmdb_id or "").strip())
+        year_text = str(year or "").strip()[:4]
+        cache_key = "|".join([
+            str(media_type or "").lower(),
+            normalized_tmdb_id,
+            str(title or "").strip(),
+            year_text,
+        ])
+        cached = self._target_filter_cache.get(cache_key)
+        if cached and cached[0] > time.time():
+            return dict(cached[1])
+
+        titles: list[str] = []
+        self._append_unique_text(titles, title)
+        tmdb_meta = await self._fetch_tmdb_target_metadata(media_type=media_type, tmdb_id=tmdb_id)
+        for candidate in tmdb_meta.get("titles") or []:
+            self._append_unique_text(titles, candidate)
+        if not year_text:
+            year_text = str(tmdb_meta.get("year") or "").strip()[:4]
+
+        terms = self._target_title_terms(titles)
+        target_filter = {
+            "tmdb_id": normalized_tmdb_id,
+            "year": year_text if year_text.isdigit() else "",
+            "titles": titles,
+            "terms": terms,
+            "display_title": next((item for item in titles if item), ""),
+        }
+        self._target_filter_cache[cache_key] = (time.time() + 6 * 60 * 60, dict(target_filter))
+        return target_filter
+
+    async def _fetch_tmdb_target_metadata(self, *, media_type: str, tmdb_id: str) -> dict[str, Any]:
+        tmdb_int = self._safe_int(tmdb_id)
+        settings = self._load_settings()
+        api_key = str(settings.get("tmdb_key") or "").strip()
+        if tmdb_int <= 0 or not api_key:
+            return {}
+
+        endpoint = "movie" if str(media_type or "").lower() == "movie" else "tv"
+        proxy_url = str(settings.get("proxy_url") or "").strip() or None
+        titles: list[str] = []
+        year = ""
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=12, verify=False) as client:
+                for language in ("zh-CN", "en-US"):
+                    resp = await client.get(
+                        f"https://api.themoviedb.org/3/{endpoint}/{tmdb_int}",
+                        params={
+                            "api_key": api_key,
+                            "language": language,
+                            "append_to_response": "alternative_titles",
+                        },
+                    )
+                    if resp.status_code >= 400:
+                        continue
+                    payload = resp.json() if resp.text else {}
+                    if not isinstance(payload, dict):
+                        continue
+                    for key in ("title", "name", "original_title", "original_name"):
+                        self._append_unique_text(titles, payload.get(key))
+                    if not year:
+                        raw_date = str(payload.get("release_date") or payload.get("first_air_date") or "")
+                        if len(raw_date) >= 4 and raw_date[:4].isdigit():
+                            year = raw_date[:4]
+                    alt_payload = payload.get("alternative_titles") if isinstance(payload.get("alternative_titles"), dict) else {}
+                    alt_items = alt_payload.get("titles") or alt_payload.get("results") or []
+                    if isinstance(alt_items, list):
+                        for item in alt_items:
+                            if isinstance(item, dict):
+                                self._append_unique_text(titles, item.get("title") or item.get("name"))
+        except Exception as e:
+            logger.debug(f"[MoviePilot资源] TMDB 目标过滤元数据获取失败: tmdb={tmdb_id} err={e}")
+        return {"titles": titles, "year": year}
+
+    def _target_title_terms(self, titles: list[str]) -> list[str]:
+        terms: list[str] = []
+        for title in titles or []:
+            for variant in self._title_match_variants(title):
+                normalized = self._normalize_target_match_text(variant)
+                if not self._is_strong_target_term(normalized):
+                    continue
+                if normalized not in terms:
+                    terms.append(normalized)
+        return terms
+
+    def _title_match_variants(self, title: Any) -> list[str]:
+        raw = str(title or "").strip()
+        if not raw:
+            return []
+        variants = [raw]
+        cleaned = re.sub(r"\s*[\(\[（【]\s*(?:19|20)\d{2}\s*[\)\]）】]\s*$", "", raw).strip()
+        if cleaned and cleaned not in variants:
+            variants.append(cleaned)
+        for part in re.split(r"\s*[\/|｜、，,]\s*", raw):
+            part = part.strip()
+            if part and part not in variants:
+                variants.append(part)
+        expanded: list[str] = []
+        for item in variants:
+            expanded.append(item)
+            roman = self._normalize_target_roman_numbers(item)
+            if roman and roman not in expanded:
+                expanded.append(roman)
+        return expanded
+
+    def _append_unique_text(self, items: list[str], value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in items:
+            items.append(text)
+
+    def _normalize_target_roman_numbers(self, text: str) -> str:
+        replacements = {
+            "Ⅰ": "1",
+            "Ⅱ": "2",
+            "Ⅲ": "3",
+            "Ⅳ": "4",
+            "Ⅴ": "5",
+            "Ⅵ": "6",
+            "Ⅶ": "7",
+            "Ⅷ": "8",
+            "Ⅸ": "9",
+            "Ⅹ": "10",
+        }
+        result = str(text or "")
+        for key, value in replacements.items():
+            result = result.replace(key, value).replace(key.lower(), value)
+        return result
+
+    def _normalize_target_match_text(self, text: Any) -> str:
+        value = unicodedata.normalize("NFKC", self._normalize_target_roman_numbers(str(text or ""))).lower()
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", value)
+
+    def _is_strong_target_term(self, term: str) -> bool:
+        if not term:
+            return False
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", term))
+        latin_count = len(re.findall(r"[a-z]", term))
+        digit_count = len(re.findall(r"\d", term))
+        if cjk_count >= 2:
+            return True
+        if latin_count >= 5:
+            return True
+        return cjk_count + latin_count + digit_count >= 4 and (cjk_count or latin_count)
+
+    def _torrent_matches_target(self, torrent: dict[str, Any], target_filter: dict[str, Any]) -> bool:
+        target_id = str(target_filter.get("tmdb_id") or "").strip()
+        if target_id and target_id in self._extract_torrent_tmdb_ids(torrent):
+            return True
+        terms = target_filter.get("terms") if isinstance(target_filter.get("terms"), list) else []
+        if not terms:
+            return True
+        normalized_title_text = self._normalize_target_match_text(self._torrent_target_title_text(torrent))
+        normalized_full_text = self._normalize_target_match_text(self._torrent_target_match_text(torrent))
+        if not normalized_title_text and not normalized_full_text:
+            return False
+        for raw_term in terms:
+            term = str(raw_term or "")
+            if not term:
+                continue
+            if term in normalized_title_text:
+                if not self._torrent_year_matches_target(torrent, target_filter):
+                    continue
+                return True
+            if not self._term_requires_title_match(term) and term in normalized_full_text:
+                if not self._torrent_year_matches_target(torrent, target_filter):
+                    continue
+                return True
+        return False
+
+    def _torrent_year_matches_target(self, torrent: dict[str, Any], target_filter: dict[str, Any]) -> bool:
+        target_year = str(target_filter.get("year") or "").strip()[:4]
+        if not target_year.isdigit():
+            return True
+        title_years = self._extract_years(self._torrent_target_title_text(torrent))
+        if title_years and target_year not in title_years:
+            return False
+        full_years = self._extract_years(self._torrent_target_match_text(torrent))
+        if full_years and target_year not in full_years:
+            return False
+        return True
+
+    def _extract_years(self, text: Any) -> set[str]:
+        return set(re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", str(text or "")))
+
+    def _term_requires_title_match(self, term: str) -> bool:
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", term))
+        latin_count = len(re.findall(r"[a-z]", term))
+        digit_count = len(re.findall(r"\d", term))
+        if cjk_count and cjk_count <= 2 and not latin_count and digit_count == 0:
+            return True
+        return term in {"error", "errors"}
+
+    def _extract_torrent_tmdb_ids(self, torrent: dict[str, Any]) -> set[str]:
+        ids: set[str] = set()
+
+        def collect(value: Any) -> None:
+            tmdb_id = self._safe_int(value)
+            if tmdb_id > 0:
+                ids.add(str(tmdb_id))
+
+        for key in ("tmdbid", "tmdb_id", "tmdbId"):
+            collect(torrent.get(key))
+        for key in ("media_info", "meta_info", "candidate_recognized"):
+            nested = torrent.get(key)
+            if isinstance(nested, dict):
+                for nested_key in ("tmdbid", "tmdb_id", "tmdbId"):
+                    collect(nested.get(nested_key))
+        text = self._torrent_target_match_text(torrent)
+        for match in re.finditer(r"(?i)tmdb(?:id)?[-_:= ]*(\d{3,})", text):
+            collect(match.group(1))
+        return ids
+
+    def _torrent_target_match_text(self, torrent: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in (
+            "title",
+            "name",
+            "description",
+            "subtitle",
+            "cn_name",
+            "en_name",
+            "original_name",
+            "org_string",
+            "category",
+        ):
+            value = torrent.get(key)
+            if value not in (None, "", [], {}):
+                parts.append(str(value))
+        for key in ("media_info", "meta_info", "candidate_recognized"):
+            nested = torrent.get(key)
+            if isinstance(nested, dict):
+                for nested_key in ("title", "name", "original_title", "original_name", "cn_name", "en_name"):
+                    value = nested.get(nested_key)
+                    if value not in (None, "", [], {}):
+                        parts.append(str(value))
+        return " ".join(parts)
+
+    def _torrent_target_title_text(self, torrent: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in (
+            "title",
+            "name",
+            "cn_name",
+            "en_name",
+            "original_name",
+        ):
+            value = torrent.get(key)
+            if value not in (None, "", [], {}):
+                parts.append(str(value))
+        for key in ("media_info", "meta_info", "candidate_recognized"):
+            nested = torrent.get(key)
+            if isinstance(nested, dict):
+                for nested_key in ("title", "name", "original_title", "original_name", "cn_name", "en_name"):
+                    value = nested.get(nested_key)
+                    if value not in (None, "", [], {}):
+                        parts.append(str(value))
+        return " ".join(parts)
+
+    def _filtered_event_text(
+        self,
+        event: dict[str, Any],
+        event_type: str,
+        item_count: int,
+        *,
+        target_filter: dict[str, Any] | None = None,
+    ) -> str:
+        raw_text = str(event.get("text") or event.get("message") or "")
+        if not target_filter or not target_filter.get("terms"):
+            return raw_text
+        if event_type == "replace":
+            return f"过滤匹配完成，共 {item_count} 个资源"
+        if event_type == "done":
+            return f"搜索完成，共 {item_count} 个资源"
+        return raw_text
+
     async def search_resources(
         self,
         *,
@@ -139,6 +424,12 @@ class MoviePilotResourceService:
         episode: int | None = None,
         sites: str | None = None,
     ) -> list[dict[str, Any]]:
+        target_filter = await self._build_target_filter(
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title=title,
+            year=year,
+        )
         title_results = await self.search_resources_by_title(
             media_type=media_type,
             tmdb_id=tmdb_id,
@@ -147,6 +438,7 @@ class MoviePilotResourceService:
             season=season,
             episode=episode,
             sites=sites,
+            target_filter=target_filter,
         )
         if title_results:
             return title_results
@@ -181,7 +473,14 @@ class MoviePilotResourceService:
         if isinstance(payload, dict) and payload.get("success") is False:
             return []
         contexts = payload.get("data") if isinstance(payload, dict) else []
-        return self.build_forward_resources(contexts if isinstance(contexts, list) else [], media_type=media_type, tmdb_id=tmdb_id, season=season, episode=episode)
+        return self.build_forward_resources(
+            contexts if isinstance(contexts, list) else [],
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+            target_filter=target_filter,
+        )
 
     async def search_resources_by_title(
         self,
@@ -193,10 +492,18 @@ class MoviePilotResourceService:
         season: int | None = None,
         episode: int | None = None,
         sites: str | None = None,
+        target_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         keyword = self._title_keyword(title, year)
         if not keyword:
             return []
+        if target_filter is None:
+            target_filter = await self._build_target_filter(
+                media_type=media_type,
+                tmdb_id=tmdb_id,
+                title=title,
+                year=year,
+            )
         base_url = self._base_url()
         token = await self._login()
         params: dict[str, Any] = {"keyword": keyword, "page": 0}
@@ -229,7 +536,14 @@ class MoviePilotResourceService:
         if isinstance(payload, dict) and payload.get("success") is False:
             return []
         contexts = payload.get("data") if isinstance(payload, dict) else []
-        return self.build_forward_resources(contexts if isinstance(contexts, list) else [], media_type=media_type, tmdb_id=tmdb_id, season=season, episode=episode)
+        return self.build_forward_resources(
+            contexts if isinstance(contexts, list) else [],
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            season=season,
+            episode=episode,
+            target_filter=target_filter,
+        )
 
     async def stream_resources(
         self,
@@ -244,6 +558,12 @@ class MoviePilotResourceService:
     ) -> AsyncIterator[dict[str, Any]]:
         base_url = self._base_url()
         token = await self._login()
+        target_filter = await self._build_target_filter(
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title=title,
+            year=year,
+        )
         params = self._search_params(media_type=media_type, season=season, sites=sites)
         timeout = httpx.Timeout(None, connect=20.0, write=20.0, pool=20.0)
         yield {
@@ -267,6 +587,7 @@ class MoviePilotResourceService:
                         season=season,
                         episode=episode,
                         sites=sites,
+                        target_filter=target_filter,
                     ):
                         yield event
                     return
@@ -282,12 +603,21 @@ class MoviePilotResourceService:
                     async for event in self._iter_sse_json(resp):
                         event_type = str(event.get("type") or "progress")
                         items = event.get("items") if isinstance(event.get("items"), list) else []
-                        converted = self.build_forward_resources(items, media_type=media_type, tmdb_id=tmdb_id, season=season, episode=episode)
+                        converted = self.build_forward_resources(
+                            items,
+                            media_type=media_type,
+                            tmdb_id=tmdb_id,
+                            season=season,
+                            episode=episode,
+                            target_filter=target_filter,
+                        )
+                        event_text = self._filtered_event_text(event, event_type, len(converted), target_filter=target_filter)
                         next_event = {
                             **event,
                             "type": event_type,
                             "sourceKey": "moviepilot",
                             "sourceName": "MoviePilot",
+                            "text": event_text,
                             "items": converted,
                             "total_items": len(converted) if event_type in {"replace", "done"} else event.get("total_items", len(converted)),
                         }
@@ -309,6 +639,7 @@ class MoviePilotResourceService:
         season: int | None = None,
         episode: int | None = None,
         sites: str | None = None,
+        target_filter: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         params: dict[str, Any] = {"keyword": keyword, "page": 0}
         if sites:
@@ -333,12 +664,21 @@ class MoviePilotResourceService:
             async for event in self._iter_sse_json(resp):
                 event_type = str(event.get("type") or "progress")
                 items = event.get("items") if isinstance(event.get("items"), list) else []
-                converted = self.build_forward_resources(items, media_type=media_type, tmdb_id=tmdb_id, season=season, episode=episode)
+                converted = self.build_forward_resources(
+                    items,
+                    media_type=media_type,
+                    tmdb_id=tmdb_id,
+                    season=season,
+                    episode=episode,
+                    target_filter=target_filter,
+                )
+                event_text = self._filtered_event_text(event, event_type, len(converted), target_filter=target_filter)
                 yield {
                     **event,
                     "type": event_type,
                     "sourceKey": "moviepilot",
                     "sourceName": "MoviePilot",
+                    "text": event_text,
                     "items": converted,
                     "total_items": len(converted) if event_type in {"replace", "done"} else event.get("total_items", len(converted)),
                 }
@@ -385,6 +725,7 @@ class MoviePilotResourceService:
         tmdb_id: str,
         season: int | None = None,
         episode: int | None = None,
+        target_filter: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -396,6 +737,8 @@ class MoviePilotResourceService:
                 continue
             title = str(torrent.get("title") or "").strip()
             description = str(torrent.get("description") or "").strip()
+            if target_filter and not self._torrent_matches_target(torrent, target_filter):
+                continue
             if episode and self._episode_match_score(f"{title} {description}", season, episode) <= 0:
                 continue
             resource_id = self._resource_id(torrent)

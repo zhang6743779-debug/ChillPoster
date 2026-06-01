@@ -177,6 +177,10 @@ class CategoryMatcher:
                 if year is None:
                     return ""
                 return f"{(year // 10) * 10}s"
+            if var == "year":
+                date = src.get("release_date") or src.get("first_air_date") or ""
+                year = str(date)[:4] if len(str(date)) >= 4 and str(date)[:4].isdigit() else ""
+                return year
             if var == "origin_country":
                 codes = src.get("origin_country") or []
                 if not codes:
