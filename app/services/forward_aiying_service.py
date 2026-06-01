@@ -17,6 +17,7 @@ from app.routers.config_302 import get_config_302
 from app.services.drive115_service import drive115_service
 from app.services.media_organize_115_ops import _get_115_fs, run_115_write_request
 from app.services.media_organize_state import VIDEO_EXTS
+from app.services.moviepilot_resource_service import moviepilot_resource_service
 from app.services.transfer_service import transfer_service
 from core.logger import logger
 
@@ -122,6 +123,13 @@ class ForwardAiyingService:
                 "label": "爱影",
                 "name": "爱影",
                 "description": "使用 Forward 模块中的爱影 Token 查询资源",
+            })
+        if moviepilot_resource_service.is_configured():
+            options.append({
+                "key": "moviepilot",
+                "label": "MoviePilot",
+                "name": "MoviePilot",
+                "description": "使用本地 MoviePilot 配置精确搜索站点资源",
             })
         return options
 
@@ -473,6 +481,15 @@ class ForwardAiyingService:
             base_title = item.get("name") or "爱影资源"
             title_suffix = f"{{tmdb-{tmdb_id}}}" if tmdb_id else ""
             title = f"{base_title} {title_suffix}" if title_suffix else base_title
+            raw_size = str(item.get("size") or "").strip()
+            size_bytes = 0
+            size_label = ""
+            if raw_size:
+                try:
+                    size_bytes = int(float(raw_size) * 1024 * 1024 * 1024)
+                    size_label = f"{float(raw_size):g}GB"
+                except Exception:
+                    size_label = f"{raw_size}GB"
             result.append({
                 "id": play_url,
                 "type": "url",
@@ -487,6 +504,8 @@ class ForwardAiyingService:
                 "videoUrl": play_url,
                 "link": play_url,
                 "mediaType": media_type,
+                "size": size_bytes,
+                "sizeLabel": size_label,
                 "playerType": "system",
             })
         return result

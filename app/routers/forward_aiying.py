@@ -2,10 +2,11 @@ import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.services.forward_aiying_service import forward_aiying_service
+from app.services.moviepilot_resource_service import moviepilot_resource_service
 from app.services.telegram_service import telegram_notify_service
 from core.logger import logger
 
@@ -31,6 +32,8 @@ class ResourceTestRequest(BaseModel):
 class ResourceSearchRequest(BaseModel):
     type: str = "movie"
     tmdb_id: str = ""
+    title: str = ""
+    year: str = ""
     season: Optional[int] = None
     episode: Optional[int] = None
     sources: list[str] = Field(default_factory=list)
@@ -41,12 +44,19 @@ class ResourceTransferRequest(BaseModel):
     resource_id: str = ""
     type: str = "movie"
     tmdb_id: str = ""
+    title: str = ""
+    year: str = ""
     season: Optional[int] = None
     episode: Optional[int] = None
 
 
 class ResourcePreviewRequest(ResourceTransferRequest):
     pass
+
+
+class ResourceDownloadRequest(ResourceTransferRequest):
+    fill_mode: str = "full"
+    existing_episodes_by_season: dict[str, list[int]] = Field(default_factory=dict)
 
 
 @router.get("/config")
@@ -128,6 +138,8 @@ async def search_forward_resources(req: ResourceSearchRequest, request: Request)
     params: dict[str, Any] = {
         "tmdbId": tmdb_id,
         "type": req.type,
+        "title": req.title,
+        "year": req.year,
         "sources": req.sources or [],
     }
     if req.season is not None:
@@ -136,6 +148,58 @@ async def search_forward_resources(req: ResourceSearchRequest, request: Request)
         params["episode"] = req.episode
     params["ignoreEnabled"] = True
     return await _load_forward_resources_from_params(request, params, respect_enabled=False)
+
+
+@router.post("/search_resources/stream")
+async def stream_forward_resources(req: ResourceSearchRequest):
+    tmdb_id = str(req.tmdb_id or "").strip()
+    if not tmdb_id:
+        raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
+    media_type = "tv" if str(req.type or "").lower() in {"tv", "series"} else "movie"
+    source_set = _parse_source_set(req.sources)
+
+    async def event_source():
+        if "moviepilot" not in source_set:
+            yield _sse_event({
+                "type": "done",
+                "sourceKey": "moviepilot",
+                "sourceName": "MoviePilot",
+                "text": "未选择 MoviePilot 搜索源",
+                "items": [],
+                "total_items": 0,
+            })
+            return
+        try:
+            async for event in moviepilot_resource_service.stream_resources(
+                media_type=media_type,
+                tmdb_id=tmdb_id,
+                title=req.title,
+                year=req.year,
+                season=req.season,
+                episode=req.episode,
+            ):
+                yield _sse_event(event)
+        except HTTPException as e:
+            yield _sse_event({
+                "type": "error",
+                "sourceKey": "moviepilot",
+                "sourceName": "MoviePilot",
+                "message": str(e.detail),
+                "text": str(e.detail),
+                "items": [],
+            })
+        except Exception as e:
+            logger.warning(f"[Forward] MoviePilot 流式查询失败: {e}")
+            yield _sse_event({
+                "type": "error",
+                "sourceKey": "moviepilot",
+                "sourceName": "MoviePilot",
+                "message": f"MoviePilot 查询失败: {e}",
+                "text": f"MoviePilot 查询失败: {e}",
+                "items": [],
+            })
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 @router.post("/transfer_resource")
@@ -164,7 +228,16 @@ async def preview_forward_resource(req: ResourcePreviewRequest):
         raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
     resource_id = str(req.resource_id or "").strip()
     if not resource_id:
-        raise HTTPException(status_code=400, detail="缺少爱影资源 ID")
+        raise HTTPException(status_code=400, detail="缺少资源 ID")
+    source = str(req.source or "aiying").strip().lower()
+    if source == "moviepilot":
+        return await moviepilot_resource_service.preview_torrent_resource(
+            resource_id=resource_id,
+            media_type=req.type,
+            tmdb_id=tmdb_id,
+            season=req.season,
+            episode=req.episode,
+        )
     return await forward_aiying_service.preview_aiying_resource(
         resource_id=resource_id,
         media_type=req.type,
@@ -175,12 +248,35 @@ async def preview_forward_resource(req: ResourcePreviewRequest):
     )
 
 
-async def _load_forward_resources_from_params(request: Request, params: dict[str, Any], *, respect_enabled: bool = True):
-    tmdb_id = str(params.get("tmdbId") or params.get("tmdb_id") or "").strip()
+@router.post("/download_resource")
+async def download_forward_resource(req: ResourceDownloadRequest):
+    tmdb_id = str(req.tmdb_id or "").strip()
     if not tmdb_id:
-        return []
-    media_type = "tv" if str(params.get("type") or "").lower() in {"tv", "series"} else "movie"
-    raw_sources = params.get("sources") or params.get("source") or []
+        raise HTTPException(status_code=400, detail="TMDB ID 不能为空")
+    resource_id = str(req.resource_id or "").strip()
+    if not resource_id:
+        raise HTTPException(status_code=400, detail="缺少资源 ID")
+    source = str(req.source or "").strip().lower()
+    if source != "moviepilot":
+        raise HTTPException(status_code=400, detail="当前仅支持 MoviePilot 资源添加到下载器")
+    return await moviepilot_resource_service.add_torrent_to_downloader(
+        resource_id=resource_id,
+        media_type=req.type,
+        tmdb_id=tmdb_id,
+        title=req.title,
+        year=req.year,
+        season=req.season,
+        episode=req.episode,
+        fill_mode=req.fill_mode,
+        existing_episodes_by_season=req.existing_episodes_by_season,
+    )
+
+
+def _sse_event(data: dict[str, Any]) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _parse_source_set(raw_sources: Any) -> set[str]:
     if isinstance(raw_sources, str):
         source_set = {part.strip().lower() for part in raw_sources.split(",") if part.strip()}
     elif isinstance(raw_sources, list):
@@ -189,6 +285,16 @@ async def _load_forward_resources_from_params(request: Request, params: dict[str
         source_set = set()
     if not source_set or "all" in source_set:
         source_set = {"aiying"}
+    return source_set
+
+
+async def _load_forward_resources_from_params(request: Request, params: dict[str, Any], *, respect_enabled: bool = True):
+    tmdb_id = str(params.get("tmdbId") or params.get("tmdb_id") or "").strip()
+    if not tmdb_id:
+        return []
+    media_type = "tv" if str(params.get("type") or "").lower() in {"tv", "series"} else "movie"
+    raw_sources = params.get("sources") or params.get("source") or []
+    source_set = _parse_source_set(raw_sources)
     result: list[dict[str, Any]] = []
     if "aiying" in source_set:
         try:
@@ -196,6 +302,18 @@ async def _load_forward_resources_from_params(request: Request, params: dict[str
             result.extend(forward_aiying_service.build_aiying_forward_resources(request, params, aiying_resources))
         except HTTPException as e:
             logger.warning(f"[Forward] 爱影查询失败: {getattr(e, 'detail', str(e))}")
+    if "moviepilot" in source_set:
+        try:
+            result.extend(await moviepilot_resource_service.search_resources(
+                media_type=media_type,
+                tmdb_id=tmdb_id,
+                title=params.get("title"),
+                year=params.get("year"),
+                season=forward_aiying_service._to_optional_int(params.get("season")),
+                episode=forward_aiying_service._to_optional_int(params.get("episode")),
+            ))
+        except HTTPException as e:
+            logger.warning(f"[Forward] MoviePilot 查询失败: {getattr(e, 'detail', str(e))}")
     return result
 
 

@@ -6,6 +6,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         // 14. 发现推荐页
         // ==========================================
         const RESOURCE_SEARCH_SOURCE_STORAGE_KEY = 'chillposter-discover-resource-search-sources';
+        const MP_MISSING_FILL_MODE_STORAGE_KEY = 'chillposter-mp-missing-fill-mode';
+        const RESOURCE_SEARCH_DEFAULT_SORT_FIELD = 'default';
+        const RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION = 'desc';
         const DISCOVER_SOURCES_CACHE_KEY = 'cp_discover_sources';
         const DISCOVER_SOURCES_CACHE_VERSION = 1;
         const DISCOVER_MAIN_GRID_CACHE_KEY = 'cp_discover_main_grid';
@@ -75,7 +78,16 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const resourceSearchSources = ref([]);
         const resourceSearchSourceLoading = ref(false);
         const resourceSearchSourceMenuOpen = ref(false);
+        const resourceSearchSortMenuOpen = ref(false);
         const selectedResourceSearchSources = ref([]);
+        const readMoviePilotMissingFillMode = () => {
+            try {
+                return localStorage.getItem(MP_MISSING_FILL_MODE_STORAGE_KEY) === 'full' ? 'full' : 'missing';
+            } catch (_) {
+                return 'missing';
+            }
+        };
+        const moviePilotMissingFillMode = ref(readMoviePilotMissingFillMode());
         const resourceSearchModal = reactive({
             visible: false,
             context: '',
@@ -83,6 +95,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             items: [],
             error: '',
             title: '',
+            year: '',
             mediaType: 'movie',
             tmdbId: '',
             sources: [],
@@ -90,8 +103,24 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             episode: null,
             transferringId: '',
             previewingId: '',
+            downloadingId: '',
+            sourceProgress: {},
+            activeSourceKey: '',
+            filters: {
+                site: '',
+                seasonEpisode: '',
+                resolution: '',
+                quality: '',
+                codec: '',
+                hdr: '',
+                promotion: '',
+                sortField: RESOURCE_SEARCH_DEFAULT_SORT_FIELD,
+                sortDirection: RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION,
+            },
         });
         let resourceSearchSourcesPromise = null;
+        let resourceSearchStreamController = null;
+        let resourceSearchRequestSeq = 0;
 
         const readLocalJson = (key) => {
             try {
@@ -222,6 +251,343 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         const resourceSearchSourceReady = computed(() => {
             return resourceSearchSources.value.length > 0 && selectedResourceSearchSources.value.length > 0;
         });
+        const resourceSearchSourceMap = computed(() => Object.fromEntries((resourceSearchSources.value || []).map(source => [source.key, source])));
+        const resourceSearchNumber = (value) => {
+            const next = Number.parseInt(value ?? 0, 10);
+            return Number.isFinite(next) ? next : 0;
+        };
+        const resourceSearchSizeBytes = (item = {}) => {
+            for (const key of ['size', 'sizeBytes', 'totalSize']) {
+                const value = Number(item?.[key]);
+                if (Number.isFinite(value) && value > 0) return value;
+            }
+            const texts = [item.sizeLabel, item.description, item.title, item.name].filter(Boolean);
+            const unitMap = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3, tb: 1024 ** 4 };
+            for (const text of texts) {
+                const match = String(text).match(/(\d+(?:\.\d+)?)\s*(tb|gb|mb|kb|b)\b/i);
+                if (match) {
+                    const amount = Number.parseFloat(match[1]);
+                    const unit = String(match[2] || '').toLowerCase();
+                    if (Number.isFinite(amount) && unitMap[unit]) return amount * unitMap[unit];
+                }
+            }
+            return 0;
+        };
+        const resourceSearchSortFieldOptions = [
+            { value: 'default', label: '默认' },
+            { value: 'site', label: '站点' },
+            { value: 'size', label: '大小' },
+            { value: 'seeders', label: '做种数' },
+            { value: 'pubdate', label: '发布时间' },
+        ];
+        const resourceSearchSortDirectionOptions = [
+            { value: 'asc', label: '升序', icon: 'fa-arrow-down-short-wide' },
+            { value: 'desc', label: '降序', icon: 'fa-arrow-down-wide-short' },
+        ];
+        const resourceSearchSortItems = (
+            items = [],
+            sortField = RESOURCE_SEARCH_DEFAULT_SORT_FIELD,
+            sortDirection = RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION,
+        ) => {
+            const list = [...items];
+            const field = String(sortField || RESOURCE_SEARCH_DEFAULT_SORT_FIELD);
+            const direction = String(sortDirection || RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION) === 'asc' ? 'asc' : 'desc';
+            const factor = direction === 'asc' ? 1 : -1;
+            const byPubdate = (a, b) => String(b.pubdate || '').localeCompare(String(a.pubdate || ''));
+            const bySeedersDesc = (a, b) => {
+                const seedDiff = resourceSearchNumber(b.seeders) - resourceSearchNumber(a.seeders);
+                if (seedDiff) return seedDiff;
+                const peerDiff = resourceSearchNumber(b.peers) - resourceSearchNumber(a.peers);
+                if (peerDiff) return peerDiff;
+                return byPubdate(a, b);
+            };
+            return list.sort((a, b) => {
+                if (field === 'site') {
+                    const diff = String(a.siteName || '').localeCompare(String(b.siteName || ''), 'zh-Hans-CN');
+                    if (diff) return diff * factor;
+                    return bySeedersDesc(a, b);
+                }
+                if (field === 'size') {
+                    const diff = resourceSearchSizeBytes(a) - resourceSearchSizeBytes(b);
+                    if (diff) return diff * factor;
+                    return bySeedersDesc(a, b);
+                }
+                if (field === 'seeders' || field === 'default') {
+                    const seedDiff = resourceSearchNumber(a.seeders) - resourceSearchNumber(b.seeders);
+                    if (seedDiff) return seedDiff * factor;
+                    const peerDiff = resourceSearchNumber(a.peers) - resourceSearchNumber(b.peers);
+                    if (peerDiff) return peerDiff * factor;
+                    return bySeedersDesc(a, b);
+                }
+                if (field === 'pubdate') {
+                    const diff = String(a.pubdate || '').localeCompare(String(b.pubdate || ''));
+                    if (diff) return diff * factor;
+                    return bySeedersDesc(a, b);
+                }
+                return bySeedersDesc(a, b);
+            });
+        };
+        const sortResourceSearchGroupItems = (key, items = []) => {
+            if (String(key || '').toLowerCase() !== 'moviepilot') return items;
+            return resourceSearchSortItems(items, RESOURCE_SEARCH_DEFAULT_SORT_FIELD, RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION);
+        };
+        const resourceSearchGroups = computed(() => {
+            const groups = new Map();
+            const ensureGroup = (key, fallbackName = '') => {
+                key = String(key || 'unknown').trim().toLowerCase() || 'unknown';
+                if (!groups.has(key)) {
+                    const source = resourceSearchSourceMap.value[key] || {};
+                    const progress = resourceSearchModal.sourceProgress?.[key] || {};
+                    groups.set(key, {
+                        key,
+                        name: fallbackName || source.label || source.name || progress.sourceName || key,
+                        items: [],
+                        progress,
+                    });
+                }
+                return groups.get(key);
+            };
+            (selectedResourceSearchSources.value || []).forEach(key => ensureGroup(key));
+            Object.keys(resourceSearchModal.sourceProgress || {}).forEach(key => ensureGroup(key));
+            (resourceSearchModal.items || []).forEach(item => {
+                const key = String(item.sourceKey || item.source || 'aiying').trim().toLowerCase() || 'aiying';
+                ensureGroup(key, item.sourceName || '').items.push(item);
+            });
+            groups.forEach(group => {
+                group.items = sortResourceSearchGroupItems(group.key, group.items);
+            });
+            return Array.from(groups.values()).filter(group => {
+                const progress = group.progress || {};
+                return group.items.length || progress.loading || progress.error || progress.done;
+            });
+        });
+        const resourceSearchActiveGroup = computed(() => {
+            const groups = resourceSearchGroups.value || [];
+            if (!groups.length) return null;
+            const active = groups.find(group => group.key === resourceSearchModal.activeSourceKey);
+            if (active && (active.items.length || active.progress?.loading || active.progress?.error)) return active;
+            return groups.find(group => group.items.length) || groups[0];
+        });
+        const resourceSearchActiveItems = computed(() => resourceSearchActiveGroup.value?.items || []);
+        const setResourceSearchActiveSource = (key) => {
+            resourceSearchModal.activeSourceKey = String(key || '').trim().toLowerCase();
+            clearResourceSearchFilters();
+            closeResourceSearchSortMenu();
+        };
+        const resourceSearchFilterFields = ['site', 'seasonEpisode', 'resolution', 'quality', 'codec', 'hdr', 'promotion'];
+        const clearResourceSearchFilters = () => {
+            resourceSearchModal.filters = {
+                site: '',
+                seasonEpisode: '',
+                resolution: '',
+                quality: '',
+                codec: '',
+                hdr: '',
+                promotion: '',
+                sortField: RESOURCE_SEARCH_DEFAULT_SORT_FIELD,
+                sortDirection: RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION,
+            };
+            closeResourceSearchSortMenu();
+        };
+        const resourceSearchHasFilters = computed(() => {
+            const filters = resourceSearchModal.filters || {};
+            return resourceSearchFilterFields.some(key => String(filters[key] ?? '').trim())
+                || String(filters.sortField || RESOURCE_SEARCH_DEFAULT_SORT_FIELD) !== RESOURCE_SEARCH_DEFAULT_SORT_FIELD
+                || String(filters.sortDirection || RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION) !== RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION;
+        });
+        const resourceSearchSortButtonText = computed(() => {
+            const filters = resourceSearchModal.filters || {};
+            const field = resourceSearchSortFieldOptions.find(item => item.value === String(filters.sortField || RESOURCE_SEARCH_DEFAULT_SORT_FIELD));
+            const direction = resourceSearchSortDirectionOptions.find(item => item.value === String(filters.sortDirection || RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION));
+            return `${field?.label || '默认'} · ${direction?.label || '降序'}`;
+        });
+        const toggleResourceSearchSortMenu = () => {
+            resourceSearchSortMenuOpen.value = !resourceSearchSortMenuOpen.value;
+        };
+        const closeResourceSearchSortMenu = () => {
+            resourceSearchSortMenuOpen.value = false;
+        };
+        const setResourceSearchSortDirection = (direction) => {
+            resourceSearchModal.filters.sortDirection = String(direction || RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION) === 'asc' ? 'asc' : 'desc';
+        };
+        const setResourceSearchSortField = (field) => {
+            const value = String(field || RESOURCE_SEARCH_DEFAULT_SORT_FIELD);
+            resourceSearchModal.filters.sortField = resourceSearchSortFieldOptions.some(item => item.value === value) ? value : RESOURCE_SEARCH_DEFAULT_SORT_FIELD;
+            closeResourceSearchSortMenu();
+        };
+        const resourceSearchPadNumber = value => String(Math.max(0, resourceSearchNumber(value))).padStart(2, '0');
+        const resourceSearchAddRange = (set, start, end, maxSpan = 80) => {
+            const first = resourceSearchNumber(start);
+            const last = resourceSearchNumber(end ?? start);
+            if (!first || !last) return false;
+            const low = Math.min(first, last);
+            const high = Math.max(first, last);
+            if (high - low > maxSpan) return false;
+            for (let value = low; value <= high; value += 1) set.add(value);
+            return high > low;
+        };
+        const resourceSearchSeasonEpisodeInfo = (item = {}) => {
+            const text = [item.title, item.name, item.description].map(value => String(value || '')).join(' ');
+            const seasons = new Set();
+            const episodes = new Set();
+            let multiEpisode = false;
+            let match;
+            const seasonEpisodePattern = /(?:^|[^a-z0-9])s(?:eason)?\s*0?(\d{1,2})\s*e(?:p(?:isode)?)?\s*0?(\d{1,3})(?:\s*(?:-|~|至|到)\s*(?:e(?:p(?:isode)?)?)?\s*0?(\d{1,3}))?/gi;
+            while ((match = seasonEpisodePattern.exec(text))) {
+                seasons.add(resourceSearchNumber(match[1]));
+                if (resourceSearchAddRange(episodes, match[2], match[3] || match[2])) multiEpisode = true;
+            }
+            const seasonOnlyPattern = /(?:^|[^a-z0-9])s(?:eason)?\s*0?(\d{1,2})(?!\s*e)/gi;
+            while ((match = seasonOnlyPattern.exec(text))) {
+                seasons.add(resourceSearchNumber(match[1]));
+            }
+            const episodePattern = /(?:^|[^a-z0-9])e(?:p(?:isode)?)?\s*0?(\d{1,3})(?:\s*(?:-|~|至|到)\s*(?:e(?:p(?:isode)?)?)?\s*0?(\d{1,3}))?/gi;
+            while ((match = episodePattern.exec(text))) {
+                if (resourceSearchAddRange(episodes, match[1], match[2] || match[1])) multiEpisode = true;
+            }
+            const cnEpisodePattern = /第\s*0?(\d{1,3})(?:\s*(?:-|~|至|到)\s*0?(\d{1,3}))?\s*[集话話]/g;
+            while ((match = cnEpisodePattern.exec(text))) {
+                if (resourceSearchAddRange(episodes, match[1], match[2] || match[1])) multiEpisode = true;
+            }
+            return {
+                seasons: Array.from(seasons).filter(Boolean).sort((a, b) => a - b),
+                episodes: Array.from(episodes).filter(Boolean).sort((a, b) => a - b),
+                multiEpisode,
+            };
+        };
+        const resourceSearchSeasonEpisodeMatches = (item = {}, filterValue = '') => {
+            const value = String(filterValue || '').trim();
+            if (!value) return true;
+            const info = resourceSearchSeasonEpisodeInfo(item);
+            const hasSeason = info.seasons.length > 0;
+            const hasEpisode = info.episodes.length > 0;
+            if (value === 'current_season') {
+                const season = resourceSearchNumber(resourceSearchModal.season);
+                return !season || info.seasons.includes(season);
+            }
+            if (value === 'current_episode') {
+                const episode = resourceSearchNumber(resourceSearchModal.episode);
+                return !episode || info.episodes.includes(episode);
+            }
+            if (value === 'multi_episode') return info.multiEpisode;
+            if (value === 'single_episode') return hasEpisode && !info.multiEpisode && info.episodes.length === 1;
+            if (value === 'unknown_episode') return !hasSeason && !hasEpisode;
+            if (value.startsWith('season:')) {
+                const season = resourceSearchNumber(value.split(':')[1]);
+                return season ? info.seasons.includes(season) : true;
+            }
+            if (value.startsWith('episode:')) {
+                const episode = resourceSearchNumber(value.split(':')[1]);
+                return episode ? info.episodes.includes(episode) : true;
+            }
+            return true;
+        };
+        const resourceSearchTagSet = (item = {}) => new Set(resourceSearchItemTags(item).map(tag => String(tag).toLowerCase()));
+        const resourceSearchFilterOptions = computed(() => {
+            const items = resourceSearchActiveItems.value || [];
+            const sites = new Set();
+            const seasons = new Set();
+            const episodes = new Set();
+            const resolutions = new Set();
+            const qualities = new Set();
+            const codecs = new Set();
+            const hdrs = new Set();
+            let hasMultiEpisode = false;
+            let hasSingleEpisode = false;
+            let hasUnknownEpisode = false;
+            items.forEach(item => {
+                if (item.siteName) sites.add(String(item.siteName));
+                const info = resourceSearchSeasonEpisodeInfo(item);
+                info.seasons.forEach(value => seasons.add(value));
+                info.episodes.forEach(value => episodes.add(value));
+                if (info.multiEpisode) hasMultiEpisode = true;
+                if (info.episodes.length === 1 && !info.multiEpisode) hasSingleEpisode = true;
+                if (!info.seasons.length && !info.episodes.length) hasUnknownEpisode = true;
+                resourceSearchItemTags(item).forEach(tag => {
+                    const value = String(tag || '').trim();
+                    const lower = value.toLowerCase();
+                    if (/^(8k|4k|2160p|1080p|720p)$/i.test(value)) resolutions.add(value);
+                    if (/^(web-dl|webrip|web|bluray|blu-ray|remux|hdtv|uhd)$/i.test(value)) qualities.add(value);
+                    if (/^(h265|h264|hevc|avc|x265|x264)$/i.test(value)) codecs.add(value);
+                    if (/^(hdr|dv|dovi|hdr10|hdrvivid|dolby vision)$/i.test(value) || lower.includes('hdr')) hdrs.add(value);
+                });
+            });
+            const sortValues = values => Array.from(values).sort((a, b) => String(a).localeCompare(String(b), 'zh-Hans-CN'));
+            const seasonEpisodeOptions = [];
+            const addSeasonEpisodeOption = (value, label) => {
+                if (!value || seasonEpisodeOptions.some(item => item.value === value)) return;
+                seasonEpisodeOptions.push({ value, label });
+            };
+            if (resourceSearchModal.season != null) addSeasonEpisodeOption('current_season', `当前季 S${resourceSearchPadNumber(resourceSearchModal.season)}`);
+            if (resourceSearchModal.episode != null) addSeasonEpisodeOption('current_episode', `当前集 E${resourceSearchPadNumber(resourceSearchModal.episode)}`);
+            Array.from(seasons).sort((a, b) => a - b).forEach(value => addSeasonEpisodeOption(`season:${value}`, `第 ${value} 季`));
+            Array.from(episodes).sort((a, b) => a - b).slice(0, 160).forEach(value => addSeasonEpisodeOption(`episode:${value}`, `第 ${value} 集`));
+            if (hasSingleEpisode) addSeasonEpisodeOption('single_episode', '单集资源');
+            if (hasMultiEpisode) addSeasonEpisodeOption('multi_episode', '多集/合集');
+            if (hasUnknownEpisode) addSeasonEpisodeOption('unknown_episode', '未识别季集');
+            return {
+                sites: sortValues(sites),
+                seasonEpisodes: seasonEpisodeOptions,
+                resolutions: sortValues(resolutions),
+                qualities: sortValues(qualities),
+                codecs: sortValues(codecs),
+                hdrs: sortValues(hdrs),
+                sortFields: resourceSearchSortFieldOptions,
+                sortDirections: resourceSearchSortDirectionOptions,
+            };
+        });
+        const resourceSearchFilteredItems = computed(() => {
+            const filters = resourceSearchModal.filters || {};
+            const filtered = (resourceSearchActiveItems.value || []).filter(item => {
+                const tags = resourceSearchTagSet(item);
+                if (filters.site && String(item.siteName || '') !== String(filters.site)) return false;
+                if (!resourceSearchSeasonEpisodeMatches(item, filters.seasonEpisode)) return false;
+                if (filters.resolution && !tags.has(String(filters.resolution).toLowerCase())) return false;
+                if (filters.quality && !tags.has(String(filters.quality).toLowerCase())) return false;
+                if (filters.codec && !tags.has(String(filters.codec).toLowerCase())) return false;
+                if (filters.hdr && !tags.has(String(filters.hdr).toLowerCase())) return false;
+                if (filters.promotion) {
+                    const promotionKey = String(item.promotionKey || 'normal');
+                    if (filters.promotion === 'promo') {
+                        if (promotionKey === 'normal') return false;
+                    } else if (promotionKey !== filters.promotion) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+            return resourceSearchSortItems(
+                filtered,
+                filters.sortField || RESOURCE_SEARCH_DEFAULT_SORT_FIELD,
+                filters.sortDirection || RESOURCE_SEARCH_DEFAULT_SORT_DIRECTION,
+            );
+        });
+
+        const resourceSearchItemKey = (item = {}) => item.id || item.url || item.resourceId || item.title || `${item.sourceKey || item.source || 'source'}-${item.name || 'resource'}`;
+        const resourceSearchItemTags = (item = {}) => {
+            if (Array.isArray(item.tags)) return item.tags.filter(Boolean).slice(0, 8);
+            return String(item.genreTitle || '').split('|').map(tag => tag.trim()).filter(Boolean).slice(0, 8);
+        };
+        const resourceSearchItemClass = (item = {}) => {
+            const source = String(item.sourceKey || item.source || 'aiying').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+            return [`source-${source || 'unknown'}`];
+        };
+        const resourceSearchCanPreview = (item = {}) => !item.previewDisabled;
+        const resourceSearchCanTransfer = (item = {}) => String(item.sourceKey || item.source || 'aiying').toLowerCase() === 'aiying' && !item.transferDisabled;
+        const resourceSearchCanAddDownloader = (item = {}) => String(item.sourceKey || item.source || '').toLowerCase() === 'moviepilot';
+        const moviePilotMissingFillModeLabel = computed(() => moviePilotMissingFillMode.value === 'full' ? '全剧补缺' : '缺集补缺');
+        const toggleMoviePilotMissingFillMode = () => {
+            moviePilotMissingFillMode.value = moviePilotMissingFillMode.value === 'missing' ? 'full' : 'missing';
+            try {
+                localStorage.setItem(MP_MISSING_FILL_MODE_STORAGE_KEY, moviePilotMissingFillMode.value);
+            } catch (_) {}
+            showToast?.(`MoviePilot 已切换为${moviePilotMissingFillModeLabel.value}`, 'success');
+        };
+        const normalizeResourceSearchMediaType = (value = '') => {
+            const text = String(value || '').trim().toLowerCase();
+            if (['tv', 'series', 'show'].includes(text) || ['电视剧', '剧集', '番剧'].includes(String(value || '').trim())) return 'tv';
+            return 'movie';
+        };
 
         const readSavedResourceSearchSources = () => {
             try {
@@ -855,6 +1221,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 resourceSearchModal.items = [];
                 resourceSearchModal.error = '';
                 resourceSearchModal.title = '';
+                resourceSearchModal.year = '';
+                resourceSearchModal.downloadingId = '';
             }
         };
 
@@ -971,6 +1339,22 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 .sort((a, b) => a.season - b.season);
         };
 
+        const getMissingEpisodeExistingEpisodeMap = (row = missingEpisodeCompareModal.row) => {
+            const map = {};
+            const addEpisodes = (season, episodes = []) => {
+                const seasonNumber = Number(season);
+                if (!Number.isFinite(seasonNumber) || seasonNumber <= 0) return;
+                const normalized = normalizeEpisodeList(episodes);
+                if (!normalized.length) return;
+                const current = new Set(map[String(seasonNumber)] || []);
+                normalized.forEach(ep => current.add(ep));
+                map[String(seasonNumber)] = Array.from(current).sort((a, b) => a - b);
+            };
+            getTmdbSeasonRows(row).forEach(season => addEpisodes(season.season, season.presentEpisodes));
+            getLocalSeasonRows(row).forEach(season => addEpisodes(season.season, season.episodes));
+            return map;
+        };
+
         const isEpisodeListed = (episodes = [], episode) => {
             return Array.isArray(episodes) && episodes.includes(Number(episode));
         };
@@ -995,7 +1379,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 resourceSearchModal.loading = false;
                 resourceSearchModal.items = [];
                 resourceSearchModal.error = '';
+                resourceSearchModal.year = '';
                 resourceSearchModal.transferringId = '';
+                resourceSearchModal.downloadingId = '';
             }
         };
 
@@ -2424,7 +2810,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             seasons = [],
             defaultSeason = null,
         } = {}) => {
-            const normalizedMediaType = String(mediaType || '').toLowerCase() === 'movie' ? 'movie' : 'tv';
+            const normalizedMediaType = normalizeResourceSearchMediaType(mediaType);
             if (normalizedMediaType === 'movie') {
                 await subscribeMoviePilotMedia({ tmdbId, mediaType: 'movie', title, year });
                 return;
@@ -2662,8 +3048,136 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const closeResourceSearchModal = () => {
+            resourceSearchRequestSeq += 1;
             resourceSearchModal.visible = false;
             resourceSearchModal.loading = false;
+            closeResourceSearchSortMenu();
+            resourceSearchModal.downloadingId = '';
+            if (resourceSearchStreamController) {
+                resourceSearchStreamController.abort();
+                resourceSearchStreamController = null;
+            }
+        };
+
+        const resetResourceSearchProgress = () => {
+            resourceSearchModal.sourceProgress = {};
+        };
+
+        const setResourceSearchProgress = (key, patch = {}) => {
+            key = String(key || 'unknown').trim().toLowerCase() || 'unknown';
+            resourceSearchModal.sourceProgress = {
+                ...(resourceSearchModal.sourceProgress || {}),
+                [key]: {
+                    ...(resourceSearchModal.sourceProgress?.[key] || {}),
+                    ...patch,
+                },
+            };
+        };
+
+        const appendResourceSearchItems = (items = []) => {
+            const nextItems = Array.isArray(items) ? items : [];
+            if (!nextItems.length) return;
+            const seen = new Set((resourceSearchModal.items || []).map(item => String(resourceSearchItemKey(item))));
+            const merged = [...(resourceSearchModal.items || [])];
+            nextItems.forEach(item => {
+                const key = String(resourceSearchItemKey(item));
+                if (seen.has(key)) return;
+                seen.add(key);
+                merged.push(item);
+            });
+            resourceSearchModal.items = merged;
+        };
+
+        const replaceResourceSearchItemsForSource = (sourceKey, items = []) => {
+            sourceKey = String(sourceKey || 'unknown').trim().toLowerCase() || 'unknown';
+            const nextItems = Array.isArray(items) ? items : [];
+            resourceSearchModal.items = [
+                ...(resourceSearchModal.items || []).filter(item => String(item.sourceKey || item.source || '').trim().toLowerCase() !== sourceKey),
+                ...nextItems,
+            ];
+        };
+
+        const handleResourceSearchStreamEvent = (event = {}, requestId = resourceSearchRequestSeq) => {
+            if (requestId !== resourceSearchRequestSeq) return;
+            const sourceKey = String(event.sourceKey || 'moviepilot').trim().toLowerCase() || 'moviepilot';
+            const items = Array.isArray(event.items) ? event.items : [];
+            const type = String(event.type || 'progress');
+            const text = event.text || event.message || '';
+            if (type === 'append') {
+                appendResourceSearchItems(items);
+            } else if (type === 'replace' || type === 'done') {
+                if (items.length || type === 'replace') replaceResourceSearchItemsForSource(sourceKey, items);
+            }
+            setResourceSearchProgress(sourceKey, {
+                sourceName: event.sourceName || resourceSearchSourceMap.value[sourceKey]?.label || sourceKey,
+                text,
+                loading: !['done', 'error'].includes(type),
+                done: type === 'done',
+                error: type === 'error' ? (event.message || event.text || '搜索失败') : '',
+                finished: event.finished,
+                total: event.total,
+                totalItems: event.total_items,
+                stage: event.stage || '',
+            });
+        };
+
+        const handleResourceSearchSseBlock = (block = '', requestId = resourceSearchRequestSeq) => {
+            if (requestId !== resourceSearchRequestSeq) return;
+            const data = String(block || '')
+                .split('\n')
+                .map(line => line.trimEnd())
+                .filter(line => line.startsWith('data:'))
+                .map(line => line.slice(5).trimStart())
+                .join('\n')
+                .trim();
+            if (!data) return;
+            try {
+                handleResourceSearchStreamEvent(JSON.parse(data), requestId);
+            } catch (e) {
+                console.warn('资源搜索流解析失败:', e, data.slice(0, 120));
+            }
+        };
+
+        const streamForwardResourceSearch = async (payload = {}, requestId = resourceSearchRequestSeq) => {
+            const controller = new AbortController();
+            resourceSearchStreamController = controller;
+            setResourceSearchProgress('moviepilot', { sourceName: 'MoviePilot', text: 'MoviePilot 搜索中...', loading: true });
+            const res = await fetch('/api/forward/search_resources/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+            if (!res.ok) {
+                throw new Error(await res.text() || `HTTP ${res.status}`);
+            }
+            if (!res.body) {
+                throw new Error('浏览器不支持读取流式响应');
+            }
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+                let splitIndex = buffer.indexOf('\n\n');
+                while (splitIndex >= 0) {
+                    const block = buffer.slice(0, splitIndex);
+                    buffer = buffer.slice(splitIndex + 2);
+                    handleResourceSearchSseBlock(block, requestId);
+                    splitIndex = buffer.indexOf('\n\n');
+                }
+            }
+            buffer += decoder.decode();
+            if (buffer.trim()) handleResourceSearchSseBlock(buffer, requestId);
+            if (requestId !== resourceSearchRequestSeq) return;
+            setResourceSearchProgress('moviepilot', {
+                sourceName: 'MoviePilot',
+                text: resourceSearchModal.sourceProgress?.moviepilot?.text || 'MoviePilot 搜索完成',
+                loading: false,
+                done: true,
+            });
         };
 
         const buildForwardResourcePayload = (item = {}) => {
@@ -2674,6 +3188,8 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 resource_id: item.resourceId || item.resource_id || '',
                 type: resourceSearchModal.mediaType || item.mediaType || 'movie',
                 tmdb_id: resourceSearchModal.tmdbId || item.tmdbId || item.tmdb_id || '',
+                title: resourceSearchModal.title || item.mediaTitle || item.title || item.name || '',
+                year: resourceSearchModal.year || item.year || '',
             };
             if (resourceSearchModal.season != null) payload.season = resourceSearchModal.season;
             if (resourceSearchModal.episode != null) payload.episode = resourceSearchModal.episode;
@@ -2681,10 +3197,14 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         };
 
         const openForwardResource = async (item = {}) => {
+            if (!resourceSearchCanTransfer(item)) {
+                showToast?.('MoviePilot 搜索结果当前仅展示，暂未接入转存', 'info');
+                return;
+            }
             const transferId = String(item.id || item.url || item.title || Date.now());
             const payload = buildForwardResourcePayload(item);
             if (!payload.resource_id) {
-                showToast?.('该爱影资源缺少转存 ID，请重新搜索', 'warning');
+                showToast?.('该资源缺少转存 ID，请重新搜索', 'warning');
                 return;
             }
             resourceSearchModal.transferringId = transferId;
@@ -2702,7 +3222,47 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
         };
 
+        const addMoviePilotResourceToDownloader = async (item = {}) => {
+            if (!resourceSearchCanAddDownloader(item)) {
+                showToast?.('当前资源不支持添加到 MoviePilot 下载器', 'info');
+                return;
+            }
+            const downloadKey = String(item.id || item.resourceId || item.url || item.title || Date.now());
+            const payload = buildForwardResourcePayload(item);
+            if (!payload.resource_id) {
+                showToast?.('该资源缺少下载 ID，请重新搜索', 'warning');
+                return;
+            }
+            const isMissingEpisodeFill = resourceSearchModal.context === 'missing_episode'
+                && resourceSearchModal.mediaType === 'tv'
+                && moviePilotMissingFillMode.value === 'missing';
+            payload.fill_mode = isMissingEpisodeFill ? 'missing' : 'full';
+            if (isMissingEpisodeFill) {
+                payload.existing_episodes_by_season = getMissingEpisodeExistingEpisodeMap();
+            }
+            resourceSearchModal.downloadingId = downloadKey;
+            item.downloadStatus = '添加中';
+            try {
+                const res = await axios.post('/api/forward/download_resource', payload);
+                item.downloadStatus = '已添加';
+                const selection = res.data?.selection || {};
+                showToast?.(res.data?.message || '已添加到 MoviePilot 下载器', selection.error ? 'warning' : 'success');
+            } catch (e) {
+                const message = e.response?.data?.detail || e.message || '添加下载失败';
+                item.downloadStatus = '';
+                showToast?.('添加下载失败: ' + message, 'error');
+            } finally {
+                if (resourceSearchModal.downloadingId === downloadKey) {
+                    resourceSearchModal.downloadingId = '';
+                }
+            }
+        };
+
         const previewForwardResource = async (item = {}) => {
+            if (!resourceSearchCanPreview(item)) {
+                showToast?.('MoviePilot 搜索结果当前不支持预览', 'info');
+                return;
+            }
             if (Array.isArray(item.previewItems) && item.previewItems.length && !item.previewError) {
                 item.previewOpen = !item.previewOpen;
                 return;
@@ -2710,7 +3270,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             const previewId = String(item.id || item.url || item.title || Date.now());
             const payload = buildForwardResourcePayload(item);
             if (!payload.resource_id) {
-                showToast?.('该爱影资源缺少预览 ID，请重新搜索', 'warning');
+                showToast?.('该资源缺少预览 ID，请重新搜索', 'warning');
                 return;
             }
             resourceSearchModal.previewingId = previewId;
@@ -2742,6 +3302,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             tmdbId,
             mediaType = 'movie',
             title = '',
+            year = '',
             season = null,
             episode = null,
             context = 'modal',
@@ -2762,36 +3323,84 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
             }
             const normalizedMediaType = String(mediaType || '').toLowerCase() === 'movie' ? 'movie' : 'tv';
             const sources = [...selectedResourceSearchSources.value];
+            const requestId = ++resourceSearchRequestSeq;
             resourceSearchModal.visible = !inline;
             resourceSearchModal.context = context;
             resourceSearchModal.loading = true;
             resourceSearchModal.items = [];
             resourceSearchModal.error = '';
             resourceSearchModal.title = title || '';
+            resourceSearchModal.year = year || '';
             resourceSearchModal.mediaType = normalizedMediaType;
             resourceSearchModal.tmdbId = normalizedTmdbId;
             resourceSearchModal.sources = sources;
+            resourceSearchModal.activeSourceKey = sources[0] || '';
+            clearResourceSearchFilters();
             resourceSearchModal.season = normalizedMediaType === 'tv' && season != null ? season : null;
             resourceSearchModal.episode = normalizedMediaType === 'tv' && episode != null ? episode : null;
             resourceSearchModal.transferringId = '';
+            resourceSearchModal.previewingId = '';
+            resourceSearchModal.downloadingId = '';
+            resetResourceSearchProgress();
+            if (resourceSearchStreamController) {
+                resourceSearchStreamController.abort();
+                resourceSearchStreamController = null;
+            }
             try {
-                const payload = {
+                const basePayload = {
                     tmdb_id: normalizedTmdbId,
                     type: normalizedMediaType,
-                    sources,
+                    title: resourceSearchModal.title || '',
+                    year: resourceSearchModal.year || '',
                 };
-                if (resourceSearchModal.season != null) payload.season = resourceSearchModal.season;
-                if (resourceSearchModal.episode != null) payload.episode = resourceSearchModal.episode;
-                const res = await axios.post('/api/forward/search_resources', payload);
-                resourceSearchModal.items = res.data || [];
+                if (resourceSearchModal.season != null) basePayload.season = resourceSearchModal.season;
+                if (resourceSearchModal.episode != null) basePayload.episode = resourceSearchModal.episode;
+                const normalSources = sources.filter(source => source !== 'moviepilot');
+                const tasks = [];
+                if (normalSources.length) {
+                    setResourceSearchProgress('aiying', { sourceName: '爱影', text: '爱影搜索中...', loading: true });
+                    tasks.push((async () => {
+                        try {
+                            const res = await axios.post('/api/forward/search_resources', { ...basePayload, sources: normalSources });
+                            if (requestId !== resourceSearchRequestSeq) return;
+                            appendResourceSearchItems(res.data || []);
+                            setResourceSearchProgress('aiying', {
+                                sourceName: '爱影',
+                                text: `爱影搜索完成，共 ${(res.data || []).length} 个资源`,
+                                loading: false,
+                                done: true,
+                                totalItems: (res.data || []).length,
+                            });
+                        } catch (e) {
+                            if (requestId !== resourceSearchRequestSeq) return;
+                            const message = e.response?.data?.detail || e.message || '爱影搜索失败';
+                            setResourceSearchProgress('aiying', { sourceName: '爱影', text: message, loading: false, done: true, error: message });
+                            throw e;
+                        }
+                    })());
+                }
+                if (sources.includes('moviepilot')) {
+                    tasks.push(streamForwardResourceSearch({ ...basePayload, sources: ['moviepilot'] }, requestId));
+                }
+                const results = await Promise.allSettled(tasks);
+                if (requestId !== resourceSearchRequestSeq) return;
+                const rejected = results.find(result => result.status === 'rejected' && result.reason?.name !== 'AbortError');
+                if (rejected && !resourceSearchModal.items.length) {
+                    throw rejected.reason;
+                }
                 if (!resourceSearchModal.items.length) {
                     resourceSearchModal.error = '未搜索到可用资源';
                 }
             } catch (e) {
+                if (requestId !== resourceSearchRequestSeq) return;
+                if (e?.name === 'AbortError') return;
                 resourceSearchModal.error = e.response?.data?.detail || e.message || '资源搜索失败';
                 showToast?.('资源搜索失败: ' + resourceSearchModal.error, 'error');
             } finally {
-                resourceSearchModal.loading = false;
+                if (requestId === resourceSearchRequestSeq) {
+                    resourceSearchModal.loading = false;
+                    resourceSearchStreamController = null;
+                }
             }
         };
 
@@ -2802,6 +3411,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 tmdbId: detail.tmdb_id || item._tmdb_id || item.id || '',
                 mediaType: detail.media_type || item.media_type || 'movie',
                 title: detail.title || item.title || '',
+                year: detail.year || item.year || '',
                 season: detailModal.selectedSeason,
                 context: 'detail',
             });
@@ -2814,6 +3424,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 tmdbId: row.tmdbId || item.tmdb_id || item._tmdb_id || item.id || '',
                 mediaType: 'tv',
                 title: row.title || item.title || row.localItem?.title || '',
+                year: row.year || item.year || row.localItem?.year || '',
                 context: 'missing_episode',
                 inline: true,
             });
@@ -2826,6 +3437,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
                 tmdbId: movie.tmdbId || '',
                 mediaType: 'movie',
                 title: movie.title || movie.originalTitle || '',
+                year: movie.year || '',
                 context: 'missing_episode',
                 inline: true,
             });
@@ -3098,6 +3710,9 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         missingEpisodeActiveErrorCount,
         missingEpisodeActionableMissingCount,
         missingEpisodeActionableEpisodeCount,
+        moviePilotMissingFillMode,
+        moviePilotMissingFillModeLabel,
+        toggleMoviePilotMissingFillMode,
         missingEpisodeSearchActive,
         missingEpisodeStatsProblemItems,
         visibleMissingEpisodeStatsProblemItems,
@@ -3180,10 +3795,30 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         resourceSearchSources,
         resourceSearchSourceLoading,
         resourceSearchSourceMenuOpen,
+        resourceSearchSortMenuOpen,
         selectedResourceSearchSources,
         selectedResourceSearchSourceLabels,
         resourceSearchSourceButtonText,
+        resourceSearchSortButtonText,
         resourceSearchSourceReady,
+        resourceSearchGroups,
+        resourceSearchActiveGroup,
+        resourceSearchActiveItems,
+        resourceSearchFilteredItems,
+        resourceSearchFilterOptions,
+        resourceSearchHasFilters,
+        setResourceSearchActiveSource,
+        clearResourceSearchFilters,
+        resourceSearchItemKey,
+        resourceSearchItemTags,
+        resourceSearchItemClass,
+        resourceSearchCanPreview,
+        resourceSearchCanTransfer,
+        resourceSearchCanAddDownloader,
+        toggleResourceSearchSortMenu,
+        closeResourceSearchSortMenu,
+        setResourceSearchSortDirection,
+        setResourceSearchSortField,
         toggleResourceSearchSourceMenu,
         closeResourceSearchSourceMenu,
         toggleResourceSearchSource,
@@ -3192,6 +3827,7 @@ export function useDiscover({ tab, isMobile, openPanels, focusedPanel, closeDock
         openDetailResourceSearch,
         closeResourceSearchModal,
         openForwardResource,
+        addMoviePilotResourceToDownloader,
         previewForwardResource,
         genreList,
         discoverSourceTabs,
