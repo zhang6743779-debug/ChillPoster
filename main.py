@@ -61,6 +61,7 @@ from app.routers import forward_aiying
 from app.routers import real_library
 from app.routers import organize_history
 from app.routers import emby_tasks
+from app.routers import cloud_drive
 
 # === [新增] 导入网关全局客户端，用于优雅关闭 ===
 from app.routers.gateway import proxy_client 
@@ -409,6 +410,7 @@ app.include_router(forward_aiying.router)
 app.include_router(real_library.router)
 app.include_router(organize_history.router)
 app.include_router(emby_tasks.router)
+app.include_router(cloud_drive.router)
 
 app.mount("/static", NoCacheHtmlStaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/fonts", StaticFiles(directory="fonts"), name="fonts")

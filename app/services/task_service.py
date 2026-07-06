@@ -375,7 +375,7 @@ class TaskService:
 
             drives = data.get("drives", [])
 
-            logger.trace(f"[启动] 刷新 115 清理任务: 配置 {len(drives)} 个")
+            logger.trace(f"[启动] 刷新云盘清理任务: 配置 {len(drives)} 个")
 
             job_counter = 0
             for idx, drive in enumerate(drives):
@@ -384,15 +384,16 @@ class TaskService:
                     continue
 
                 cron_exp = drive.get("delete_cron", "30 3 * * *") # 默认凌晨3:30
-                drive_name = drive.get("name", f"主号{idx + 1}")
+                provider = str((drive or {}).get("provider") or "115").strip().lower()
+                drive_name = drive.get("name", f"主云盘{idx + 1}")
 
-                # ===== 主号清理任务 =====
+                # ===== 主云盘清理任务 =====
                 job_id = f"cleanup_main_{idx}"
                 self._add_cleanup_job(job_id, drive, "main", 0, cron_exp, drive_name)
                 job_counter += 1
 
-                # ===== 小号清理任务（如果启用了秒传）=====
-                rapid_accounts = drive.get("rapid_accounts", [])
+                # ===== 115 小号清理任务（如果启用了秒传）=====
+                rapid_accounts = drive.get("rapid_accounts", []) if provider == "115" else []
                 if rapid_accounts and drive.get("enable_rapid", False):
                     for r_idx, rapid_acc in enumerate(rapid_accounts):
                         # 只有配置了 cookie 的小号才添加清理任务
@@ -402,7 +403,7 @@ class TaskService:
                             self._add_cleanup_job(r_job_id, drive, "rapid", r_idx, cron_exp, r_name)
                             job_counter += 1
 
-            logger.trace(f"[启动] 115 清理任务已加载: {job_counter} 个")
+            logger.trace(f"[启动] 云盘清理任务已加载: {job_counter} 个")
 
         except Exception as e:
             logger.error(f"[启动] 读取 302 配置失败: {e}")
@@ -469,9 +470,9 @@ class TaskService:
                     continue
                 self._add_selected_cleanup_job(f"selected_cleanup_{task_id}", task)
                 loaded += 1
-            logger.trace(f"[启动] 115 定时清空任务已加载: {loaded} 个")
+            logger.trace(f"[启动] 云盘定时清空任务已加载: {loaded} 个")
         except Exception as e:
-            logger.error(f"[启动] 读取 115 定时清空任务失败: {e}")
+            logger.error(f"[启动] 读取云盘定时清空任务失败: {e}")
 
     def _update_selected_cleanup_task_result(self, task_id: str, result: dict):
         config_path = "config/drive115_cleanup_tasks.json"
@@ -541,7 +542,7 @@ class TaskService:
             )
             self.selected_cleanup_job_ids.append(job_id)
         except Exception as e:
-            logger.error(f"[启动] 115 定时清空任务添加失败: {e}")
+            logger.error(f"[启动] 云盘定时清空任务添加失败: {e}")
 
     def schedule_daily_signin_job(self):
         next_run_time = self._compute_next_signin_datetime()

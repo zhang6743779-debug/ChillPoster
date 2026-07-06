@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from app.services.media_organize_115_ops import _get_115_client
 from app.services.task_service import task_service_instance
+from app.services.cloud_drive_provider import get_cloud_drive, is_drive_115
 from core.logger import logger
 
 
@@ -75,8 +76,6 @@ def _normalize_folder(folder: CleanupFolder) -> dict:
     cid = str(folder.cid or "").strip()
     name = str(folder.name or "").strip()
     path = str(folder.path or "").strip()
-    if not cid.isdigit():
-        raise HTTPException(status_code=400, detail="目录 CID 必须是数字")
     if cid == "0" or path in {"", "/", "根目录"}:
         raise HTTPException(status_code=400, detail="禁止选择根目录")
     return {"cid": cid, "name": name or path or cid, "path": path or name or cid}
@@ -97,7 +96,7 @@ def _normalize_payload(payload: CleanupTaskPayload, existing: dict | None = None
         seen.add(normalized["cid"])
         folders.append(normalized)
     if not folders:
-        raise HTTPException(status_code=400, detail="请至少选择一个 115 文件夹")
+        raise HTTPException(status_code=400, detail="请至少选择一个云盘文件夹")
 
     base = dict(existing or {})
     base.update({
@@ -126,7 +125,7 @@ def _refresh_jobs():
     try:
         task_service_instance.refresh_selected_cleanup_jobs()
     except Exception as e:
-        logger.warning(f"[CleanUp] 刷新 115 定时清空任务失败: {e}")
+        logger.warning(f"[CleanUp] 刷新云盘定时清空任务失败: {e}")
 
 
 @router.get("/tasks")
@@ -197,6 +196,10 @@ def run_task(task_id: str):
 @router.post("/browse115")
 def browse_115(payload: Browse115Payload):
     try:
+        if not is_drive_115(int(payload.drive_index or 0)):
+            cloud = get_cloud_drive(int(payload.drive_index or 0))
+            return cloud.list(payload.cid, include_files=False)
+
         client = _get_115_client(int(payload.drive_index or 0))
         cid = str(payload.cid or "0").strip() or "0"
         resp = client.fs_files_app(

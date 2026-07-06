@@ -1,7 +1,18 @@
 import axios from 'axios';
 import { reactive, ref } from 'vue';
 
-export function useDrive115Maintenance({ showToast, showConfirm }) {
+export function useDrive115Maintenance({ showToast, showConfirm, config302 = null, isCloudDriveReadOnly = null }) {
+        const getPrimaryDrive = () => (Array.isArray(config302?.drives) ? config302.drives[0] : null);
+        const isPrimaryDriveReadOnly = () => {
+            const drive = getPrimaryDrive();
+            return typeof isCloudDriveReadOnly === 'function' ? isCloudDriveReadOnly(drive) : false;
+        };
+        const ensureWritablePrimaryDrive = (action = '该功能') => {
+            if (!isPrimaryDriveReadOnly()) return true;
+            showToast(`当前云盘为只读，不能使用${action}`, 'warning');
+            return false;
+        };
+
         const cleanup115Tasks = ref([]);
         const cleanup115EditingId = ref('');
         const showCreate115Cleanup = ref(false);
@@ -92,7 +103,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 const res = await axios.get('/api/drive115_cleanup/tasks');
                 cleanup115Tasks.value = res.data?.tasks || [];
             } catch (e) {
-                showToast('获取 115 定时清空任务失败', 'error');
+                showToast('获取云盘定时清空任务失败', 'error');
             }
         };
 
@@ -108,6 +119,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const openCreate115Cleanup = () => {
+            if (!ensureWritablePrimaryDrive('定时清空')) return;
             reset115CleanupForm();
             showCreate115Cleanup.value = true;
         };
@@ -124,9 +136,10 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const save115CleanupTask = async () => {
+            if (!ensureWritablePrimaryDrive('定时清空')) return;
             if (!cleanup115Form.name.trim()) return showToast('请填写任务名称', 'error');
             if (!cleanup115Form.cron.trim()) return showToast('请填写 Cron 表达式', 'error');
-            if (!cleanup115Form.folders.length) return showToast('请选择至少一个 115 文件夹', 'error');
+            if (!cleanup115Form.folders.length) return showToast('请选择至少一个云盘文件夹', 'error');
             try {
                 const payload = JSON.parse(JSON.stringify(cleanup115Form));
                 if (cleanup115EditingId.value) {
@@ -156,6 +169,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const toggle115CleanupTask = async (task) => {
+            if (task.enabled === false && !ensureWritablePrimaryDrive('定时清空')) return;
             try {
                 await axios.post(`/api/drive115_cleanup/tasks/${task.id}/toggle`, { enabled: task.enabled === false });
                 fetch115CleanupTasks();
@@ -165,9 +179,10 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const run115CleanupTask = async (task) => {
+            if (!ensureWritablePrimaryDrive('立即清空')) return;
             const folderText = (task.folders || []).map(f => f.path || f.name || f.cid).join('、');
             const recycleText = task.clear_recycle_bin !== false ? '，并清空回收站，删除不可恢复' : '';
-            const ok = await showConfirm('立即清空 115 文件夹', `将清空以下目录内部内容：${folderText}${recycleText}。确定继续吗？`, 'danger');
+            const ok = await showConfirm('立即清空云盘文件夹', `将清空以下目录内部内容：${folderText}${recycleText}。确定继续吗？`, 'danger');
             if (!ok) return;
             try {
                 const res = await axios.post(`/api/drive115_cleanup/tasks/${task.id}/run`);
@@ -298,7 +313,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                     stopCloud115TransferPolling();
                     rememberCloud115TransferJob(job);
                     if (!silent) {
-                        showToast(job.summary || job.message || '网盘资源秒传完成', getCloud115TransferToastType(job));
+                        showToast(job.summary || job.message || '115 资源秒传完成', getCloud115TransferToastType(job));
                     }
                 }
                 return job;
@@ -314,7 +329,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             cloud115PollingTimer = setInterval(async () => {
                 const job = await fetchCloud115TransferJob(jobId, true);
                 if (job && isCloud115TransferTerminal(job)) {
-                    showToast(job.summary || job.message || '网盘资源秒传完成', getCloud115TransferToastType(job));
+                    showToast(job.summary || job.message || '115 资源秒传完成', getCloud115TransferToastType(job));
                 }
             }, 1500);
         };
@@ -337,6 +352,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const openCreate115Upload = () => {
+            if (!ensureWritablePrimaryDrive('上传监听')) return;
             reset115UploadForm();
             showCreate115Upload.value = true;
         };
@@ -358,9 +374,10 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const save115UploadTask = async () => {
+            if (!ensureWritablePrimaryDrive('上传监听')) return;
             if (!upload115Form.name.trim()) return showToast('请填写任务名称', 'error');
             if (!upload115Form.local_folder.trim()) return showToast('请选择本地监听目录', 'error');
-            if (!upload115Form.target_cid || upload115Form.target_cid === '0') return showToast('请选择 115 目标目录', 'error');
+            if (!upload115Form.target_cid || upload115Form.target_cid === '0') return showToast('请选择云盘目标目录', 'error');
             try {
                 const payload = JSON.parse(JSON.stringify(upload115Form));
                 payload.concurrency = Number(payload.concurrency || 5);
@@ -393,6 +410,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const toggle115UploadTask = async (task) => {
+            if (task.enabled === false && !ensureWritablePrimaryDrive('上传监听')) return;
             try {
                 await axios.post(`/api/drive115_upload/tasks/${task.id}/toggle`, { enabled: task.enabled === false });
                 fetch115UploadTasks();
@@ -403,6 +421,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const scan115UploadTask = async (task) => {
+            if (!ensureWritablePrimaryDrive('上传监听')) return;
             try {
                 const res = await axios.post(`/api/drive115_upload/tasks/${task.id}/scan`, { force: true });
                 showToast(`已加入队列 ${res.data?.queued || 0} 个文件`, 'success');
@@ -479,7 +498,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             upload115Form.target_name = name;
             upload115Form.target_path = path;
             upload115Browser.visible = false;
-            showToast('已选择 115 目标目录', 'success');
+            showToast('已选择云盘目标目录', 'success');
         };
 
         const load115UploadLocalDir = async (path = '/') => {
@@ -547,7 +566,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const loadCloud115SourceDir = async (cid = '0', path = '/') => {
-            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源账号 CK', 'error');
+            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源 115 账号 CK', 'error');
             cloud115SourceBrowser.loading = true;
             try {
                 const res = await axios.post('/api/drive115_upload/cloud/browse', {
@@ -561,7 +580,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 cloud115SourceBrowser.dirs = (res.data.dirs || []).map(item => ({ ...item, type: 'dir' }));
                 cloud115SourceBrowser.files = (res.data.files || []).map(item => ({ ...item, type: 'file' }));
             } catch (e) {
-                showToast('浏览来源网盘失败: ' + (e.message || e), 'error');
+                showToast('浏览来源 115 失败: ' + (e.message || e), 'error');
             } finally {
                 cloud115SourceBrowser.loading = false;
             }
@@ -572,7 +591,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 cloud115SourceBrowser.visible = false;
                 return;
             }
-            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源账号 CK', 'error');
+            if (!cloud115Form.source_cookie.trim()) return showToast('请先填写来源 115 账号 CK', 'error');
             cloud115SourceBrowser.visible = true;
             cloud115SourceBrowser.history.splice(0);
             loadCloud115SourceDir('0', '/');
@@ -613,7 +632,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         };
 
         const loadCloud115TargetDir = async (cid = '0', path = '/') => {
-            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标账号 CK', 'error');
+            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标 115 账号 CK', 'error');
             cloud115TargetBrowser.loading = true;
             try {
                 const res = await axios.post('/api/drive115_upload/cloud/browse', {
@@ -626,7 +645,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 cloud115TargetBrowser.currentPath = path || '/';
                 cloud115TargetBrowser.dirs = (res.data.dirs || []).map(item => ({ ...item, type: 'dir' }));
             } catch (e) {
-                showToast('浏览目标网盘失败: ' + (e.message || e), 'error');
+                showToast('浏览目标 115 失败: ' + (e.message || e), 'error');
             } finally {
                 cloud115TargetBrowser.loading = false;
             }
@@ -637,7 +656,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 cloud115TargetBrowser.visible = false;
                 return;
             }
-            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标账号 CK', 'error');
+            if (!cloud115Form.target_cookie.trim()) return showToast('请先填写目标 115 账号 CK', 'error');
             cloud115TargetBrowser.visible = true;
             cloud115TargetBrowser.history.splice(0);
             loadCloud115TargetDir('0', '/');
@@ -663,18 +682,18 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
             cloud115Form.target_name = name;
             cloud115Form.target_path = path;
             cloud115TargetBrowser.visible = false;
-            showToast('已选择目标网盘目录', 'success');
+            showToast('已选择目标 115 目录', 'success');
         };
 
         const runCloud115RapidTransfer = async () => {
-            if (!cloud115Form.source_cookie.trim()) return showToast('请填写来源账号 CK', 'error');
-            if (!cloud115Form.target_cookie.trim()) return showToast('请填写目标账号 CK', 'error');
+            if (!cloud115Form.source_cookie.trim()) return showToast('请填写来源 115 账号 CK', 'error');
+            if (!cloud115Form.target_cookie.trim()) return showToast('请填写目标 115 账号 CK', 'error');
             if (!cloud115Form.selected_items.length) return showToast('请选择需要秒传的文件或文件夹', 'error');
-            if (!cloud115Form.target_cid || cloud115Form.target_cid === '0') return showToast('请选择目标网盘目录', 'error');
+            if (!cloud115Form.target_cid || cloud115Form.target_cid === '0') return showToast('请选择目标 115 目录', 'error');
             const concurrency = Math.max(1, Math.min(4, parseInt(cloud115Form.concurrency || 4, 10) || 4));
             cloud115Form.concurrency = concurrency;
             const ok = await showConfirm(
-                '开始网盘资源秒传',
+                '开始 115 资源秒传',
                 `将 ${cloud115Form.selected_items.length} 个文件/文件夹秒传到「${cloud115Form.target_path || cloud115Form.target_name}」，并发 ${concurrency}。确定继续吗？`,
                 'warning'
             );
@@ -710,14 +729,14 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                 cloud115Transfer.result = result;
                 if (result.job_id && !isCloud115TransferTerminal(result)) {
                     startCloud115TransferPolling(result.job_id);
-                    showToast('网盘资源秒传任务已开始', 'success');
+                    showToast('115 资源秒传任务已开始', 'success');
                 } else {
                     cloud115Transfer.loading = false;
                     rememberCloud115TransferJob(result);
-                    showToast(result.summary || '网盘资源秒传完成', getCloud115TransferToastType(result));
+                    showToast(result.summary || '115 资源秒传完成', getCloud115TransferToastType(result));
                 }
             } catch (e) {
-                showToast('网盘资源秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
+                showToast('115 资源秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
                 cloud115Transfer.loading = false;
                 stopCloud115TransferPolling();
             }
@@ -726,7 +745,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
         const cancelCloud115RapidTransfer = async () => {
             const jobId = cloud115Transfer.result?.job_id;
             if (!jobId) return showToast('当前没有可取消的秒传任务', 'warning');
-            const ok = await showConfirm('取消网盘资源秒传', '确定取消当前秒传任务吗？已完成的文件不会回滚。', 'warning');
+            const ok = await showConfirm('取消 115 资源秒传', '确定取消当前秒传任务吗？已完成的文件不会回滚。', 'warning');
             if (!ok) return;
             try {
                 const res = await axios.post(`/api/drive115_upload/cloud/jobs/${jobId}/cancel`);
@@ -740,7 +759,7 @@ export function useDrive115Maintenance({ showToast, showConfirm }) {
                     cloud115Transfer.loading = true;
                     startCloud115TransferPolling(jobId);
                 }
-                showToast('已请求取消网盘资源秒传', 'warning');
+                showToast('已请求取消 115 资源秒传', 'warning');
             } catch (e) {
                 showToast('取消秒传失败: ' + (e.response?.data?.detail || e.message), 'error');
             }

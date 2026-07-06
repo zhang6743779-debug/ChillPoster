@@ -25,6 +25,7 @@ from app.services.wechat_service import wechat_notify_service
 from app.services.telegram_service import telegram_notify_service
 from core.logger import logger
 from app.services.realtime_events import publish_realtime_event
+from app.services.cloud_drive_provider import get_cloud_drive, is_cloud_provider, normalize_provider, provider_label
 
 _115_READ_REQUEST_TIMEOUT_SECONDS = 10
 _DIRECT_URL_DOWNLOAD_TIMEOUT_SECONDS = 10
@@ -2154,13 +2155,42 @@ class Drive115Service:
             }
 
     async def execute_cleanup_task(self, drive_config: dict, account_type: str = "main", account_index: int = 0):
-        """执行单个 115 账号的清理任务
+        """执行单个云盘账号的清理任务
 
         Args:
             drive_config: 驱动配置
             account_type: 账号类型 ("main" 主号 或 "rapid" 小号)
             account_index: 账号索引（用于小号池）
         """
+        provider = normalize_provider((drive_config or {}).get("provider"))
+        if is_cloud_provider(provider):
+            if account_type != "main":
+                return {"status": "skipped", "message": "CloudDrive2 不支持 115 小号清理", "deleted_count": 0}
+            name = drive_config.get("name") or provider_label(provider)
+            remote_root_name = str(drive_config.get("remote_root_name") or "影视库").strip().strip("/") or "影视库"
+            upload_dir = drive_config.get("upload_dir") or f"/{remote_root_name}/秒传目录"
+            try:
+                cloud = get_cloud_drive(0, drive_config)
+                if getattr(cloud, "read_only", False):
+                    return {"status": "skipped", "message": f"{cloud.name} 为只读云盘，不能执行清理", "deleted_count": 0}
+                logger.info(f"[CleanUp] 开始清理云盘: {name} | 目录: {upload_dir}")
+                listing = await asyncio.to_thread(cloud.list, upload_dir, True)
+                child_items = []
+                child_items.extend(listing.get("dirs") or [])
+                child_items.extend(listing.get("files") or [])
+                deleted_count = 0
+                for child in child_items:
+                    child_path = str(child.get("path") or child.get("cid") or "").strip()
+                    if not child_path or child_path in {"/", "0"}:
+                        continue
+                    await asyncio.to_thread(cloud.remove, child_path)
+                    deleted_count += 1
+                logger.info(f"[CleanUp] 云盘目录清理完成: {name} | 删除 {deleted_count} 项")
+                return {"status": "ok", "message": f"清理完成，共删除 {deleted_count} 项", "deleted_count": deleted_count}
+            except Exception as e:
+                logger.error(f"[CleanUp] 云盘清理失败: {name} | {e}")
+                raise
+
         if account_type == "main":
             name = drive_config.get('name', '主号')
             cookie = drive_config.get('cookie')
@@ -2416,7 +2446,7 @@ class Drive115Service:
         return False, last_result
 
     async def execute_selected_folder_cleanup_task(self, task: dict, manual: bool = False) -> dict:
-        task_name = str(task.get("name") or "115定时清空").strip() or "115定时清空"
+        task_name = str(task.get("name") or "云盘定时清空").strip() or "云盘定时清空"
         drive_index = int(task.get("drive_index") or 0)
         folders = task.get("folders") if isinstance(task.get("folders"), list) else []
         if not folders:
@@ -2428,6 +2458,61 @@ class Drive115Service:
             drive_cfg = drives[drive_index] if 0 <= drive_index < len(drives) else drives[0]
         else:
             drive_cfg = cfg.get("drive", {})
+
+        provider = normalize_provider((drive_cfg or {}).get("provider"))
+        if is_cloud_provider(provider):
+            cloud = get_cloud_drive(drive_index, drive_cfg)
+            if getattr(cloud, "read_only", False):
+                return {
+                    "status": "error",
+                    "deleted_count": 0,
+                    "folders": [],
+                    "message": f"{cloud.name} 为只读云盘，不能执行定时清空",
+                }
+            logger.info(f"[CleanUp] 开始执行{provider_label(provider)}定时清空: {task_name} | 目录 {len(folders)} 个 | 触发={'手动' if manual else '定时'}")
+            total_deleted_count = 0
+            folder_results = []
+            for folder_index, folder in enumerate(folders, start=1):
+                folder_path = str((folder or {}).get("cid") or (folder or {}).get("path") or "").strip()
+                label = str((folder or {}).get("path") or (folder or {}).get("name") or folder_path).strip()
+                if folder_path in {"", "0", "/", "根目录"}:
+                    message = f"跳过无效目录: {label or folder_path}"
+                    folder_results.append({"cid": folder_path, "label": label, "status": "error", "deleted_count": 0, "message": message})
+                    logger.warning(f"[CleanUp] {message}")
+                    continue
+                try:
+                    listing = await asyncio.to_thread(cloud.list, folder_path, True)
+                    child_items = []
+                    child_items.extend(listing.get("dirs") or [])
+                    child_items.extend(listing.get("files") or [])
+                    deleted_count = 0
+                    for child in child_items:
+                        child_path = str(child.get("path") or child.get("cid") or "").strip()
+                        if not child_path or child_path in {"/", "0"}:
+                            continue
+                        await asyncio.to_thread(cloud.remove, child_path)
+                        deleted_count += 1
+                    total_deleted_count += deleted_count
+                    folder_results.append({
+                        "cid": folder_path,
+                        "label": label,
+                        "status": "ok",
+                        "deleted_count": deleted_count,
+                        "message": "清理完成" if deleted_count else "没有待删除项",
+                    })
+                    logger.info(f"[CleanUp] {provider_label(provider)}目录内容删除完成: {task_name} | {label} | 已删除 {deleted_count} 项 ({folder_index}/{len(folders)})")
+                except Exception as e:
+                    message = f"清理云盘目录失败: {label} | {e}"
+                    folder_results.append({"cid": folder_path, "label": label, "status": "error", "deleted_count": 0, "message": message})
+                    logger.error(f"[CleanUp] {message}")
+                    return {"status": "error", "deleted_count": total_deleted_count, "folders": folder_results, "message": message}
+            return {
+                "status": "ok",
+                "deleted_count": total_deleted_count,
+                "folders": folder_results,
+                "message": f"清理完成，共删除 {total_deleted_count} 项" if total_deleted_count else "没有待删除项",
+            }
+
         cookie = str((drive_cfg or {}).get("cookie", "") or "").strip()
         recycle_code = str((drive_cfg or {}).get("recycle_code", "") or "")
         if not cookie:

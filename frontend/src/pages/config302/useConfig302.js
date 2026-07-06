@@ -14,9 +14,22 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
             standard_topology: null
         });
 
+        const driveProviderOptions = [
+            { value: '115', label: '115 云盘' },
+            { value: '123pan', label: '123 云盘（CloudDrive2）' },
+            { value: 'guangya', label: '光鸭云盘（CloudDrive2，只读）' }
+        ];
+
+        const is115Drive = (drive) => String(drive?.provider || '115').toLowerCase() === '115';
+        const isCloudDriveReadOnly = (drive) => String(drive?.provider || '').toLowerCase() === 'guangya' || !!drive?.clouddrive_read_only;
+
         const hasPrimary115Cookie = computed(() => {
             const drive = Array.isArray(config302.drives) ? config302.drives[0] : null;
-            return !!String(drive?.cookie || '').trim();
+            if (!drive) return false;
+            if (is115Drive(drive)) {
+                return !!String(drive?.cookie || '').trim();
+            }
+            return !!String(drive?.clouddrive_base_url || '').trim();
         });
 
         const needs115Setup = computed(() => !hasPrimary115Cookie.value);
@@ -36,13 +49,20 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         };
 
         const notify115SetupRequired = () => {
-            showToast('请先完成 115 配置', 'info');
+            showToast('请先完成云盘配置', 'info');
         };
 
         // 定义默认模板
         const defaultDrive115 = {
             name: '',
+            provider: '115',
             cookie: '',
+            clouddrive_base_url: '',
+            clouddrive_username: '',
+            clouddrive_password: '',
+            clouddrive_root_path: '/',
+            clouddrive_direct_base_url: '',
+            clouddrive_read_only: false,
             enable_sync: true,
             enable_rapid: false,
             enable_standard_topology: true,
@@ -165,11 +185,12 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         };
 
         const add302Drive = () => ensureSingle302Drive();
-        const remove302Drive = async () => showToast('已固定为单个主 115 配置', 'warning');
+        const remove302Drive = async () => showToast('已固定为单个主云盘配置', 'warning');
         const add302Emby = () => ensureSingle302Emby();
         const remove302Emby = async () => showToast('已固定为单个 Emby 配置', 'warning');
 
         const test115Cookie = async (drive) => {
+            if (!is115Drive(drive)) return testCloudDrive(drive);
             if (!drive.cookie) return showToast('请先填写 Cookie', 'error');
 
             drive.testing = true;
@@ -194,6 +215,38 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
                 drive.login_app = '';
                 drive.login_app_label = '';
                 showToast('请求失败: ' + (e.response?.data?.message || e.message), 'error');
+            } finally {
+                drive.testing = false;
+            }
+        };
+
+        const testCloudDrive = async (drive) => {
+            if (!drive?.clouddrive_base_url) return showToast('请先填写 CloudDrive2 WebDAV 地址', 'error');
+
+            drive.testing = true;
+            drive.status = 'unknown';
+            try {
+                const res = await axios.post('/api/config_302/test_cloud_drive', {
+                    provider: drive.provider || '123pan',
+                    name: drive.name || '',
+                    clouddrive_base_url: drive.clouddrive_base_url || '',
+                    clouddrive_username: drive.clouddrive_username || '',
+                    clouddrive_password: drive.clouddrive_password || '',
+                    clouddrive_root_path: drive.clouddrive_root_path || '/',
+                    clouddrive_direct_base_url: drive.clouddrive_direct_base_url || '',
+                    clouddrive_read_only: isCloudDriveReadOnly(drive)
+                });
+                if (res.data.status === 'ok') {
+                    drive.status = 'ok';
+                    drive.clouddrive_read_only = !!res.data.read_only;
+                    showToast(res.data.message || '云盘连接成功', 'success');
+                } else {
+                    drive.status = 'error';
+                    showToast(res.data.message || '云盘连接失败', 'error');
+                }
+            } catch (e) {
+                drive.status = 'error';
+                showToast('请求失败: ' + (e.response?.data?.detail || e.response?.data?.message || e.message), 'error');
             } finally {
                 drive.testing = false;
             }
@@ -513,6 +566,13 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
 
         const ensure302DriveUiFields = (drive) => ({
             ...drive,
+            provider: drive?.provider || '115',
+            clouddrive_base_url: drive?.clouddrive_base_url || '',
+            clouddrive_username: drive?.clouddrive_username || '',
+            clouddrive_password: drive?.clouddrive_password || '',
+            clouddrive_root_path: drive?.clouddrive_root_path || '/',
+            clouddrive_direct_base_url: drive?.clouddrive_direct_base_url || '',
+            clouddrive_read_only: String(drive?.provider || '').toLowerCase() === 'guangya' || !!drive?.clouddrive_read_only,
             enable_standard_topology: true,
             remote_root_name: drive?.remote_root_name || '影视库',
             rapid_concurrency_limit: Math.max(0, parseInt(drive?.rapid_concurrency_limit ?? 0, 10) || 0),
@@ -526,6 +586,9 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         const build302Payload = () => {
             const drive = JSON.parse(JSON.stringify(ensureSingle302Drive()));
             delete drive.qr_loading;
+            drive.provider = drive.provider || '115';
+            drive.clouddrive_root_path = drive.clouddrive_root_path || '/';
+            drive.clouddrive_read_only = isCloudDriveReadOnly(drive);
             drive.transfer_drive_index = 0;
             drive.enable_standard_topology = true;
             drive.rapid_concurrency_limit = Math.max(0, parseInt(drive.rapid_concurrency_limit ?? 0, 10) || 0);
@@ -741,6 +804,9 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
 
     return {
         config302,
+        driveProviderOptions,
+        is115Drive,
+        isCloudDriveReadOnly,
         hasPrimary115Cookie,
         needs115Setup,
         standardTopologyEnabled,
@@ -753,6 +819,7 @@ export function useConfig302({ tab, isMobile, jumpToItem, closeMobileMenu, syncS
         add302Emby,
         remove302Emby,
         test115Cookie,
+        testCloudDrive,
         close115QrLogin,
         create115QrCode,
         open115QrLogin,

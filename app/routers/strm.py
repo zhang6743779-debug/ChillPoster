@@ -13,6 +13,7 @@ from typing import List
 from p115client import P115Client
 from core.logger import logger
 from core.media_library_cache import build_task_key, prune_tasks_by_keys
+from app.services.cloud_drive_provider import get_cloud_drive, is_drive_115
 
 router = APIRouter(prefix="/api/strm", tags=["strm"])
 
@@ -414,6 +415,10 @@ async def browse_local(payload: LocalBrowsePayload):
 async def browse_115(payload: BrowsePayload):
     """浏览 115 目录（返回子目录列表）"""
     try:
+        if not is_drive_115(payload.drive_index):
+            cloud = get_cloud_drive(payload.drive_index)
+            return cloud.list(payload.cid, include_files=False)
+
         cfg_path = "config/config_302.json"
         if not os.path.exists(cfg_path):
             return {"status": "error", "message": "302 配置不存在", "dirs": []}

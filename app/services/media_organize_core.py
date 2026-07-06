@@ -55,6 +55,12 @@ from app.services.media_organize_scrape import (
     _is_recent_organize_generated, _scrape_to_strm_local,
     _map_remote_to_strm_local_path,
 )
+from app.services.cloud_drive_provider import (
+    encode_cloud_path,
+    get_cloud_drive,
+    is_drive_115,
+    normalize_remote_path as _normalize_cloud_remote_path,
+)
 from app.services.media_server_refresh import media_server_refresh
 from app.services.emby_collection_sync import (
     build_movie_collection_sync_payload,
@@ -1712,6 +1718,428 @@ async def _run_source_poll_loop():
 # _run_organize_async  (the master orchestrator)
 # ---------------------------------------------------------------------------
 
+
+def _cloud_parent_path(path: str) -> str:
+    normalized = _normalize_cloud_remote_path(path)
+    if normalized in {"", "/"}:
+        return "/"
+    parent = os.path.dirname(normalized.rstrip("/")).replace("\\", "/")
+    return parent or "/"
+
+
+def _cloud_subtitle_target_name(subtitle_name: str, old_video_name: str, new_video_name: str) -> str:
+    old_stem = os.path.splitext(str(old_video_name or ""))[0]
+    new_stem = os.path.splitext(str(new_video_name or ""))[0]
+    sub_stem, sub_ext = os.path.splitext(str(subtitle_name or ""))
+    if not old_stem or not new_stem or not sub_stem:
+        return subtitle_name
+    if sub_stem.lower() == old_stem.lower():
+        return f"{new_stem}{sub_ext}"
+    prefix = f"{old_stem}."
+    if sub_stem.lower().startswith(prefix.lower()):
+        return f"{new_stem}{sub_stem[len(old_stem):]}{sub_ext}"
+    return subtitle_name
+
+
+async def _run_cloud_organize_async(run_id: str, req, config_data: dict | None = None):
+    config_data = dict(config_data or await _load_config_data())
+    req_source_cid = str(getattr(req, "source_cid", "") or "").strip()
+    req_source_name = str(getattr(req, "source_name", "") or "").strip()
+    if req_source_cid and req_source_cid != "0":
+        config_data["source_cid"] = req_source_cid
+        if req_source_name:
+            config_data["source_name"] = req_source_name
+
+    drive_index = int(getattr(req, "drive_index", None) or config_data.get("drive_index", 0) or 0)
+    cloud = get_cloud_drive(drive_index)
+    if getattr(cloud, "read_only", False):
+        message = f"{cloud.name} 为只读云盘，不能执行媒体整理写入"
+        update_task_progress(run_id, f"整理失败: {message}", 100, "error")
+        return
+
+    source_path = _normalize_cloud_remote_path(config_data.get("source_cid") or config_data.get("source_name") or "/")
+    target_path = _normalize_cloud_remote_path(config_data.get("target_cid") or config_data.get("target_name") or "/")
+    failed_path = _normalize_cloud_remote_path(config_data.get("failed_cid") or config_data.get("failed_name") or "")
+    if source_path in {"", "/", "0"}:
+        update_task_progress(run_id, "整理失败: 请先配置源目录", 100, "error")
+        return
+    if target_path in {"", "/", "0"}:
+        update_task_progress(run_id, "整理失败: 请先配置目标目录", 100, "error")
+        return
+
+    from core.configs import global_config
+    global_config.load()
+    api_key = global_config.tmdb_key
+    if not api_key:
+        update_task_progress(run_id, "整理失败: TMDb API Key 未配置", 100, "error")
+        return
+
+    update_task_progress(run_id, f"整理: 正在扫描 {cloud.name}", 5, "running")
+    scanned_items = await asyncio.to_thread(cloud.iter_files, source_path)
+    subtitles_by_parent: dict[str, list[dict]] = {}
+    video_items: list[dict] = []
+    for item in scanned_items:
+        if item.get("is_dir"):
+            continue
+        name = str(item.get("name") or "")
+        ext = os.path.splitext(name)[1].lower()
+        item_path = _normalize_cloud_remote_path(item.get("path") or item.get("cid") or "")
+        normalized = {
+            **item,
+            "id": item_path,
+            "path": item_path,
+            "source_path": item_path,
+            "parent_id": _cloud_parent_path(item_path),
+            "pickcode": encode_cloud_path(item_path),
+            "sha1": str(item.get("sha1") or ""),
+        }
+        if ext in VIDEO_EXTS:
+            video_items.append(normalized)
+        elif ext in SUBTITLE_EXTS:
+            subtitles_by_parent.setdefault(normalized["parent_id"], []).append(normalized)
+
+    total_files = len(video_items)
+    organize_size_bytes = sum(_size_bytes(item.get("size", 0)) for item in video_items)
+    results: list[dict] = []
+    success_count = 0
+    strm_generated_count = 0
+    pending_library_cache_items: dict[str, dict] = {}
+    pending_strm_payloads: list[dict] = []
+    pending_emby_library_checks: list[dict] = []
+    pending_refresh_payloads: list[dict] = []
+    pending_collection_syncs: list[dict] = []
+    metadata_executor = ThreadPoolExecutor(max_workers=_MEDIA_METADATA_WORKERS)
+    library_task_key = build_task_key(drive_index, str(config_data.get("target_name") or target_path))
+    library_index = get_task_index(library_task_key)
+    organize_cancel_event = threading.Event()
+
+    def _flush_pending_library_cache_updates():
+        nonlocal pending_library_cache_items
+        if not pending_library_cache_items:
+            return 0
+        merge_task_items(
+            library_task_key,
+            pending_library_cache_items,
+            meta={"last_status": "updated_by_cloud_media_organize"},
+        )
+        count = len(pending_library_cache_items)
+        pending_library_cache_items = {}
+        return count
+
+    async def _move_cloud_failure(file_item: dict, reason: str):
+        if not failed_path or failed_path in {"/", "0"}:
+            return
+        try:
+            await asyncio.to_thread(cloud.move, file_item.get("path", ""), failed_path, file_item.get("name", ""))
+            logger.info(f"[MediaOrganize] 云盘失败条目已移动: {file_item.get('name', '')} -> {failed_path} | {reason}")
+        except Exception as e:
+            logger.warning(f"[MediaOrganize] 云盘失败条目移动失败: {file_item.get('name', '')} | {e}")
+
+    def _record_progress(message: str, percent: int):
+        _update_streaming_progress(
+            run_id,
+            scanned_video_count=total_files,
+            processed_result_count=len(results),
+            success_count=success_count,
+            error_count=_count_error_results(results),
+            strm_generated_count=strm_generated_count,
+            results=results,
+            scan_complete=True,
+        )
+        update_task_progress(run_id, message, max(0, min(99, int(percent))), "running")
+
+    try:
+        if total_files == 0:
+            metadata_executor.shutdown(wait=False, cancel_futures=True)
+            _record_deferred_organize_task_notify(
+                f"cloud_organize_{uuid.uuid4().hex[:12]}",
+                run_id=run_id,
+                source_cid=source_path,
+                status="success",
+                total_files=0,
+                success_count=0,
+                failed_count=0,
+                skipped_count=0,
+                strm_generated_count=0,
+                organize_size_bytes=0,
+                elapsed_seconds=0,
+                detail="源目录没有视频文件",
+            )
+            update_task_progress(run_id, "整理: 源目录没有视频文件", 100, "finished")
+            return
+
+        from app.services.category_matcher import CategoryMatcher
+        category_matcher = CategoryMatcher()
+        tmdb_cache: dict[tuple, dict] = {}
+        failed_cache = set()
+        title_cache = {}
+        started_at = _time.time()
+
+        for index, vf in enumerate(video_items, start=1):
+            _raise_if_organize_cancelled(run_id)
+            file_name = str(vf.get("name") or "")
+            ext = os.path.splitext(file_name)[1] or ".mkv"
+            _record_progress(f"整理: 正在处理 {index}/{total_files}", 5 + int(index / max(total_files, 1) * 80))
+
+            if any(kw in file_name.lower() for kw in ("预告", "预告片", "trailer", "preview")):
+                results.append({"file": file_name, "status": "skipped", "message": "预告片，跳过"})
+                _append_skipped_history(file_item=vf, reason="预告片，跳过整理", source_path=vf.get("path", ""), title=file_name)
+                continue
+
+            parsed = _parse_filename(file_name, media_type_hint=getattr(req, "media_type", None) or None, file_path=vf.get("path", ""))
+            if not parsed:
+                reason = "无法识别媒体信息"
+                results.append({"file": file_name, "status": "error", "message": reason})
+                _append_organize_failure_history(file_item=vf, reason=reason, source_path=vf.get("path", ""))
+                await _move_cloud_failure(vf, reason)
+                continue
+
+            if parsed.get("tmdb_id_direct"):
+                search_result = {
+                    "tmdb_id": parsed.get("tmdb_id_direct"),
+                    "media_type": parsed.get("media_type"),
+                    "title": parsed.get("title"),
+                }
+            else:
+                search_result = await _search_tmdb_for_title(parsed, api_key, failed_cache)
+            if not search_result:
+                reason = "无法识别媒体信息"
+                results.append({"file": file_name, "status": "error", "message": reason})
+                _append_organize_failure_history(file_item=vf, reason=reason, source_path=vf.get("path", ""))
+                await _move_cloud_failure(vf, reason)
+                continue
+
+            tmdb_id = search_result["tmdb_id"]
+            media_type = search_result.get("media_type") or parsed["media_type"]
+            season_num = search_result.get("season", parsed.get("season"))
+            episode_num = search_result.get("episode", parsed.get("episode"))
+            if media_type == "tv" and season_num is None:
+                season_num = 1
+            cache_key = (tmdb_id, media_type)
+            if cache_key not in tmdb_cache:
+                required_episodes = []
+                if media_type == "tv" and season_num is not None and episode_num is not None:
+                    required_episodes.append((season_num, episode_num))
+                tmdb_cache[cache_key] = await _fetch_tmdb_data(
+                    tmdb_id,
+                    media_type,
+                    season_num,
+                    parsed,
+                    required_episodes=required_episodes,
+                )
+            tmdb_data = tmdb_cache.get(cache_key)
+            if not tmdb_data:
+                reason = f"无法获取 TMDb 数据 (ID: {tmdb_id})"
+                results.append({"file": file_name, "status": "error", "message": reason})
+                _append_organize_failure_history(file_item=vf, reason=reason, source_path=vf.get("path", ""), media_type=media_type)
+                await _move_cloud_failure(vf, reason)
+                continue
+            if media_type == "tv":
+                if episode_num is None:
+                    reason = "剧集缺少集号，无法安全整理"
+                    results.append({"file": file_name, "status": "error", "message": reason})
+                    _append_organize_failure_history(file_item=vf, reason=reason, source_path=vf.get("path", ""), media_type=media_type)
+                    await _move_cloud_failure(vf, reason)
+                    continue
+                episode_validation = _validate_tmdb_tv_episode(tmdb_data, season_num, episode_num)
+                if not episode_validation.get("ok", True):
+                    reason = episode_validation.get("message") or "TMDb 中不存在该季集"
+                    results.append({"file": file_name, "status": "error", "message": reason})
+                    _append_organize_failure_history(file_item=vf, reason=reason, source_path=vf.get("path", ""), media_type=media_type)
+                    await _move_cloud_failure(vf, reason)
+                    continue
+
+            file_req = type("Obj", (), {
+                "media_type": media_type,
+                "tmdb_id": tmdb_id,
+                "season_number": season_num,
+                "episode_number": episode_num,
+                "is_bluray": getattr(req, "is_bluray", False),
+                "drive_index": drive_index,
+                "overwrite": getattr(req, "overwrite", "skip"),
+            })()
+            variables = _build_template_variables(tmdb_data, file_req, ext, parsed.get("meta_info", {}), _title_cache=title_cache)
+            parse_mode = str(config_data.get("organize_parse_mode") or "filename").lower()
+            if parse_mode in {"ffprobe", "ffprobe_full"}:
+                try:
+                    direct_url = await asyncio.to_thread(cloud.get_direct_url, vf.get("path", ""))
+                    probe_fields = await _probe_media_fields_via_ffprobe(vf, drive_index, direct_url=direct_url)
+                    if probe_fields:
+                        variables = _merge_probe_fields_into_variables(variables, probe_fields)
+                except Exception as e:
+                    logger.debug(f"[MediaOrganize] 云盘 ffprobe 探测失败: {file_name} | {e}")
+
+            category_path = category_matcher.match(tmdb_data, media_type)
+            target_base = str(config_data.get("target_name") or target_path).rstrip("/")
+            if category_path and category_path != "其他":
+                target_base = _join_remote_path(target_base, category_path)
+
+            if media_type == "movie":
+                folder_format = config_data.get("movie_folder_format", "{title} ({year}) {tmdb-{tmdb_id}}")
+                folder_name = _render_template(folder_format, variables)
+                rename_format = config_data.get("movie_rename_format", "{en_title}.{year}.{resource_pix}.{web_source}.{resource_type}.{resource_effect}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
+                season_dir = ""
+            else:
+                folder_name, _, season_dir = _resolve_tv_target_names(variables, config_data, file_req)
+                rename_format = config_data.get("tv_episode_format", "{en_title}.{season_episode}.{year}.{resource_pix}.{web_source}.{resource_type}.{video_encode}.{color_depth}.{video_effect}.{fps}.{audio_encode}-{resource_team}")
+            if not folder_name:
+                reason = "无法生成目标目录名"
+                results.append({"file": file_name, "status": "error", "message": reason})
+                await _move_cloud_failure(vf, reason)
+                continue
+
+            target_dir = _join_remote_path(target_base, folder_name, season_dir)
+            new_name = f"{_render_template(rename_format, variables)}{ext}"
+            if not os.path.splitext(new_name)[0].strip():
+                new_name = file_name
+            await asyncio.to_thread(cloud.ensure_dir, target_dir)
+            moved = await asyncio.to_thread(cloud.move, vf.get("path", ""), target_dir, new_name)
+            moved_path = _normalize_cloud_remote_path(moved.get("path") or _join_remote_path(target_dir, new_name))
+
+            moved_subtitles = []
+            parent_path = _cloud_parent_path(vf.get("path", ""))
+            old_stem = os.path.splitext(file_name)[0].lower()
+            for subtitle in list(subtitles_by_parent.get(parent_path, [])):
+                sub_name = str(subtitle.get("name") or "")
+                sub_stem = os.path.splitext(sub_name)[0].lower()
+                if not (sub_stem == old_stem or sub_stem.startswith(old_stem + ".")):
+                    continue
+                sub_target_name = _cloud_subtitle_target_name(sub_name, file_name, new_name)
+                try:
+                    sub_moved = await asyncio.to_thread(cloud.move, subtitle.get("path", ""), target_dir, sub_target_name)
+                    sub_path = _normalize_cloud_remote_path(sub_moved.get("path") or _join_remote_path(target_dir, sub_target_name))
+                    moved_subtitles.append({
+                        "name": sub_target_name,
+                        "path": sub_path,
+                        "pickcode": encode_cloud_path(sub_path),
+                        "size": int(subtitle.get("size", 0) or 0),
+                        "id": sub_path,
+                    })
+                except Exception as e:
+                    logger.warning(f"[MediaOrganize] 云盘字幕移动失败: {sub_name} | {e}")
+
+            vf_target = {
+                **vf,
+                "id": moved_path,
+                "path": moved_path,
+                "source_path": vf.get("source_path") or vf.get("path", ""),
+                "pickcode": encode_cloud_path(moved_path),
+                "parent_id": target_dir,
+                "name": new_name,
+            }
+            result = {
+                "status": "success",
+                "message": ("电影" if media_type == "movie" else "剧集") + f"整理完成: {folder_name}",
+                "target_folder": folder_name,
+                "season_dir": season_dir,
+                "moved_subtitles": moved_subtitles,
+                "renamed_file": new_name,
+                "metadata_context": {
+                    "tmdb_data": tmdb_data,
+                    "media_type": media_type,
+                    "target_cid": _join_remote_path(target_base, folder_name),
+                    "season_cid": target_dir if media_type == "tv" else "",
+                    "overwrite": getattr(req, "overwrite", "skip"),
+                    "nfo_stem": os.path.splitext(new_name)[0],
+                    "summary_title": variables.get("title", ""),
+                    "summary_year": variables.get("year", ""),
+                    "folder_name": folder_name,
+                    "category_path": category_path,
+                },
+                "strm_context": {
+                    "media_type": media_type,
+                    "pickcode": encode_cloud_path(moved_path),
+                    "category_path": category_path,
+                },
+            }
+            results.append({"file": file_name, "status": "success", "message": result["message"], "media_type": media_type})
+            success_count += 1
+            _finalize_organize_result(
+                result=result,
+                media_type=media_type,
+                vf=vf_target,
+                parsed={**parsed, "season": season_num, "episode": episode_num},
+                variables=variables,
+                target_base=target_base,
+                category_path=category_path,
+                effective_target_cid=target_base,
+                library_task_key=library_task_key,
+                library_index=library_index,
+                config_data=config_data,
+                metadata_executor=metadata_executor,
+                pending_library_cache_items=pending_library_cache_items,
+                pending_strm_payloads=pending_strm_payloads,
+                pending_emby_library_checks=pending_emby_library_checks,
+                pending_refresh_payloads=pending_refresh_payloads,
+                pending_collection_syncs=pending_collection_syncs,
+            )
+
+        _flush_pending_library_cache_updates()
+        if pending_strm_payloads and config_data.get("auto_sync_strm", False):
+            strm_generated_count = await asyncio.to_thread(
+                _generate_strm_batch_on_organize,
+                pending_strm_payloads,
+                config_data,
+                organize_cancel_event,
+            )
+            for payload in pending_strm_payloads[:max(0, int(strm_generated_count or 0))]:
+                _append_strm_generated_history(payload)
+
+        metadata_executor.shutdown(wait=True)
+        failed_count = sum(1 for r in results if r.get("status") == "error")
+        skipped_count = sum(1 for r in results if r.get("status") == "skipped")
+        elapsed = _time.time() - started_at
+        organize_size_text = _format_organize_task_size(organize_size_bytes)
+        set_task_detail(run_id, {
+            "total": total_files,
+            "success": success_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+            "strm": strm_generated_count,
+            "organize_size_bytes": organize_size_bytes,
+            "organize_size": organize_size_text,
+        })
+        _record_deferred_organize_task_notify(
+            f"cloud_organize_{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            source_cid=source_path,
+            status="success",
+            total_files=total_files,
+            success_count=success_count,
+            failed_count=failed_count,
+            skipped_count=skipped_count,
+            strm_generated_count=strm_generated_count,
+            organize_size_bytes=organize_size_bytes,
+            elapsed_seconds=elapsed,
+            detail=f"CloudDrive2 整理完成，提供方：{cloud.name}",
+        )
+        _update_streaming_progress(
+            run_id,
+            scanned_video_count=total_files,
+            processed_result_count=len(results),
+            success_count=success_count,
+            error_count=failed_count,
+            strm_generated_count=strm_generated_count,
+            results=results,
+            scan_complete=True,
+        )
+        logger.info(
+            f"[MediaOrganize] CloudDrive2整理完成: provider={cloud.provider} 成功 {success_count}/{total_files} "
+            f"失败 {failed_count} 跳过 {skipped_count} STRM {strm_generated_count} 耗时 {elapsed:.1f}s"
+        )
+        update_task_progress(run_id, f"整理完成: 成功 {success_count}/{total_files}", 100, "finished")
+    except _OrganizeCancelledError:
+        organize_cancel_event.set()
+        metadata_executor.shutdown(wait=False, cancel_futures=True)
+        update_task_progress(run_id, "整理已取消", 100, "stopped")
+        raise
+    except Exception as e:
+        organize_cancel_event.set()
+        metadata_executor.shutdown(wait=False, cancel_futures=True)
+        logger.error(f"[MediaOrganize] CloudDrive2整理失败: {e}", exc_info=True)
+        update_task_progress(run_id, f"整理失败: {e}", 100, "error")
+
+
 async def _run_organize_async(run_id: str, req):
     """
     整理核心逻辑（在后台线程的独立事件循环中运行）。
@@ -1932,6 +2360,9 @@ async def _run_organize_async(run_id: str, req):
 
         logger.info("[MediaOrganize] 执行整理任务")
         logger.info(f"[MediaOrganize] source_cid={source_cid}, target_cid={target_cid}, drive_index={drive_index}")
+
+        if not is_drive_115(drive_index):
+            return await _run_cloud_organize_async(run_id, req, config_data)
 
         # 1. 获取 115 客户端
         client = _get_115_client(drive_index)
@@ -4172,6 +4603,12 @@ def _finalize_organize_result(
 ):
     file_sha1 = vf.get("sha1", "").upper()
 
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _queue_cache_item(item_key: str, item_data: dict):
         normalized_key = str(item_key or "")
         if not normalized_key:
@@ -4181,10 +4618,10 @@ def _finalize_organize_result(
             "path": str(item_data.get("path", "") or ""),
             "pickcode": str(item_data.get("pickcode", "") or ""),
             "size": int(item_data.get("size", 0) or 0),
-            "id": int(item_data.get("id", 0) or 0),
+            "id": _safe_int(item_data.get("id", 0) or 0),
             "sha1": str(item_data.get("sha1", "") or ""),
             "is_dir": bool(item_data.get("is_dir", False)),
-            "parent_id": int(item_data.get("parent_id", 0) or 0),
+            "parent_id": _safe_int(item_data.get("parent_id", 0) or 0),
         }
         if item_data.get("season") is not None:
             normalized_item["season"] = int(item_data.get("season"))
@@ -4209,7 +4646,7 @@ def _finalize_organize_result(
     season_dir_name = result.get("season_dir", "")
     renamed_file = result.get("renamed_file", "") or vf.get("name", "")
     target_file_path = _join_remote_path(target_base, target_folder_name, season_dir_name, renamed_file)
-    source_file_path = str(vf.get("path", "") or "")
+    source_file_path = str(vf.get("source_path") or vf.get("path", "") or "")
     season_episode = ""
     if media_type == "tv":
         season = parsed.get("season")
@@ -4259,8 +4696,8 @@ def _finalize_organize_result(
         logger.debug(f"[MediaOrganize] 整理历史写入失败: {e}")
     file_season_cid = meta_ctx.get("season_cid", "")
     file_folder_cid = meta_ctx.get("target_cid", "")
-    file_parent_id = int(file_season_cid) if file_season_cid and str(file_season_cid).isdigit() else (
-        int(file_folder_cid) if file_folder_cid and str(file_folder_cid).isdigit() else 0
+    file_parent_id = _safe_int(file_season_cid) if file_season_cid and str(file_season_cid).isdigit() else (
+        _safe_int(file_folder_cid) if file_folder_cid and str(file_folder_cid).isdigit() else 0
     )
     _queue_cache_item(
         str(vf.get("id", "") or ""),
@@ -4281,7 +4718,7 @@ def _finalize_organize_result(
     folder_cid = str(meta_ctx.get("target_cid", "") or "")
     folder_name_val = str(meta_ctx.get("folder_name", "") or "")
     folder_pickcode_val = str(meta_ctx.get("folder_pickcode", "") or "")
-    effective_target_parent_id = int(effective_target_cid) if str(effective_target_cid).isdigit() else 0
+    effective_target_parent_id = _safe_int(effective_target_cid) if str(effective_target_cid).isdigit() else 0
 
     if media_type != "tv" and folder_cid and folder_name_val:
         folder_path = _join_remote_path(target_base, folder_name_val)
@@ -4292,7 +4729,7 @@ def _finalize_organize_result(
                 "path": folder_path,
                 "pickcode": folder_pickcode_val,
                 "size": 0,
-                "id": int(folder_cid) if folder_cid.isdigit() else 0,
+                "id": _safe_int(folder_cid) if folder_cid.isdigit() else 0,
                 "sha1": "",
                 "is_dir": True,
                 "parent_id": effective_target_parent_id,
@@ -4313,7 +4750,7 @@ def _finalize_organize_result(
                     "path": series_path,
                     "pickcode": folder_pickcode_val,
                     "size": 0,
-                    "id": int(folder_cid) if folder_cid.isdigit() else 0,
+                    "id": _safe_int(folder_cid) if folder_cid.isdigit() else 0,
                     "sha1": "",
                     "is_dir": True,
                     "parent_id": effective_target_parent_id,
@@ -4328,10 +4765,10 @@ def _finalize_organize_result(
                     "path": season_path,
                     "pickcode": season_pickcode_val,
                     "size": 0,
-                    "id": int(season_cid_val) if season_cid_val.isdigit() else 0,
+                    "id": _safe_int(season_cid_val) if season_cid_val.isdigit() else 0,
                     "sha1": "",
                     "is_dir": True,
-                    "parent_id": int(folder_cid) if folder_cid.isdigit() else 0,
+                    "parent_id": _safe_int(folder_cid) if folder_cid.isdigit() else 0,
                 },
             )
 

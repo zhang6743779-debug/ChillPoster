@@ -1,0 +1,18 @@
+services:
+  chillposter:
+    image: ghcr.io/zhang6743779-debug/chillposter:latest
+    container_name: chillposter
+    ports:
+      - "5256:5256"
+    environment:
+      TZ: Asia/Shanghai
+      CHILLPOSTER_IMAGE: ghcr.io/zhang6743779-debug/chillposter:latest
+      CHILLPOSTER_ADMIN_USERNAME: admin
+      CHILLPOSTER_ADMIN_PASSWORD: password
+    volumes:
+      - ./config:/app/config
+      - ./fonts:/app/fonts
+      - ./templates:/app/templates
+      - ./layouts:/app/layouts
+      - ./backups:/app/backups
+    restart: unless-stopped

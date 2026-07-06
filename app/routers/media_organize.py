@@ -33,6 +33,7 @@ from app.services.media_organize_tmdb import (
 )
 from app.services.media_organize_template import _build_template_variables, _render_template
 from app.services.media_organize_scrape import _noop_transfer, _write_nfo, _download_image
+from app.services.cloud_drive_provider import get_cloud_drive, is_drive_115
 
 router = APIRouter(prefix="/api/media_organize", tags=["media_organize"])
 
@@ -1043,7 +1044,12 @@ async def sync_emby_library_scrapers(payload: Optional[EmbyLibraryScraperSyncPay
 async def browse_115(payload: Browse115Payload):
     """浏览 115 网盘目录"""
     try:
-        client = _get_115_client(0)
+        drive_index = int(payload.drive_index or 0)
+        if not is_drive_115(drive_index):
+            cloud = get_cloud_drive(drive_index)
+            return cloud.list(payload.cid, include_files=False)
+
+        client = _get_115_client(drive_index)
         cid = payload.cid or "0"
 
         resp = client.fs_files_app(
@@ -1072,7 +1078,23 @@ async def browse_115(payload: Browse115Payload):
 async def list_files(payload: Browse115Payload):
     """列出 115 网盘目录下的视频文件"""
     try:
-        client = _get_115_client(0)
+        drive_index = int(payload.drive_index or 0)
+        if not is_drive_115(drive_index):
+            cloud = get_cloud_drive(drive_index)
+            listing = cloud.list(payload.cid, include_files=True)
+            files = []
+            for item in listing.get("files", []):
+                name = str(item.get("name") or "")
+                ext = os.path.splitext(name)[1].lower()
+                if ext in VIDEO_EXTS:
+                    files.append({
+                        "name": name,
+                        "cid": item.get("path") or item.get("cid") or "",
+                        "size": item.get("size", 0),
+                    })
+            return {"status": "ok", "files": files}
+
+        client = _get_115_client(drive_index)
         cid = payload.cid or "0"
 
         resp = client.fs_files_app(

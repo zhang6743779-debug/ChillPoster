@@ -23,6 +23,7 @@ from p115client.tool.iterdir import iter_files_with_path
 from p115pickcode import to_id
 
 from app.services.media_organize_115_ops import _check_and_move, _ensure_115_dir_chain_cached, _mkdir_115_dir
+from app.services.cloud_drive_provider import get_cloud_drive, is_drive_115, normalize_remote_path
 from core.logger import logger
 
 
@@ -273,6 +274,9 @@ class Drive115UploadService:
         return {"status": "ok", "task": status["tasks"][task_id]}
 
     def browse_115(self, cid: str = "0", drive_index: int = 0) -> dict[str, Any]:
+        if not is_drive_115(drive_index):
+            cloud = get_cloud_drive(drive_index)
+            return cloud.list(cid, include_files=False)
         client = self.get_client(drive_index)
         cid = str(cid or "0").strip() or "0"
         resp = client.fs_files_app(
@@ -374,7 +378,7 @@ class Drive115UploadService:
             job["cancel_requested"] = True
             job["status"] = "cancelling"
             job["stage"] = "cancelling"
-            job["message"] = "正在取消网盘资源秒传"
+            job["message"] = "正在取消 115 资源秒传"
             job["updated_at"] = int(time.time())
             event = self._cloud_rapid_cancel_events.get(job_id)
             if event:
@@ -402,7 +406,7 @@ class Drive115UploadService:
 
     def _raise_if_cloud_rapid_cancelled(self, job_id: str | None) -> None:
         if self._is_cloud_rapid_cancelled(job_id):
-            raise CloudRapidCancelled("网盘资源秒传已取消")
+            raise CloudRapidCancelled("115 资源秒传已取消")
 
     def _sleep_cloud_rapid_or_cancel(self, job_id: str | None, seconds: float) -> None:
         if not job_id:
@@ -411,7 +415,7 @@ class Drive115UploadService:
         with self._lock:
             event = self._cloud_rapid_cancel_events.get(str(job_id))
         if event and event.wait(max(0.0, seconds)):
-            raise CloudRapidCancelled("网盘资源秒传已取消")
+            raise CloudRapidCancelled("115 资源秒传已取消")
         self._raise_if_cloud_rapid_cancelled(job_id)
 
     def cloud_rapid_transfer(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -430,11 +434,11 @@ class Drive115UploadService:
             concurrency = CLOUD_RAPID_DEFAULT_CONCURRENCY
         concurrency = max(1, min(CLOUD_RAPID_MAX_CONCURRENCY, concurrency))
         if not source_cookie:
-            raise ValueError("请填写来源账号 CK")
+            raise ValueError("请填写来源 115 账号 CK")
         if not target_cookie:
-            raise ValueError("请填写目标账号 CK")
+            raise ValueError("请填写目标 115 账号 CK")
         if not target_cid or not target_cid.isdigit() or target_cid == "0":
-            raise ValueError("请选择目标网盘的非根目录")
+            raise ValueError("请选择目标 115 的非根目录")
         if not isinstance(raw_items, list) or not raw_items:
             raise ValueError("请选择需要秒传的文件或文件夹")
 
@@ -468,7 +472,7 @@ class Drive115UploadService:
                 job_id,
                 status=status,
                 stage="finished" if status != "error" else "failed",
-                message=str(result.get("summary") or "网盘资源秒传完成"),
+                message=str(result.get("summary") or "115 资源秒传完成"),
                 summary=str(result.get("summary") or ""),
                 total_files=int(result.get("total_files") or 0),
                 processed=int(result.get("processed") or 0),
@@ -485,7 +489,7 @@ class Drive115UploadService:
                 finished_at=int(time.time()),
             )
         except CloudRapidCancelled as e:
-            message = str(e) or "网盘资源秒传已取消"
+            message = str(e) or "115 资源秒传已取消"
             self._update_cloud_rapid_job(
                 job_id,
                 status="cancelled",
@@ -496,13 +500,13 @@ class Drive115UploadService:
                 finished_at=int(time.time()),
             )
         except Exception as e:
-            logger.exception(f"[CloudRapid] 网盘资源秒传任务失败: {e}")
+            logger.exception(f"[CloudRapid] 115 资源秒传任务失败: {e}")
             self._update_cloud_rapid_job(
                 job_id,
                 status="error",
                 stage="failed",
                 message=str(e),
-                summary=f"网盘资源秒传失败: {e}",
+                summary=f"115 资源秒传失败: {e}",
                 finished_at=int(time.time()),
             )
         finally:
@@ -787,7 +791,7 @@ class Drive115UploadService:
                 if str(next_updates.get("stage") or "") not in {"cancelled", "cancelling"}:
                     next_updates["stage"] = "cancelling"
                 if str(next_updates.get("message") or "").strip() in {"", "正在连接 115 账号"}:
-                    next_updates["message"] = "正在取消网盘资源秒传"
+                    next_updates["message"] = "正在取消 115 资源秒传"
                 updates = next_updates
             job.update(updates)
             job["updated_at"] = int(time.time())
@@ -2663,20 +2667,33 @@ class Drive115UploadService:
         local_folder = os.path.abspath(os.path.expanduser(str(payload.get("local_folder") or "").strip()))
         if not local_folder or not os.path.isdir(local_folder):
             raise ValueError("本地监听目录不存在")
+        drive_index = max(0, int(payload.get("drive_index") or 0))
         target_cid = str(payload.get("target_cid") or "").strip()
-        if not target_cid.isdigit() or target_cid == "0":
-            raise ValueError("请选择非根目录的 115 目标文件夹")
+        target_path = str(payload.get("target_path") or "").strip()
+        if is_drive_115(drive_index):
+            if not target_cid.isdigit() or target_cid == "0":
+                raise ValueError("请选择非根目录的 115 目标文件夹")
+        else:
+            cloud = get_cloud_drive(drive_index)
+            if getattr(cloud, "read_only", False):
+                raise ValueError(f"{cloud.name} 为只读云盘，不能创建上传监听任务")
+            cloud_target = normalize_remote_path(target_cid or target_path)
+            if cloud_target in {"", "/", "0"}:
+                raise ValueError("请选择非根目录的云盘目标文件夹")
+            target_cid = cloud_target
+            if not target_path or target_path == "0":
+                target_path = cloud_target
         concurrency = int(payload.get("concurrency") or DEFAULT_UPLOAD_WORKERS)
         concurrency = max(1, min(MAX_UPLOAD_WORKERS, concurrency))
         base = dict(existing or {})
         base.update({
             "name": name,
             "enabled": bool(payload.get("enabled", True)),
-            "drive_index": max(0, int(payload.get("drive_index") or 0)),
+            "drive_index": drive_index,
             "local_folder": local_folder,
             "target_cid": target_cid,
             "target_name": str(payload.get("target_name") or "").strip(),
-            "target_path": str(payload.get("target_path") or "").strip(),
+            "target_path": target_path,
             "watch_mode": "realtime",
             "include_existing_on_start": bool(payload.get("include_existing_on_start", True)),
             "delete_local_after_success": bool(payload.get("delete_local_after_success", True)),
@@ -3031,12 +3048,27 @@ class Drive115UploadService:
         path = str(job.get("path") or "")
         filename = str(job.get("filename") or os.path.basename(path))
         target_cid = str(job.get("target_cid") or "")
+        drive_index = int(job.get("drive_index") or 0)
         if not os.path.isfile(path):
             raise FileNotFoundError("本地文件不存在")
         stat = os.stat(path)
         if int(stat.st_size) != int(job.get("size") or 0) or int(stat.st_mtime_ns) != int(job.get("mtime_ns") or 0):
             raise RuntimeError("文件上传前发生变化，请等待下一轮稳定扫描")
-        client = self.get_client(int(job.get("drive_index") or 0))
+        if not is_drive_115(drive_index):
+            cloud = get_cloud_drive(drive_index)
+            relative_dir = str(job.get("relative_dir") or "").strip("/")
+            target_dir = target_cid or str(job.get("target_path") or "")
+            if relative_dir:
+                target_dir = f"{str(target_dir or '/').rstrip('/')}/{relative_dir}"
+            job["upload_target_cid"] = target_dir
+            self._update_active(job, "uploading", 15, "正在上传到云盘", uploaded=0)
+            cloud.upload_file(path, target_dir, filename)
+            self._update_active(job, "uploading", 99, "正在完成上传", uploaded=int(job.get("size") or 0))
+            self._mark_success(job, method="clouddrive2", message="云盘上传成功")
+            logger.info(f"[Drive115Upload] 云盘上传成功: {job.get('relative_path') or filename} -> {target_dir}")
+            return
+
+        client = self.get_client(drive_index)
         upload_cid = self._resolve_upload_target_cid(client, job)
         job["upload_target_cid"] = str(upload_cid)
         self._update_active(job, "checking", 10, "正在尝试秒传")

@@ -1,137 +1,247 @@
 # ChillPoster
 
-ChillPoster 是面向 Emby 与 115 网盘生态的家庭影音自动化中枢。它把封面生成、网盘转存、302 网关、媒体整理、STRM 同步、RSS 真实库、缺集发现、通知与运维任务收束到一个统一管理界面里，让 NAS 影音库从“能用”走向“好看、好管、可持续自动化”。
+ChillPoster 是面向 Emby 和网盘生态的家庭影音自动化中枢。项目后端使用 Python/FastAPI，前端使用 Vue/Vite，Dockerfile 会先构建前端，再打包后端运行环境。默认服务端口为 `5256`。
 
-## 为什么选择 ChillPoster
+## 当前已有功能
 
-传统媒体库工具往往只解决链路中的一段：有人负责下载，有人负责刮削，有人负责入库，有人负责海报。ChillPoster 更关注 Emby 用户真实使用中的完整闭环：
+- Emby 管理：服务器配置、媒体库封面、自动封面、封面备份、模板和字体管理。
+- 115 云盘一条龙：115 Cookie/扫码登录、302 播放网关、同播复制、秒传小号、资源转存、媒体整理、定时清空、秒传/上传监听。
+- CloudDrive2 云盘接入：通过 CloudDrive2 WebDAV 接入 123 云盘和光鸭云盘，复用浏览、标准目录、媒体整理、STRM、上传、清理和 302 播放链路。
+- 媒体整理：TMDb 识别、电影/剧集命名模板、二级分类、洗版判断、整理历史、监控目录和整理后 STRM。
+- STRM 同步：115 全量/增量同步，CloudDrive2 全量/增量同步，附属字幕/图片/数据文件下载。
+- 发现与订阅：影视发现、缺集统计、RSS 真实库、独立真实库、MoviePilot 联动。
+- 通知和运维：微信、Telegram、Webhook、任务中心、Docker 管理、健康检查、系统升级。
 
-- 让封面体系保持一致、精致、可批量维护。
-- 让 115 资源转存、目录整理、STRM 生成和 Emby 刷新形成自动链路。
-- 让缺集、订阅、RSS、真实库与 MoviePilot 联动，减少反复人工搜索。
-- 让 Docker、Webhook、通知、计划任务和健康状态集中可视化。
-- 让本地 NAS 部署保留可控性，适合长期运行与渐进升级。
-
-## 核心能力
-
-### 统一仪表盘
-
-ChillPoster 提供基于 FastAPI 与 Vue/Vite 的管理界面，默认运行在 `5256` 端口。仪表盘聚合后台任务、系统状态、核心配置与常用入口，让封面、整理、转存、同步、通知和运维不再散落在多个页面里。
-
-### Emby 封面系统
-
-内置手动封面、封面设计、自动封面、封面备份、字体管理、模板管理与翻译配置。你可以为不同媒体库设计统一视觉模板，批量生成并应用到 Emby，同时保留备份与恢复能力。
-
-### 115 网盘一条龙
-
-围绕 115 网盘与 Emby 的高频场景，ChillPoster 提供资源转存、目录标准化、媒体整理、二级分类、整理记录、整理监控目录、115 定时清理、115 秒传/上传等能力。适合把“资源进入网盘”到“媒体库可播放”的流程做成稳定流水线。
-
-### 302 网关与多 Emby 接入
-
-ChillPoster 可根据配置启动一个或多个网关反代服务，为 Emby 访问 115 资源提供 302 跳转与代理能力。多 Emby 配置、多端口映射与网关生命周期由主程序统一管理。
-
-### 媒体整理与 STRM 同步
-
-媒体整理模块支持目录浏览、识别测试、TMDB 信息、重命名模板、分类规则、Emby 媒体库缓存和整理续跑。STRM 同步可配合网盘资源与 Emby 入库策略，降低本地存储压力。
-
-### 发现推荐与缺集治理
-
-发现推荐页面用于聚合影视来源和订阅入口；缺集统计帮助定位剧集缺失、比对本地与 TMDB 信息，并联动资源搜索与 MoviePilot 订阅，让追剧补齐更直观。
-
-### RSS 与真实库
-
-ChillPoster 支持 RSS 真实库、独立真实库与定时任务。适合把订阅源、转存路径、Emby 入库和后续整理拆分成可观察、可维护的自动流程。
-
-### 通知与外部联动
-
-支持微信、Telegram、Webhook、MoviePilot 与 Forward 爱影资源联动。后台任务、签到、整理结果、聚合剧集入库等事件可以推送到常用通知渠道。
-
-### 运维与升级
-
-内置 Docker 管理、系统健康、任务中心、Emby 任务中心、系统升级与版本接口。Docker 镜像版本由 Git tag 注入，前端通过 `/api/version` 获取当前版本。
-
-## 产品结构
+## 镜像地址
 
 ```text
-ChillPoster
-├── 管理 UI            FastAPI + Vue/Vite，默认端口 5256
-├── 网关服务          一个或多个 Emby/115 访问网关
-├── 封面系统          设计、生成、应用、备份与恢复
-├── 网盘一条龙        转存、整理、分类、STRM、监控与清理
-├── 订阅与发现        RSS、真实库、缺集统计、MoviePilot 联动
-├── 通知中心          微信、Telegram、Webhook 与任务消息
-└── 运维中心          Docker、升级、健康检查、计划任务
+ghcr.io/zhang6743779-debug/chillposter:latest
 ```
 
-## 快速开始
+GitHub Actions 会在推送到 `main` 或推送 `v*` 标签时自动构建并推送多架构镜像到 GitHub Container Registry。
 
-### Docker 部署
+## 默认账号密码
 
-```bash
-docker run -d \
-  --name chillposter \
-  -p 5256:5256 \
-  -v /path/to/chillposter/config:/app/config \
-  -v /path/to/chillposter/fonts:/app/fonts \
-  -v /path/to/chillposter/templates:/app/templates \
-  -v /path/to/chillposter/layouts:/app/layouts \
-  chillne/chillposter:latest
-```
-
-访问：
+首次启动且没有挂载旧的 `config/auth.json` 时，默认登录信息为：
 
 ```text
-http://你的服务器IP:5256
+用户名：admin
+密码：password
 ```
 
-### 本地开发
+也可以通过环境变量 `CHILLPOSTER_ADMIN_USERNAME` 和 `CHILLPOSTER_ADMIN_PASSWORD` 修改首次默认账号密码。进入系统后，在右上角账号面板里修改账号密码会写入 `config/auth.json`，后续优先使用已保存的账号密码。
+
+## 飞牛 Docker/容器管理器部署
+
+### 方式一：使用飞牛 Compose 项目
+
+1. 打开飞牛 `Docker` 或 `容器管理器`。
+2. 进入 `Compose` / `项目` / `创建项目`。
+3. 项目名称填写 `chillposter`。
+4. 粘贴下面的 `docker-compose.yml`。
+5. 部署后访问 `http://飞牛IP:5256/static/index.html`。
+
+飞牛可直接复制的 compose 文件：
+
+```yaml
+services:
+  chillposter:
+    image: ghcr.io/zhang6743779-debug/chillposter:latest
+    container_name: chillposter
+    ports:
+      - "5256:5256"
+    environment:
+      TZ: Asia/Shanghai
+      CHILLPOSTER_IMAGE: ghcr.io/zhang6743779-debug/chillposter:latest
+      CHILLPOSTER_ADMIN_USERNAME: admin
+      CHILLPOSTER_ADMIN_PASSWORD: password
+    volumes:
+      - ./config:/app/config
+      - ./fonts:/app/fonts
+      - ./templates:/app/templates
+      - ./layouts:/app/layouts
+      - ./backups:/app/backups
+    restart: unless-stopped
+```
+
+### 方式二：使用飞牛图形化创建容器
+
+1. 镜像填写 `ghcr.io/zhang6743779-debug/chillposter:latest`。
+2. 容器名称填写 `chillposter`。
+3. 端口映射填写 `5256 -> 5256`。
+4. 添加数据卷映射：
+   - `./config` -> `/app/config`
+   - `./fonts` -> `/app/fonts`
+   - `./templates` -> `/app/templates`
+   - `./layouts` -> `/app/layouts`
+   - `./backups` -> `/app/backups`
+5. 添加环境变量：
+   - `TZ=Asia/Shanghai`
+   - `CHILLPOSTER_IMAGE=ghcr.io/zhang6743779-debug/chillposter:latest`
+   - `CHILLPOSTER_ADMIN_USERNAME=admin`
+   - `CHILLPOSTER_ADMIN_PASSWORD=password`
+6. 重启策略选择 `unless-stopped` 或 `总是重启`。
+7. 启动容器后访问 `http://飞牛IP:5256/static/index.html`。
+
+如果飞牛拉取 GHCR 镜像失败，请确认飞牛主机可以访问 `ghcr.io`，并确认 GitHub Packages 中该镜像已设置为公开可见。
+
+## 端口映射
+
+| 宿主机端口 | 容器端口 | 说明 |
+| --- | --- | --- |
+| `5256` | `5256` | ChillPoster Web 管理界面和 API |
+
+访问地址：
+
+```text
+http://你的服务器IP:5256/static/index.html
+```
+
+## 数据卷映射
+
+| 宿主机目录 | 容器目录 | 说明 |
+| --- | --- | --- |
+| `./config` | `/app/config` | 配置、账号、任务状态、缓存数据库 |
+| `./fonts` | `/app/fonts` | 字体文件 |
+| `./templates` | `/app/templates` | 海报模板 |
+| `./layouts` | `/app/layouts` | 布局文件 |
+| `./backups` | `/app/backups` | 备份文件 |
+
+升级镜像前建议至少备份 `config` 目录。
+
+## 环境变量说明
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TZ` | `Asia/Shanghai` | 容器时区 |
+| `CHILLPOSTER_IMAGE` | `ghcr.io/zhang6743779-debug/chillposter:latest` | 当前部署镜像地址，供升级/运维页面识别 |
+| `CHILLPOSTER_ADMIN_USERNAME` | `admin` | 首次启动默认用户名，仅在 `config/auth.json` 不存在时生效 |
+| `CHILLPOSTER_ADMIN_PASSWORD` | `password` | 首次启动默认密码，仅在 `config/auth.json` 不存在时生效 |
+| `CHILLPOSTER_LOCAL_MEDIA_ROOT` | 容器内用户桌面路径 | 一条龙标准本地媒体根目录，可按需改为挂载目录 |
+| `CHILLPOSTER_STRM_HOST` | 空 | STRM 生成时的外部访问地址，留空时使用界面配置 |
+| `CHILLPOSTER_PROXY_URL` | 空 | 部分外部接口请求代理，按需填写 |
+
+## CloudDrive2 接入 123 云盘和光鸭云盘
+
+1. 先在 CloudDrive2 中添加 123 云盘或光鸭云盘账号，并开启 WebDAV 服务。
+2. 在 ChillPoster 进入 `云盘配置`，云盘类型选择 `123 云盘（CloudDrive2）` 或 `光鸭云盘（CloudDrive2，只读）`。
+3. 填写 CloudDrive2 WebDAV 地址，例如 `http://clouddrive2:19798/dav` 或反代后的 HTTPS 地址。
+4. 如 CloudDrive2 WebDAV 开启了鉴权，填写用户名和密码。
+5. `云盘根路径` 用于限定 ChillPoster 可见的根目录，默认 `/`。
+6. `播放直链基础地址` 可选。留空时会使用 WebDAV 地址生成播放直链；如果 Emby 客户端访问不到内网地址，建议填反代后的外网地址。
+
+123 云盘在 CloudDrive2 WebDAV 下按可写云盘处理，支持浏览、创建标准目录、上传、清理、媒体整理、STRM 和 302 播放。光鸭云盘按只读云盘处理，保存配置时只验证 CloudDrive2 根目录可访问，不会自动创建标准目录；支持浏览、STRM 和直链播放，创建目录、上传、删除、移动、媒体整理等写操作会被 ChillPoster 拦截并提示只读。
+
+## 普通服务器 docker compose 部署
 
 ```bash
-source .venv/bin/activate
+mkdir -p chillposter
+cd chillposter
+mkdir -p config fonts templates layouts backups
+```
+
+保存 `docker-compose.yml` 后启动：
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+更新镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+## 源码构建
+
+项目已有 Dockerfile，GitHub Actions 和本地构建都使用该 Dockerfile。
+
+```bash
+docker build --build-arg CHILLPOSTER_VERSION=vdev -t chillposter:local .
+docker run -d --name chillposter -p 5256:5256 chillposter:local
+```
+
+## 本地开发
+
+```bash
 pip install -r requirements.txt
 
 cd frontend
-npm install
+npm ci
 npm run build
 
 cd ..
 python main.py
 ```
 
-## 推荐配置路径
+## 核心接口路径
 
-1. 进入 `Emby 配置`，填写 Emby 地址与 API Key。
-2. 进入 `115 配置`，完成 115 账号、根目录与一条龙目录绑定。
-3. 进入 `302 配置`，设置网关端口与访问模式。
-4. 进入 `媒体整理`，配置转存源、媒体库目标、分类规则与监控目录。
-5. 进入 `STRM 同步`，创建同步任务并按需开启定时全量同步。
-6. 进入 `通知配置`，绑定微信、Telegram 或 Webhook。
-7. 进入 `封面系统`，配置字体、模板与自动封面任务。
+- UI 与基础：`/static/index.html`、`/api/version`、`/api/login`、`/api/load`、`/api/save`
+- Emby/封面：`/api/connect`、`/api/library_covers`、`/api/templates_v2`、`/api/apply`
+- 云盘配置：`/api/config_302/get`、`/api/config_302/save`、`/api/config_302/test_115`、`/api/config_302/test_cloud_drive`
+- CloudDrive2：`/api/cloud_drive/test`、`/api/cloud_drive/browse`
+- 115 扫码：`/api/config_302/115_qrcode/start`、`/api/config_302/115_qrcode/status`、`/api/config_302/115_qrcode/result`
+- 媒体整理：`/api/media_organize/get`、`/api/media_organize/save`、`/api/media_organize/browse115`、`/api/media_organize/organize`
+- STRM：`/api/strm/get`、`/api/strm/save`、`/api/strm/start`、`/api/strm/stop`
+- 115 工具：`/api/drive115_cleanup/*`、`/api/drive115_upload/*`
+- 302 网关：`/d/{pickcode}.ext` 用于 115，`/cd/{drive_index}/{encoded_path}.ext` 用于 CloudDrive2
 
-## 文档
+## 测试命令
 
-- [Wiki 首页](docs/wiki/README.md)
-- [安装部署](docs/wiki/installation.md)
-- [核心配置](docs/wiki/configuration.md)
-- [功能指南](docs/wiki/features.md)
-- [运维手册](docs/wiki/operations.md)
-- [发布流程](docs/wiki/release.md)
+```bash
+python -m py_compile main.py app/routers/cloud_drive.py app/services/cloud_drive_provider.py app/routers/config_302.py app/services/media_organize_core.py app/services/strm_service.py
 
-## 技术栈
+cd frontend
+npm ci
+npm run build
 
-- Backend: Python, FastAPI, Uvicorn, APScheduler
-- Frontend: Vue, Vite
-- Runtime: Docker, NAS, Linux/macOS local development
-- Integrations: Emby, 115, TMDB, MoviePilot, Aiying, WeChat, Telegram, Webhook
+cd ..
+docker build --build-arg CHILLPOSTER_VERSION=vdev -t chillposter:local .
+docker compose up -d
+curl http://127.0.0.1:5256/api/version
+```
 
-## 版本与发布
+CloudDrive2 连接测试：
 
-Docker 正式版本以 Git tag 为准，格式为 `vX.Y.Z.N`。推送 `v*` 标签后，GitHub Actions 会构建并发布：
+```bash
+curl -X POST http://127.0.0.1:5256/api/config_302/test_cloud_drive \
+  -H "Content-Type: application/json" \
+  -d '{"provider":"123pan","clouddrive_base_url":"http://127.0.0.1:19798/dav","clouddrive_username":"","clouddrive_password":"","clouddrive_root_path":"/"}'
+```
 
-- `chillne/chillposter:<tag>`
-- `chillne/chillposter:<version-without-v>`
-- `chillne/chillposter:latest`
+## 项目结构
 
-## 项目定位
+```text
+ChillPoster/
+  main.py                         FastAPI 主入口，注册 UI API 与 302 网关应用
+  Dockerfile                      多阶段镜像构建，前端 Vite + 后端运行环境
+  docker-compose.yml              GHCR 镜像部署模板
+  requirements.txt                Python 依赖
+  app/
+    routers/                      FastAPI 路由
+    services/                     业务服务层
+    discover_plugins/             发现推荐插件
+  core/                           Emby、TMDb、媒体识别、缓存、115 monitor 等核心模块
+  frontend/
+    index.html                    Vue 单页管理界面模板
+    src/                          Vue/Vite 前端逻辑
+    package.json                  前端依赖与构建命令
+  config/                         运行配置
+  fonts/ templates/ layouts/      字体、模板、布局资源
+  defaults/                       默认资源备份
+  docs/                           文档和截图
+```
 
-ChillPoster 不是单一下载器、单一海报工具或单一反代脚本。它更像是 Emby + 115 用户的家庭影音控制台：把视觉、入库、转存、同步、监控和通知组织在一起，替你照看那些重复、细碎、却决定体验质感的工作。
+## 注意事项
+
+- 原有 115 核心功能没有删除；CloudDrive2 是在 provider 分支上新增的适配路径。
+- CloudDrive2 直链如果包含 WebDAV Basic Auth，部分 Emby 客户端可能不接受带用户名密码的 URL。遇到这种情况请配置 `播放直链基础地址` 为可访问的反代地址。
+- 光鸭云盘在 CloudDrive2 当前适配下按只读处理，不能承诺与 115/123 一样执行写入类操作。

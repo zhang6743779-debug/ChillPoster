@@ -8,6 +8,13 @@ from core.configs import AUTH_FILE
 
 router = APIRouter(tags=["Auth"])
 
+def _default_auth_creds() -> dict:
+    return {
+        "username": os.getenv("CHILLPOSTER_ADMIN_USERNAME", "admin") or "admin",
+        "password": os.getenv("CHILLPOSTER_ADMIN_PASSWORD", "password") or "password",
+    }
+
+
 def _ensure_auth_secret(creds: dict) -> dict:
     if not creds.get("secret"):
         creds["secret"] = uuid.uuid4().hex
@@ -25,7 +32,7 @@ def get_auth_creds():
             with open(AUTH_FILE, "r", encoding="utf-8") as f:
                 return _ensure_auth_secret(json.load(f))
         except: pass
-    return _ensure_auth_secret({"username": "admin", "password": "password"})
+    return _ensure_auth_secret(_default_auth_creds())
 
 @router.post("/api/login")
 def login(req: LoginRequest):

@@ -14,6 +14,7 @@ from core.logger import logger
 from app.services.realtime_events import format_sse_event, subscribe_realtime_events
 from app.services.drive115_auth_probe import format_115_login_app_label, probe_115_cookie
 from app.services.media_organize_115_ops import _get_115_client, run_115_write_request_sync
+from app.services.cloud_drive_provider import get_cloud_drive, is_cloud_provider, normalize_provider, provider_label
 
 # ❌ [重要] 绝对不要在这里导入 task_service，否则会报错 ImportError (循环引用)
 
@@ -51,7 +52,14 @@ async def config_302_realtime_events():
 # [第一步] 先定义基础配置类
 class Drive115Config(BaseModel):
     name: str = '115'
+    provider: str = '115'
     cookie: str = ''  # 大号 cookie（存储资源）
+    clouddrive_base_url: str = ''
+    clouddrive_username: str = ''
+    clouddrive_password: str = ''
+    clouddrive_root_path: str = '/'
+    clouddrive_direct_base_url: str = ''
+    clouddrive_read_only: bool = False
     show_cookie: bool = False # 前端辅助字段
     enable_sync: bool = False # 同播复制开关
     enable_rapid: bool = False # 秒传开关
@@ -104,6 +112,20 @@ class SaveEmbyPayload(BaseModel):
 
 class Test115Payload(BaseModel):
     cookie: str
+
+
+class TestCloudDrivePayload(BaseModel):
+    provider: str = '123pan'
+    name: str = ''
+    clouddrive_base_url: str = ''
+    clouddrive_username: str = ''
+    clouddrive_password: str = ''
+    clouddrive_root_path: str = '/'
+    clouddrive_direct_base_url: str = ''
+    clouddrive_read_only: bool = False
+
+    class Config:
+        extra = "ignore"
 
 
 class Start115QrPayload(BaseModel):
@@ -172,6 +194,14 @@ def _normalize_single_drive_config(drive: Any) -> dict:
     normalized = Drive115Config().dict()
     if isinstance(drive, dict):
         normalized.update(drive)
+    normalized["provider"] = normalize_provider(normalized.get("provider"))
+    if normalized["provider"] != "115" and not str(normalized.get("name") or "").strip():
+        normalized["name"] = provider_label(normalized["provider"])
+    normalized["clouddrive_root_path"] = str(normalized.get("clouddrive_root_path") or "/").strip() or "/"
+    if normalized["provider"] == "guangya":
+        normalized["clouddrive_read_only"] = True
+    if normalized.get("clouddrive_read_only"):
+        normalized["auto_delete"] = False
     normalized["enable_standard_topology"] = True
     normalized["transfer_drive_index"] = 0
     try:
@@ -436,11 +466,123 @@ def _ensure_standard_topology_dirs(drive_index: int, local_media_root: str, remo
     }
 
 
+def _ensure_cloud_standard_topology_dirs(drive_index: int, local_media_root: str, remote_root_name: str = "影视库") -> dict:
+    from pathlib import Path
+
+    normalized_local_root = str(local_media_root or "").strip()
+    if not normalized_local_root:
+        raise ValueError("本地媒体根目录不能为空")
+
+    local_root_dir = Path(normalized_local_root)
+    if local_root_dir.name != remote_root_name:
+        local_root_dir = local_root_dir / remote_root_name
+
+    cloud = get_cloud_drive(drive_index)
+    remote_root_path = f"/{remote_root_name}"
+    if getattr(cloud, "read_only", False):
+        required_paths = {
+            "root": remote_root_path,
+            "media": f"{remote_root_path}/媒体目录",
+            "instant": f"{remote_root_path}/秒传目录",
+            "failed": f"{remote_root_path}/失败目录",
+            "transfer": f"{remote_root_path}/转存目录",
+            "dedup": f"{remote_root_path}/重复目录",
+            "wash": f"{remote_root_path}/洗版目录",
+        }
+        for path in required_paths.values():
+            cloud.list(path)
+        local_media_dir = local_root_dir / "媒体库"
+        local_real_library_dir = local_root_dir / "真实库"
+        local_root_dir.mkdir(parents=True, exist_ok=True)
+        local_media_dir.mkdir(parents=True, exist_ok=True)
+        local_real_library_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "remote": {
+                key: {"name": path, "cid": path}
+                for key, path in required_paths.items()
+            },
+            "local": {
+                "root": str(local_root_dir),
+                "media": str(local_media_dir),
+                "real_library": str(local_real_library_dir),
+            },
+        }
+
+    remote_root_cid = cloud.ensure_dir(remote_root_path)
+    media_cid = cloud.ensure_dir(f"{remote_root_path}/媒体目录")
+    instant_cid = cloud.ensure_dir(f"{remote_root_path}/秒传目录")
+    failed_cid = cloud.ensure_dir(f"{remote_root_path}/失败目录")
+    transfer_cid = cloud.ensure_dir(f"{remote_root_path}/转存目录")
+    dedup_cid = cloud.ensure_dir(f"{remote_root_path}/重复目录")
+    wash_cid = cloud.ensure_dir(f"{remote_root_path}/洗版目录")
+
+    local_media_dir = local_root_dir / "媒体库"
+    local_real_library_dir = local_root_dir / "真实库"
+    local_root_dir.mkdir(parents=True, exist_ok=True)
+    local_media_dir.mkdir(parents=True, exist_ok=True)
+    local_real_library_dir.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "remote": {
+            "root": {"name": f"/{remote_root_name}", "cid": str(remote_root_cid)},
+            "media": {"name": f"/{remote_root_name}/媒体目录", "cid": str(media_cid)},
+            "instant": {"name": f"/{remote_root_name}/秒传目录", "cid": str(instant_cid)},
+            "failed": {"name": f"/{remote_root_name}/失败目录", "cid": str(failed_cid)},
+            "transfer": {"name": f"/{remote_root_name}/转存目录", "cid": str(transfer_cid)},
+            "dedup": {"name": f"/{remote_root_name}/重复目录", "cid": str(dedup_cid)},
+            "wash": {"name": f"/{remote_root_name}/洗版目录", "cid": str(wash_cid)},
+        },
+        "local": {
+            "root": str(local_root_dir),
+            "media": str(local_media_dir),
+            "real_library": str(local_real_library_dir),
+        },
+    }
+
+
 def _resolve_existing_standard_topology_dirs(drive_index: int, local_media_root: str, remote_root_name: str = "影视库") -> dict | None:
     from pathlib import Path
 
     normalized_local_root = str(local_media_root or "").strip() or _default_standard_local_root()
     remote_root_name = str(remote_root_name or "影视库").strip() or "影视库"
+
+    drive = get_primary_drive_config_sync()
+    if is_cloud_provider(drive.get("provider")):
+        try:
+            cloud = get_cloud_drive(drive_index)
+            required_paths = {
+                "root": f"/{remote_root_name}",
+                "media": f"/{remote_root_name}/媒体目录",
+                "instant": f"/{remote_root_name}/秒传目录",
+                "failed": f"/{remote_root_name}/失败目录",
+                "transfer": f"/{remote_root_name}/转存目录",
+                "dedup": f"/{remote_root_name}/重复目录",
+                "wash": f"/{remote_root_name}/洗版目录",
+            }
+            cloud.list(required_paths["root"])
+            if getattr(cloud, "read_only", False):
+                for path in required_paths.values():
+                    cloud.list(path)
+            else:
+                for path in required_paths.values():
+                    cloud.ensure_dir(path)
+            local_root_dir = Path(normalized_local_root)
+            if local_root_dir.name != remote_root_name:
+                local_root_dir = local_root_dir / remote_root_name
+            return {
+                "remote": {
+                    key: {"name": path, "cid": path}
+                    for key, path in required_paths.items()
+                },
+                "local": {
+                    "root": str(local_root_dir),
+                    "media": str(local_root_dir / "媒体库"),
+                    "real_library": str(local_root_dir / "真实库"),
+                },
+            }
+        except Exception as e:
+            logger.warning(f"解析云盘一条龙目录失败: provider={drive.get('provider')} error={e}")
+            return None
 
     client = _get_115_client(drive_index)
     remote_root_path = f"/{remote_root_name}"
@@ -652,7 +794,7 @@ def ensure_standard_topology_binding(reason: str = "", *, sync_media_organize: b
         local_media_root = str(drive.get("local_media_root") or "").strip() or _default_standard_local_root()
         remote_root_name = str(drive.get("remote_root_name") or "影视库").strip() or "影视库"
         result = (
-            _ensure_standard_topology_dirs(
+            (_ensure_cloud_standard_topology_dirs if is_cloud_provider(drive.get("provider")) else _ensure_standard_topology_dirs)(
                 drive_index=0,
                 local_media_root=local_media_root,
                 remote_root_name=remote_root_name,
@@ -881,6 +1023,7 @@ async def save_config_302(config: Config302Payload):
         save_data = _normalize_config_302_data(config.dict())
         old_drive = get_primary_drive_config_sync()
         new_drive = save_data["drives"][0]
+        new_provider = normalize_provider(new_drive.get("provider"))
 
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         _save_config_302_sync(save_data)
@@ -888,7 +1031,7 @@ async def save_config_302(config: Config302Payload):
         logger.info("============ 302 配置已更新 ============")
         sync_status = "✅ 开启" if new_drive.get("enable_sync") else "⭕ 关闭"
         rapid_status = "✅ 开启" if new_drive.get("enable_rapid") else "⭕ 关闭"
-        logger.info(f"[账号: {new_drive.get('name', '115')}] 同播复制: {sync_status} | 秒传模式: {rapid_status}")
+        logger.info(f"[账号: {new_drive.get('name') or provider_label(new_provider)}] Provider: {provider_label(new_provider)} | 同播复制: {sync_status} | 秒传模式: {rapid_status}")
         if new_drive.get("enable_sync"):
             logger.info("    └─ ⚡ 同播复制策略已生效: 多人观看同一视频时自动生成副本")
         logger.info("=======================================")
@@ -909,7 +1052,7 @@ async def save_config_302(config: Config302Payload):
             old_cookie = str(old_drive.get('cookie') or '').strip()
             new_cookie = str(new_drive.get('cookie') or '').strip()
             changed_cookies = []
-            if old_cookie != new_cookie:
+            if new_provider == "115" and old_cookie != new_cookie:
                 if old_cookie:
                     changed_cookies.append(old_cookie)
                 if new_cookie:
@@ -926,12 +1069,17 @@ async def save_config_302(config: Config302Payload):
                 monitor_should_refresh = True
                 monitor_refresh_reason.append('cookie_changed')
 
-            if new_drive.get('enable_standard_topology'):
+            read_only_cloud_drive = (
+                is_cloud_provider(new_provider)
+                and bool(new_drive.get("clouddrive_read_only") or new_provider == "guangya")
+            )
+            if new_drive.get('enable_standard_topology') and not read_only_cloud_drive:
                 local_media_root = _default_standard_local_root()
                 remote_root_name = str(new_drive.get('remote_root_name') or '影视库').strip() or '影视库'
                 new_drive['local_media_root'] = local_media_root
                 new_drive['remote_root_name'] = remote_root_name
-                topology_result = _ensure_standard_topology_dirs(
+                topology_factory = _ensure_cloud_standard_topology_dirs if is_cloud_provider(new_provider) else _ensure_standard_topology_dirs
+                topology_result = topology_factory(
                     drive_index=0,
                     local_media_root=local_media_root,
                     remote_root_name=remote_root_name,
@@ -950,13 +1098,20 @@ async def save_config_302(config: Config302Payload):
                 if any(str(old_media_organize_data.get(field, '') or '') != str(media_organize_data.get(field, '') or '') for field in monitor_fields):
                     monitor_should_refresh = True
                     monitor_refresh_reason.append('monitor_dirs_changed')
+            elif read_only_cloud_drive:
+                try:
+                    cloud = get_cloud_drive(0, new_drive)
+                    cloud.test_connection()
+                    logger.info(f"[302] {provider_label(new_provider)}为只读 CloudDrive2 云盘，跳过一条龙写入目录创建")
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"{provider_label(new_provider)}连接失败: {e}")
 
             if monitor_should_refresh and os.path.exists(MEDIA_ORGANIZE_CONFIG_FILE):
                 refreshed_media_organize_data = _load_json_file(MEDIA_ORGANIZE_CONFIG_FILE)
                 if isinstance(refreshed_media_organize_data, dict):
                     refreshed_media_organize_data['drive_index'] = 0
                     media_organize_config = MediaOrganizeConfig(**refreshed_media_organize_data)
-                    if media_organize_config.life_monitor_enabled:
+                    if media_organize_config.life_monitor_enabled and new_provider == "115":
                         logger.info(f"[302] 标准拓扑保存后刷新 Life 监控: reason={'+'.join(monitor_refresh_reason) or 'unknown'}")
                         await _toggle_life_monitor(True, media_organize_config, force_restart=True)
         except HTTPException:
@@ -967,7 +1122,9 @@ async def save_config_302(config: Config302Payload):
 
         message = '配置已保存'
         if topology_result:
-            message = '配置已保存，115 一条龙目录已就绪'
+            message = f"配置已保存，{provider_label(new_provider)}一条龙目录已就绪"
+        elif is_cloud_provider(new_provider) and bool(new_drive.get("clouddrive_read_only") or new_provider == "guangya"):
+            message = f"配置已保存，{provider_label(new_provider)}只读连接已就绪"
         return {"status": "success", "message": message, "standard_topology": topology_result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"保存失败: {str(e)}")
@@ -1002,6 +1159,18 @@ async def test_115_cookie(payload: Test115Payload):
             }
         return {"status": "error", "message": result.get("message") or "Cookie 无效或已过期"}
 
+    except Exception as e:
+        return {"status": "error", "message": f"连接异常: {str(e)}"}
+
+
+@router.post("/test_cloud_drive")
+async def test_cloud_drive(payload: TestCloudDrivePayload):
+    """测试 123云盘/光鸭云盘的 CloudDrive2 接入。"""
+    try:
+        data = payload.dict()
+        data["provider"] = normalize_provider(data.get("provider"))
+        cloud = get_cloud_drive(0, data)
+        return cloud.test_connection()
     except Exception as e:
         return {"status": "error", "message": f"连接异常: {str(e)}"}
 
@@ -1152,7 +1321,7 @@ async def manual_signin_all():
 
 @router.post("/manual_cleanup")
 async def manual_cleanup(payload: ManualCleanupPayload):
-    """手动触发 115 清理任务（删除目录 + 清空回收站）"""
+    """手动触发云盘清理任务。"""
     from app.services.drive115_service import drive115_service
 
     # 读取配置
@@ -1166,7 +1335,7 @@ async def manual_cleanup(payload: ManualCleanupPayload):
 
         drives = data.get("drives", [])
         if not drives:
-            return {"status": "error", "message": "没有配置 115 账号"}
+            return {"status": "error", "message": "没有配置云盘账号"}
 
         if payload.drive_index >= len(drives):
             return {"status": "error", "message": "账号索引超出范围"}

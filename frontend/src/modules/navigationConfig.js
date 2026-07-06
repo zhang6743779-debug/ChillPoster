@@ -29,8 +29,8 @@ export const toolboxItems = [
     { id: 'drive115_ck_tool', icon: 'fa-qrcode', label: '扫码获取115CK', group: '工具箱', action: 'open115CkTool' },
     { id: 'real_library', icon: 'fa-hard-drive', label: '独立真实库', group: '工具箱' },
     { id: 'rss', icon: 'fa-rss', label: 'RSS真实库', group: '工具箱' },
-    { id: 'drive115_cleanup', icon: 'fa-broom', label: '115定时清空', group: '工具箱' },
-    { id: 'drive115_upload', icon: 'fa-cloud-arrow-up', label: '115秒传/上传', group: '工具箱' },
+    { id: 'drive115_cleanup', icon: 'fa-broom', label: '云盘定时清空', group: '工具箱' },
+    { id: 'drive115_upload', icon: 'fa-cloud-arrow-up', label: '云盘上传监听', group: '工具箱' },
     { id: 'organize_monitor_dirs', icon: 'fa-folder-plus', label: '整理监控目录', group: '工具箱' },
     { id: 'forward_aiying', icon: 'fa-tower-broadcast', label: 'Forward模块', group: '工具箱' },
     { id: 'webhook', icon: 'fa-bolt-lightning', label: 'Webhook', group: '工具箱' },
@@ -38,7 +38,7 @@ export const toolboxItems = [
 
 export const settingsItems = [
     { id: 'server', icon: 'fa-server', label: 'Emby 配置', group: '核心配置' },
-    { id: 'config_115', icon: 'fa-cloud', label: '115 配置', group: '核心配置' },
+    { id: 'config_115', icon: 'fa-cloud', label: '云盘配置', group: '核心配置' },
     { id: 'telegram_monitor', icon: 'fa-satellite-dish', label: 'Telegram 监听', group: '核心配置' },
     { id: 'config_notification', icon: 'fa-bell', label: '通知配置', group: '核心配置' },
     { id: 'config_moviepilot', icon: 'fa-plane', label: 'MoviePilot', group: '核心配置' },

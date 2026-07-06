@@ -13,6 +13,7 @@ from core.logger import logger
 from core.media_library_cache import get_item_by_pickcode
 from app.services.drive115_service import drive115_service
 from app.services.wechat_service import wechat_notify_service
+from app.services.cloud_drive_provider import get_cloud_drive, parse_cloud_play_path
 
 router = APIRouter(tags=["gateway"])
 
@@ -618,10 +619,23 @@ async def emby_gateway(request: Request, path: str, background_tasks: Background
     lower_path = path.lower()
     is_playback = "videos" in lower_path and ("stream" in lower_path or "original" in lower_path)
     pickcode, direct_display_name = _extract_pickcode_from_direct_path(path)
+    cloud_drive_index, cloud_path, cloud_display_name = parse_cloud_play_path(path)
+    is_direct_cloud_playback = bool(cloud_path)
     is_direct_pickcode_playback = bool(pickcode)
     enable_302 = emby_cfg.get("enabled", False)
 
     if request.method == "GET" and enable_302:
+        if is_direct_cloud_playback:
+            try:
+                cloud = get_cloud_drive(cloud_drive_index)
+                direct_url = await asyncio.to_thread(cloud.get_direct_url, cloud_path)
+                display_name = cloud_display_name or cloud_path.rsplit("/", 1)[-1] or cloud_path
+                logger.info(f"[网关-{emby_name}] 302重定向到云盘直链: {display_name}")
+                return _build_redirect_response(direct_url)
+            except Exception as e:
+                logger.error(f"[网关-{emby_name}] 云盘直链获取失败: path={cloud_path}, error={e}")
+                return Response(f"Cloud drive direct url failed: {e}", status_code=502)
+
         if is_playback:
             try:
                 parts = path.split("/")

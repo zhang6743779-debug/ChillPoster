@@ -1,15 +1,21 @@
-name: Build and Publish Docker Image
+name: Build and Publish GHCR Image
 
 on:
   push:
+    branches:
+      - main
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish, for example v4.8.5.8'
-        required: true
+        description: "Image version tag, for example v1.0.0. Leave empty to publish latest."
+        required: false
         type: string
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   docker:
@@ -30,36 +36,47 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve version
-        id: version
+      - name: Resolve image metadata
+        id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
 
-          if [ -z "$VERSION" ]; then
-            echo "Version is empty"
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="latest"
           fi
 
           VERSION_NO_V="${VERSION#v}"
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_no_v=$VERSION_NO_V" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=${IMAGE}"
+            echo "version=${VERSION}"
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION}-${{ matrix.suffix }}"
+            if [ "${VERSION_NO_V}" != "${VERSION}" ]; then
+              echo "${IMAGE}:${VERSION_NO_V}-${{ matrix.suffix }}"
+            fi
+            if [ "${VERSION}" != "latest" ]; then
+              echo "${IMAGE}:latest-${{ matrix.suffix }}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Login to DockerHub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push platform image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -67,12 +84,12 @@ jobs:
           file: ./Dockerfile
           push: true
           build-args: |
-            CHILLPOSTER_VERSION=${{ steps.version.outputs.version }}
+            CHILLPOSTER_VERSION=${{ steps.meta.outputs.version }}
             BUILD_DATE=${{ github.run_id }}
-          tags: |
-            chillne/chillposter:${{ steps.version.outputs.version }}-${{ matrix.suffix }}
-            chillne/chillposter:${{ steps.version.outputs.version_no_v }}-${{ matrix.suffix }}
-            chillne/chillposter:latest-${{ matrix.suffix }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
 
   manifest:
     name: Publish multi-arch manifest
@@ -80,49 +97,58 @@ jobs:
     needs: docker
 
     steps:
-      - name: Resolve version
-        id: version
+      - name: Resolve image metadata
+        id: meta
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
 
-          if [ -z "$VERSION" ]; then
-            echo "Version is empty"
-            exit 1
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="latest"
           fi
 
           VERSION_NO_V="${VERSION#v}"
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_no_v=$VERSION_NO_V" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_no_v=${VERSION_NO_V}" >> "$GITHUB_OUTPUT"
 
-      - name: Login to DockerHub
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Publish version manifest
+      - name: Publish manifests
         shell: bash
         run: |
-          docker buildx imagetools create \
-            -t chillne/chillposter:${{ steps.version.outputs.version }} \
-            chillne/chillposter:${{ steps.version.outputs.version }}-amd64 \
-            chillne/chillposter:${{ steps.version.outputs.version }}-arm64
+          IMAGE="${{ steps.meta.outputs.image }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          VERSION_NO_V="${{ steps.meta.outputs.version_no_v }}"
 
           docker buildx imagetools create \
-            -t chillne/chillposter:${{ steps.version.outputs.version_no_v }} \
-            chillne/chillposter:${{ steps.version.outputs.version_no_v }}-amd64 \
-            chillne/chillposter:${{ steps.version.outputs.version_no_v }}-arm64
+            -t "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
 
-          docker buildx imagetools create \
-            -t chillne/chillposter:latest \
-            chillne/chillposter:latest-amd64 \
-            chillne/chillposter:latest-arm64
+          if [ "${VERSION_NO_V}" != "${VERSION}" ]; then
+            docker buildx imagetools create \
+              -t "${IMAGE}:${VERSION_NO_V}" \
+              "${IMAGE}:${VERSION_NO_V}-amd64" \
+              "${IMAGE}:${VERSION_NO_V}-arm64"
+          fi
+
+          if [ "${VERSION}" != "latest" ]; then
+            docker buildx imagetools create \
+              -t "${IMAGE}:latest" \
+              "${IMAGE}:latest-amd64" \
+              "${IMAGE}:latest-arm64"
+          fi

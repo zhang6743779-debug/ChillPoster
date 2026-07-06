@@ -31,6 +31,7 @@ from app.services.media_organize_tmdb import (
     _normalize_required_episodes,
     _tmdb_data_has_required_episodes,
 )
+from app.services.cloud_drive_provider import build_cloud_play_url, get_cloud_drive, is_drive_115
 
 
 # ==========================================
@@ -2922,6 +2923,111 @@ class StrmService:
             **stats,
         }
 
+    def _process_incremental_task_items_cloud(
+        self,
+        task_config: dict,
+        items: list,
+        cloud,
+        cancel_event: Optional[Event] = None,
+    ) -> dict:
+        task_name = task_config.get("name", "云盘增量同步")
+        remote_path = str(task_config.get("remote_path", "") or "").rstrip("/")
+        local_path = task_config.get("local_path", "")
+        url_base = str(task_config.get("strm_url_base", "") or "")
+        if not url_base:
+            raise Exception("无法生成 STRM 播放地址：未找到可用局域网 IPv4 或代理端口")
+
+        download_aux = task_config.get("download_auxiliary", True)
+        min_video_size_mb = int(task_config.get("min_video_size_mb", 0) or 0)
+        overwrite_mode = task_config.get("overwrite", "skip")
+        video_exts = _parse_exts(task_config.get("video_exts_str", DEFAULT_VIDEO_EXTS))
+        audio_exts = _parse_exts(task_config.get("audio_exts_str", DEFAULT_AUDIO_EXTS))
+        image_exts = _parse_exts(DEFAULT_IMAGE_EXTS)
+        data_exts = _parse_exts(task_config.get("data_exts_str", DEFAULT_DATA_EXTS))
+
+        stats = self._build_incremental_stats()
+        folder_counter = _build_folder_counter()
+        cancel_event = cancel_event or Event()
+        logger.info(f"[STRM] 云盘增量任务开始: {task_name} | 条目:{len(items)} | provider={cloud.provider}")
+
+        for item in items:
+            if cancel_event and cancel_event.is_set():
+                break
+            if item.get("is_dir"):
+                continue
+            stats["matched_items"] += 1
+            filename = str(item.get("name") or "")
+            item_path = str(item.get("path") or item.get("cloud_path") or "")
+            if not filename or not item_path:
+                stats["skipped"] += 1
+                stats["skip_reasons"]["缺少路径"] = int(stats["skip_reasons"].get("缺少路径", 0) or 0) + 1
+                continue
+            fc = classify_file(filename, video_exts, audio_exts, image_exts, data_exts)
+            normalized_remote = str(remote_path or "").rstrip("/")
+            relative = item_path[len(normalized_remote):].lstrip("/") if normalized_remote and item_path.startswith(normalized_remote) else item_path.lstrip("/")
+            rel_dir = os.path.dirname(relative) if relative else ""
+            target_dir = os.path.join(local_path, rel_dir) if rel_dir else local_path
+
+            if fc in ("video", "audio"):
+                if min_video_size_mb and int(item.get("size") or 0) < min_video_size_mb * 1024 * 1024:
+                    stats["video_min_size_skipped"] += 1
+                    stats["skipped"] += 1
+                    stats["skip_reasons"]["小于最小体积"] = int(stats["skip_reasons"].get("小于最小体积", 0) or 0) + 1
+                    continue
+                strm_path = os.path.normpath(os.path.join(target_dir, get_strm_filename(filename)))
+                if overwrite_mode == "skip" and os.path.exists(strm_path):
+                    stats["strm_skipped"] += 1
+                    stats["skipped"] += 1
+                    stats["skip_reasons"]["STRM已存在"] = int(stats["skip_reasons"].get("STRM已存在", 0) or 0) + 1
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(strm_path), exist_ok=True)
+                    strm_url = build_cloud_play_url(url_base, int(task_config.get("drive_index", 0) or 0), item_path, filename)
+                    with open(strm_path, "w", encoding="utf-8") as f:
+                        f.write(strm_url)
+                    stats["generated"] += 1
+                    stats["strm_generated"] += 1
+                    folder_counter["strm"].add(os.path.dirname(strm_path))
+                    stats.update(_snapshot_folder_counter(folder_counter))
+                except Exception as e:
+                    stats["failed"] += 1
+                    logger.warning(f"[STRM] 云盘增量 STRM 写入失败: {filename}: {e}")
+            elif download_aux and fc in ("subtitle", "image", "data"):
+                local_aux_path = os.path.normpath(os.path.join(target_dir, filename))
+                if overwrite_mode == "skip" and os.path.exists(local_aux_path):
+                    if fc == "subtitle":
+                        stats["subtitle_skipped"] += 1
+                    else:
+                        stats["aux_skipped"] += 1
+                    stats["skipped"] += 1
+                    continue
+                try:
+                    direct_url = cloud.get_direct_url(item_path)
+                    _download_by_url(direct_url, local_aux_path, cancel_event=cancel_event)
+                    stats["downloaded"] += 1
+                    _apply_download_class_stats(stats, fc, True)
+                    folder_counter["aux"].add(os.path.dirname(local_aux_path))
+                    stats.update(_snapshot_folder_counter(folder_counter))
+                except Exception as e:
+                    stats["download_failed"] += 1
+                    _apply_download_class_stats(stats, fc, False)
+                    stats["failed"] += 1
+                    logger.warning(f"[STRM] 云盘增量附属文件下载失败: {item_path}: {e}")
+            else:
+                stats["skipped"] += 1
+                stats["other_skipped"] += 1
+
+        was_cancelled = bool(cancel_event and cancel_event.is_set())
+        logger.info(
+            f"[STRM] 云盘增量任务{'已取消' if was_cancelled else '完成'}: {task_name} | "
+            f"生成:{stats['generated']} 下载:{stats['downloaded']} 跳过:{stats['skipped']} 失败:{stats['failed']}"
+        )
+        return {
+            "status": "cancelled" if was_cancelled else ("error" if stats["failed"] else "ok"),
+            "task": task_name,
+            **stats,
+        }
+
     def process_incremental_items(self, items: list, cancel_event: Optional[Event] = None) -> dict:
         if cancel_event and cancel_event.is_set():
             return {"status": "cancelled", "matched_tasks": 0, "matched_items": 0, "results": []}
@@ -2971,15 +3077,24 @@ class StrmService:
             task = data["task"]
             task_items = data["items"]
             drive_index = task.get("drive_index", 0)
-            client = self._get_client(drive_index)
-            cookie = self._get_cookie(drive_index)
-            task_result = self._process_incremental_task_items(
-                task,
-                task_items,
-                client,
-                cookie,
-                cancel_event=cancel_event,
-            )
+            if not is_drive_115(drive_index):
+                cloud = get_cloud_drive(drive_index)
+                task_result = self._process_incremental_task_items_cloud(
+                    task,
+                    task_items,
+                    cloud,
+                    cancel_event=cancel_event,
+                )
+            else:
+                client = self._get_client(drive_index)
+                cookie = self._get_cookie(drive_index)
+                task_result = self._process_incremental_task_items(
+                    task,
+                    task_items,
+                    client,
+                    cookie,
+                    cancel_event=cancel_event,
+                )
             results.append(task_result)
             for key in (
                 "generated", "generated_dirs", "downloaded", "downloaded_dirs", "download_failed",
@@ -3032,6 +3147,181 @@ class StrmService:
     # ==========================================
     # 全量同步（参考 p115strmhelper generate_strm_files 架构）
     # ==========================================
+    def _run_full_sync_cloud(
+        self,
+        task_config: dict,
+        run_id: str,
+        *,
+        task_name: str,
+        drive_index: int,
+        remote_path: str,
+        local_path: str,
+        url_base: str,
+        video_exts: set,
+        audio_exts: set,
+        image_exts: set,
+        data_exts: set,
+        download_aux: bool,
+        min_video_size_mb: int,
+        overwrite_mode: str,
+        start_time: float,
+    ):
+        from app.dependencies import ACTIVE_TASKS
+
+        cloud = get_cloud_drive(drive_index)
+        logger.info(f"[STRM] 云盘全量同步开始: {task_name} | {remote_path} -> {local_path} | provider={cloud.provider}")
+        stats = {
+            "scanned": 0,
+            "scanned_dirs": 0,
+            "scanned_files": 0,
+            "generated": 0,
+            "generated_dirs": 0,
+            "downloaded": 0,
+            "downloaded_dirs": 0,
+            "download_failed": 0,
+            "strm_generated": 0,
+            "subtitle_downloaded": 0,
+            "aux_downloaded": 0,
+            "subtitle_download_failed": 0,
+            "aux_download_failed": 0,
+            "strm_skipped": 0,
+            "subtitle_skipped": 0,
+            "aux_skipped": 0,
+            "video_min_size_skipped": 0,
+            "out_of_scope_skipped": 0,
+            "other_skipped": 0,
+            "tmdb_generated": 0,
+            "tmdb_skipped": 0,
+            "tmdb_failed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "deleted": 0,
+            "retry_success": 0,
+            "retry_failed": 0,
+        }
+
+        _update_progress(run_id, f"STRM扫描中: {task_name}", 5, "running", detail=stats.copy())
+        items = cloud.iter_files(remote_path)
+        task_key = build_task_key(drive_index, remote_path)
+        current_run_items: Dict[str, dict] = {}
+        write_tasks: list[tuple[str, str, str]] = []
+
+        for item in items:
+            if ACTIVE_TASKS.get(run_id, {}).get("cancel_requested"):
+                _update_progress(run_id, f"STRM: {task_name} (已取消)", 100, "stopped", detail=stats.copy())
+                logger.info(f"[STRM] 云盘全量同步取消: {task_name}")
+                return
+
+            stats["scanned"] += 1
+            if item.get("is_dir"):
+                stats["scanned_dirs"] += 1
+            else:
+                stats["scanned_files"] += 1
+
+            cache_item = _extract_cache_item(item, parent_id=0)
+            if cache_item:
+                item_key, item_data = cache_item
+                current_run_items[item_key] = item_data
+            else:
+                item_path_for_cache = str(item.get("path") or "")
+                if item_path_for_cache:
+                    current_run_items[item_path_for_cache] = {
+                        "name": str(item.get("name") or ""),
+                        "path": item_path_for_cache,
+                        "pickcode": str(item.get("pickcode") or ""),
+                        "size": int(item.get("size") or 0),
+                        "id": item_path_for_cache,
+                        "sha1": "",
+                        "is_dir": bool(item.get("is_dir")),
+                        "parent_id": str(item.get("parent_id") or ""),
+                    }
+
+            if item.get("is_dir"):
+                continue
+
+            filename = str(item.get("name") or "")
+            item_path = str(item.get("path") or "")
+            if not filename or not item_path:
+                continue
+            fc = classify_file(filename, video_exts, audio_exts, image_exts, data_exts)
+            normalized_remote = str(remote_path or "").rstrip("/")
+            relative = item_path[len(normalized_remote):].lstrip("/") if normalized_remote and item_path.startswith(normalized_remote) else item_path.lstrip("/")
+            rel_dir = os.path.dirname(relative) if relative else ""
+            target_dir = os.path.join(local_path, rel_dir) if rel_dir else local_path
+
+            if fc in ("video", "audio"):
+                if min_video_size_mb and int(item.get("size") or 0) < int(min_video_size_mb) * 1024 * 1024:
+                    stats["video_min_size_skipped"] += 1
+                    stats["skipped"] += 1
+                    continue
+                strm_path = os.path.normpath(os.path.join(target_dir, get_strm_filename(filename)))
+                if overwrite_mode == "skip" and os.path.exists(strm_path):
+                    stats["strm_skipped"] += 1
+                    stats["skipped"] += 1
+                    continue
+                strm_url = build_cloud_play_url(url_base, drive_index, item_path, filename)
+                write_tasks.append((strm_path, strm_url, filename))
+            elif download_aux and fc in ("subtitle", "image", "data"):
+                local_aux_path = os.path.normpath(os.path.join(target_dir, filename))
+                if overwrite_mode == "skip" and os.path.exists(local_aux_path):
+                    if fc == "subtitle":
+                        stats["subtitle_skipped"] += 1
+                    else:
+                        stats["aux_skipped"] += 1
+                    stats["skipped"] += 1
+                    continue
+                try:
+                    direct_url = cloud.get_direct_url(item_path)
+                    _download_by_url(direct_url, local_aux_path)
+                    stats["downloaded"] += 1
+                    if fc == "subtitle":
+                        stats["subtitle_downloaded"] += 1
+                    else:
+                        stats["aux_downloaded"] += 1
+                except Exception as e:
+                    stats["download_failed"] += 1
+                    if fc == "subtitle":
+                        stats["subtitle_download_failed"] += 1
+                    else:
+                        stats["aux_download_failed"] += 1
+                    logger.warning(f"[STRM] 云盘附属文件下载失败: {item_path}: {e}")
+
+            if stats["scanned"] % 500 == 0:
+                _update_progress(run_id, f"STRM扫描中: {task_name}", min(40, stats["scanned"] // 1000), "running", detail=stats.copy())
+
+        _update_progress(run_id, f"STRM写缓存中: {task_name}", 45, "running", detail=stats.copy())
+        save_task_snapshot(
+            task_key,
+            current_run_items,
+            meta={"last_status": "scanned", "updated_at": time.time(), "provider": cloud.provider},
+            rebuild_resident_index=False,
+        )
+
+        total_writes = len(write_tasks)
+        for idx, (strm_path, strm_url, filename) in enumerate(write_tasks, start=1):
+            if ACTIVE_TASKS.get(run_id, {}).get("cancel_requested"):
+                _update_progress(run_id, f"STRM: {task_name} (已取消)", 100, "stopped", detail=stats.copy())
+                return
+            try:
+                os.makedirs(os.path.dirname(strm_path), exist_ok=True)
+                with open(strm_path, "w", encoding="utf-8") as f:
+                    f.write(strm_url)
+                stats["generated"] += 1
+                stats["strm_generated"] += 1
+            except Exception as e:
+                stats["failed"] += 1
+                logger.warning(f"[STRM] 云盘 STRM 写入失败: {filename}: {e}")
+            if idx % 200 == 0 or idx == total_writes:
+                percent = 45 + int((idx / max(1, total_writes)) * 50)
+                _update_progress(run_id, f"STRM生成中: {task_name}", min(95, percent), "running", detail=stats.copy())
+
+        elapsed = perf_counter() - start_time
+        _update_progress(run_id, f"STRM完成: {task_name}", 100, "finished", detail=stats.copy())
+        logger.info(
+            f"[STRM] 云盘全量同步完成: {task_name} | 扫描:{stats['scanned']} | "
+            f"生成:{stats['strm_generated']} | 下载:{stats['downloaded']} | 失败:{stats['failed']} | 耗时:{elapsed:.1f}s"
+        )
+
     def run_full_sync(self, task_config: dict, run_id: str):
         """全量同步：先纯扫描目录树，再写缓存，最后执行同步动作。"""
         from app.dependencies import ACTIVE_TASKS
@@ -3049,7 +3339,8 @@ class StrmService:
         min_video_size_mb = task_config.get("min_video_size_mb", 0)
         overwrite_mode = task_config.get("overwrite", "skip")
         aux_download_mode = "cdn"
-        cookie = self._get_cookie(drive_index)
+        cloud_drive_enabled = not is_drive_115(drive_index)
+        cookie = "" if cloud_drive_enabled else self._get_cookie(drive_index)
 
         video_exts = _parse_exts(task_config.get("video_exts_str", DEFAULT_VIDEO_EXTS))
         audio_exts = _parse_exts(task_config.get("audio_exts_str", DEFAULT_AUDIO_EXTS))
@@ -3059,6 +3350,25 @@ class StrmService:
         logger.info(f"[STRM] 全量同步开始: {task_name} | {remote_path} -> {local_path} | STRM覆盖模式: {overwrite_mode}")
 
         start_time = perf_counter()
+
+        if cloud_drive_enabled:
+            return self._run_full_sync_cloud(
+                task_config,
+                run_id,
+                task_name=task_name,
+                drive_index=drive_index,
+                remote_path=remote_path,
+                local_path=local_path,
+                url_base=url_base,
+                video_exts=video_exts,
+                audio_exts=audio_exts,
+                image_exts=image_exts,
+                data_exts=data_exts,
+                download_aux=download_aux,
+                min_video_size_mb=min_video_size_mb,
+                overwrite_mode=overwrite_mode,
+                start_time=start_time,
+            )
 
         def _notify_task(status: str, detail: str = "", stats: Optional[dict] = None, elapsed_seconds: Optional[float] = None):
             try:

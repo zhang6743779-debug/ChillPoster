@@ -541,6 +541,9 @@ createApp({
 
         const {
             config302,
+            driveProviderOptions,
+            is115Drive,
+            isCloudDriveReadOnly,
             hasPrimary115Cookie,
             needs115Setup,
             standardTopologyEnabled,
@@ -553,6 +556,7 @@ createApp({
             add302Emby,
             remove302Emby,
             test115Cookie,
+            testCloudDrive,
             close115QrLogin,
             create115QrCode,
             open115QrLogin,
@@ -944,7 +948,7 @@ createApp({
             format115UploadSize,
             get115UploadStageLabel,
             get115UploadMethodLabel,
-        } = useDrive115Maintenance({ showToast, showConfirm });
+        } = useDrive115Maintenance({ showToast, showConfirm, config302, isCloudDriveReadOnly });
 
         const directUploadImg = ref('');
 
@@ -1099,11 +1103,11 @@ createApp({
                 'docker_manager': 'Docker 管理',
                 'media_subscribe': '发现推荐', 'missing_episode_stats': '缺集统计', 'resource_transfer': '资源转存',
                 'media_organize': '一条龙菜单', 'organize_history': '整理记录', 'media_organize_rules': '二级分类规则',
-                'drive115_cleanup': '115 定时清空',
-                'drive115_upload': '115 秒传/上传',
+                'drive115_cleanup': '云盘定时清空',
+                'drive115_upload': '云盘上传监听',
                 'organize_monitor_dirs': '整理监控目录',
                 'forward_aiying': 'Forward模块',
-                'config_115': '115 配置', 'config_wechat': '微信配置',
+                'config_115': '云盘配置', 'config_wechat': '微信配置',
                 'telegram_monitor': 'Telegram 监听',
                 'config_telegram': '电报配置',
                 'config_moviepilot': 'MoviePilot 配置', 'config_proxy': '代理配置',
@@ -2028,9 +2032,9 @@ createApp({
             directUploadImg, handleDirectUpload, applyDirectUpload,
 
             // [新增] 302 配置
-            config302, save302Config, saveEmbyConfig, toggle302Switch, importEmbyInfo, add302Drive, remove302Drive,
+            config302, driveProviderOptions, is115Drive, isCloudDriveReadOnly, save302Config, saveEmbyConfig, toggle302Switch, importEmbyInfo, add302Drive, remove302Drive,
             add302Emby, remove302Emby,
-            test115Cookie, manualCleanup115,
+            test115Cookie, testCloudDrive, manualCleanup115,
             playbackTopology, fetchPlaybackTopology, formatTopologyUpdatedAt,
             qrcode115State, manual115CookieState, open115QrLogin, close115QrLogin, create115QrCode,
             open115CkTool, copy115FetchedCookie, openToolboxItem,

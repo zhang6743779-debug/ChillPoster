@@ -369,12 +369,18 @@ def _build_strm_items_on_organize(result: dict, media_type: str, config_data: di
         season_dir = result.get("season_dir", "")
         remote_file_path = f"{target_name}{cat}/{target_folder}/{season_dir}/{renamed_file}"
 
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     items = [{
         "name": renamed_file,
         "path": remote_file_path,
         "pickcode": pickcode,
         "size": int(result.get("size", 0) or 0),
-        "id": int(result.get("id", 0) or 0),
+        "id": _safe_int(result.get("id", 0) or 0),
         "sha1": str(result.get("sha1", "") or ""),
         "is_dir": False,
     }]
@@ -390,7 +396,7 @@ def _build_strm_items_on_organize(result: dict, media_type: str, config_data: di
             "path": f"{remote_dir}/{sub_name}",
             "pickcode": sub_pickcode,
             "size": int(sub.get("size", 0) or 0),
-            "id": int(sub.get("id", 0) or 0),
+            "id": _safe_int(sub.get("id", 0) or 0),
             "sha1": str(sub.get("sha1", "") or ""),
             "is_dir": False,
         })
